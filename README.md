@@ -1,5 +1,8 @@
 # safekeep
 
+[![PyPI](https://img.shields.io/pypi/v/safekeep)](https://pypi.org/project/safekeep/)
+[![Python](https://img.shields.io/pypi/pyversions/safekeep)](https://pypi.org/project/safekeep/)
+
 **Selective always-on backups for macOS**: watches source folders with
 [fswatch](https://github.com/emcrisostomo/fswatch) and copies only the files you
 chose to their destinations — an **allow-list** model that **never deletes**
