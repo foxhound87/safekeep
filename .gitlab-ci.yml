@@ -79,3 +79,45 @@ publish:
     - python3 -m twine check dist/*
     # no credentials passed: twine performs the OIDC exchange itself
     - python3 -m twine upload dist/*
+
+# Dry-run upload to TestPyPI — dormant until the pending publisher on
+# test.pypi.org exists (see .vault/PUBLISHING.md). Same shape as `publish`, the
+# only real difference is the OIDC audience:
+#
+# - twine discovers the audience itself: it GETs https://test.pypi.org/_/oidc/audience
+#   and gets back {"audience": "testpypi"} (https://docs.pypi.org/trusted-publishers/using-a-publisher/
+#   states it explicitly: "Using audience=pypi is only correct for PyPI. For TestPyPI,
+#   the correct audience is testpypi.").
+# - it then asks the `id` library for that credential; on GitLab CI/CD `id` reads the
+#   environment variable built from the audience as <AUD>_ID_TOKEN, i.e. TESTPYPI_ID_TOKEN —
+#   which is exactly the id_token name declared below (source: di/id, id/_internal/oidc/ambient.py,
+#   detect_gitlab()).
+# - the exchange happens at https://test.pypi.org/_/oidc/mint-token, then the short-lived
+#   API token is used for the upload; no stored secret anywhere.
+# - `environment: release` matches the pending publisher the user has to create on
+#   test.pypi.org (Settings → Publishing), same 5 fields as production.
+#
+# Never runs by itself: `when: manual`. The publisher on test.pypi.org does not exist
+# yet, so this job is expected to fail with `token not valid for this workflow` until
+# that one-time setup is done — that is the signal to register it, not a CI bug.
+publish-test:
+  stage: deploy
+  image: python:3.12-slim
+  needs: [test]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+      when: manual
+  environment:
+    name: release
+    url: https://test.pypi.org/project/safekeep/
+  id_tokens:
+    TESTPYPI_ID_TOKEN:
+      # TestPyPI expects audience "testpypi" ("pypi" on production PyPI)
+      aud: testpypi
+  script:
+    - python3 --version
+    - python3 -m pip install -U build twine
+    - python3 -m build
+    - python3 -m twine check dist/*
+    # no credentials passed: twine performs the OIDC exchange against test.pypi.org
+    - python3 -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*
