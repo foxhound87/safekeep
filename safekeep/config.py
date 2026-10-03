@@ -1,10 +1,11 @@
 """Config globale `~/.safekeep` e file `.sync` di progetto (SPEC.md §3 e §4).
 
 Le destinazioni vivono SOLO nel config globale: un `.sync` contiene solo
-regole (`name:`, `defaults:`, `include:`/`exclude:`) — una riga `dest:` o
-chiave ignota in un `.sync` è una riga invalida: con `log_level: info`
-genera solo un warning e viene saltata, con `log_level: debug` è fatale
-(SPEC.md §5). Il config globale è invece sempre fail-fast.
+regole — le chiavi `name:`/`defaults:`/`include:`/`exclude:` e le righe nude
+stile gitignore (una riga nuda = `include:`, `!riga` = `exclude:`, SPEC.md §4.2).
+Una riga a forma di chiave non nota (`dest:`, `-dest:`, …) resta invalida: con
+`log_level: info` genera solo un warning e viene saltata, con `log_level: debug`
+è fatale (SPEC.md §4.2). Il config globale è invece sempre fail-fast.
 """
 import logging
 import os
@@ -37,12 +38,25 @@ class SyncConfig:
 
 _SYNC_KEY = re.compile(r'(name|defaults|include|exclude)\s*:\s*(.*)')
 _CONF_KEY = re.compile(r'([A-Za-z_]+)\s*:\s*(.*)')
+# Riga a forma di chiave (`dest:`, `-dest:`, `foo:`): NON è una riga nuda.
+_KEY_SHAPE = re.compile(r'[A-Za-z_-][A-Za-z0-9_-]*\s*:')
+
+
+def bare_rule(line):
+    """Riga nuda stile gitignore → regola (SPEC.md §4.2): `pattern` include,
+    `!pattern` exclude. Attenzione: è l'**inverso di gitignore** — qui la riga
+    elenca i file da COPIARE. None se il pattern è vuoto."""
+    neg = line.startswith('!')
+    pat = line[1:].strip() if neg else line
+    if not pat:
+        return None
+    return parse_rule(f'{"exclude" if neg else "include"}: {pat}')
 
 
 def parse_sync(text, *, log_level='info', origin='<.sync>'):
     """Parse di un file `.sync` → SyncConfig. Nessuna dest: le destinazioni
-    vivono solo in `~/.safekeep`, quindi `dest:`/`-dest:` sono righe invalide
-    come le righe nude (SPEC.md §4.2)."""
+    vivono solo in `~/.safekeep`, quindi `dest:`/`-dest:` restano righe invalide
+    (SPEC.md §4.2)."""
     cfg = SyncConfig()
 
     def invalid(lineno, detail):
@@ -57,7 +71,15 @@ def parse_sync(text, *, log_level='info', origin='<.sync>'):
             continue
         m = _SYNC_KEY.match(line)
         if not m:
-            invalid(lineno, f'riga non valida: {raw.strip()}')
+            if _KEY_SHAPE.match(line):
+                # chiave ignota / dest: → riga invalida (SPEC.md §4.2)
+                invalid(lineno, f'riga non valida: {raw.strip()}')
+                continue
+            rule = bare_rule(line)          # riga nuda stile gitignore
+            if rule is None:
+                invalid(lineno, 'pattern vuoto')
+                continue
+            cfg.rules.append(rule)          # stessa lista, stesso ordine
             continue
         key, val = m.group(1), m.group(2).strip()
         if key in ('include', 'exclude', 'defaults'):

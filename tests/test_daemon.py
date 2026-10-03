@@ -6,7 +6,8 @@ import tempfile
 import time
 import unittest
 
-from safekeep.config import parse_config
+from safekeep.config import dest_path, parse_config
+from safekeep.copier import reconcile_project
 from safekeep.daemon import (
     FLOOD_LIMIT,
     RELOAD_SYNC,
@@ -297,6 +298,80 @@ class WalkDirTest(TmpTestCase):
         self.assertTrue(os.path.exists(os.path.join(dest, 'proj/docs/note.md')))
         self.assertFalse(os.path.exists(os.path.join(dest, 'docs/note.md')))
         self.assertFalse(os.path.exists(os.path.join(dest, 'proj/docs/raw.txt')))
+
+    def test_dir_symlink_non_inclusa_non_e_copiata(self):
+        # stessa foglia di reconcile_project: senza include la dir-symlink
+        # non va copiata (regressione: creava lo scheletro di cartelle in dest)
+        src = self.path('src2')
+        proj = os.path.join(src, 'proj')
+        dest = self.path('dst2')
+        os.makedirs(dest)
+        write(os.path.join(proj, '.sync'), 'include: *.md\n')
+        write(os.path.join(proj, 'docs/note.md'), 'n')
+        os.makedirs(os.path.join(proj, 'build'))
+        os.symlink(os.path.join(proj, 'docs'),
+                   os.path.join(proj, 'build/docslink'))
+        cfg_path = write(self.path('safekeep2.cfg'), f'source: {src}\ndest: {dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        project = load_project(proj, daemon.cfg)
+        daemon.walk_dir(proj, project)
+        self.assertTrue(os.path.exists(os.path.join(dest, 'proj/docs/note.md')))
+        self.assertFalse(os.path.lexists(os.path.join(dest, 'proj/build/docslink')))
+
+
+class RigheNudeRegressionTest(TmpTestCase):
+    """REGRESSIONE: `.sync` con righe nude stile gitignore (la configurazione
+    reale dell'utente). Prima del fix tutte e quattro le righe venivano scartate
+    → allow-list vuota → la dest si riempiva comunque dello scheletro delle
+    cartelle figlie di ogni dir-symlink dell'albero (niente file richiesti)."""
+
+    SYNC_TEXT = '.env\n.env.*\n.vault\n*.md\n'
+
+    def setUp(self):
+        super().setUp()
+        self.src = self.path('src')
+        self.proj = os.path.join(self.src, 'projects')
+        self.dest = self.path('dst')
+        os.makedirs(self.dest)
+        write(os.path.join(self.proj, '.sync'), self.SYNC_TEXT)
+        write(os.path.join(self.proj, '.env'), 'S=1')
+        write(os.path.join(self.proj, '.env.local'), 'S=2')
+        write(os.path.join(self.proj, '.vault/note.txt'), 'vault')
+        write(os.path.join(self.proj, 'alpha/README.md'), '# a')
+        write(os.path.join(self.proj, 'beta/src/main.py'), 'print(1)')
+        write(os.path.join(self.proj, 'beta/src/data.json'), '{}')
+        os.makedirs(os.path.join(self.proj, 'beta/build/x'))
+        os.symlink(os.path.join(self.proj, 'beta/src'),
+                   os.path.join(self.proj, 'beta/build/srclink'))
+        cfg = parse_config(f'dest: {self.dest}\n')
+        self.project = load_project(self.proj, cfg)
+        self.assertIsNotNone(self.project)
+        self.cfg = cfg
+
+    def plan(self):
+        stats = {}
+        reconcile_project(self.project.root, self.dest, self.project.matcher,
+                          self.cfg.layout, dest_path, stats=stats,
+                          dry_run=True, dest_base=self.project.source_root)
+        return sorted(os.path.relpath(s, self.project.root)
+                      for s, _ in stats['pianificati'])
+
+    def test_pianifica_solo_i_file_richiesti_e_zero_codice(self):
+        self.assertEqual(self.plan(),
+                         ['.env', '.env.local', '.sync',
+                          '.vault/note.txt', 'alpha/README.md'])
+
+    def test_copia_reale_niente_codice_ne_scheletro_build(self):
+        reconcile_project(self.project.root, self.dest, self.project.matcher,
+                          self.cfg.layout, dest_path,
+                          dest_base=self.project.source_root)
+        copied = sorted(os.path.relpath(os.path.join(dp, f), self.dest)
+                        for dp, _, fs in os.walk(self.dest) for f in fs)
+        self.assertEqual(copied,
+                         ['.env', '.env.local', '.sync',
+                          '.vault/note.txt', 'alpha/README.md'])
+        self.assertFalse(os.path.lexists(os.path.join(self.dest, 'beta/build/srclink')))
 
 
 class DestLayoutTest(TmpTestCase):

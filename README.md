@@ -89,12 +89,20 @@ startup. `dest:` stays mandatory in both modes.
 ```bash
 name: myapp
 
-# allow-list semantics: without these includes NOT A SINGLE file would be copied
-include: /.env
-include: /.env.*
-include: .vault/
-include: *.md
+# allow-list semantics: without these lines NOT A SINGLE file would be copied
+.env
+.env.*
+.vault/
+*.md
+!secrets/old.env      # ! = exclude
 ```
+
+Rules can be written as bare gitignore-style lines — **the inverse of gitignore**:
+a line lists what to **copy**, not what to ignore (`*.md` includes markdown here,
+excludes it in a `.gitignore`), and a leading `!` turns it into an `exclude:`.
+Bare lines share the same ordered list as the explicit `include:`/`exclude:`
+keys, so last-match-wins works the same way (see
+[`examples/sync.example`](examples/sync.example)).
 
 See what would be copied, without copying anything:
 

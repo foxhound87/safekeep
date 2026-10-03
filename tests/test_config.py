@@ -26,9 +26,14 @@ class SyncParseTest(unittest.TestCase):
             cfg = parse_sync(read_example('sync.example'), origin='sync.example')
         self.assertEqual(cfg.name, 'myapp')
         self.assertEqual([r.pattern for r in cfg.defaults], ['*.log', '.env.local'])
-        self.assertEqual(len(cfg.rules), 11)
-        self.assertEqual(cfg.rules[0].pattern, '/.env')
-        self.assertTrue(cfg.rules[0].include)
+        # le righe nude (forma principale) finiscono nella stessa lista delle chiavi
+        self.assertEqual([r.pattern for r in cfg.rules],
+                         ['.env', '.env.*', '.vault/', '*.md', 'docs/**',
+                          'docs/vendor/CHANGELOG.md', 'node_modules/', '.git/',
+                          'node_modules/LICENSE-key.txt', '*.swp', '*.tmp'])
+        self.assertEqual([r.include for r in cfg.rules],
+                         [True, True, True, True, True, False,
+                          False, False, True, False, False])
         self.assertEqual(cfg.rules[10].pattern, '*.tmp')
         self.assertFalse(cfg.rules[10].include)
 
@@ -47,19 +52,55 @@ class SyncParseTest(unittest.TestCase):
             parse_sync("name: x\ndest: /d1\n", log_level='debug', origin='p.sync')
         self.assertIn('p.sync:2', str(cm.exception))
 
-    def test_riga_nuda_info_warning_e_skip(self):
-        text = "name: x\nriga invalida qui\nexclude: *.log\n"
+    def test_chiave_sconosciuta_info_warning_e_skip(self):
+        # a forma di chiave ⇒ mai una riga nuda: warning + skip (SPEC.md §4.2)
+        text = "name: x\nunknown: y\nexclude: *.log\n"
         with self.assertLogs(LOGGER, 'WARNING') as cm:
             cfg = parse_sync(text, log_level='info', origin='p.sync')
         self.assertIn('p.sync:2', cm.output[0])
         self.assertEqual(cfg.name, 'x')
         self.assertEqual([r.pattern for r in cfg.rules], ['*.log'])
 
-    def test_riga_nuda_debug_fatale(self):
-        text = "name: x\nriga invalida qui\n"
+    def test_chiave_sconosciuta_debug_fatale(self):
+        text = "name: x\nunknown: y\n"
         with self.assertRaises(ConfigError) as cm:
             parse_sync(text, log_level='debug', origin='p.sync')
         self.assertIn('p.sync:2', str(cm.exception))
+
+    def test_riga_nuda_diventa_include(self):
+        cfg = parse_sync("docs\n*.md\n")
+        self.assertTrue(all(r.include for r in cfg.rules))
+        self.assertEqual([r.pattern for r in cfg.rules], ['docs', '*.md'])
+
+    def test_riga_nuda_con_bang_diventa_exclude(self):
+        cfg = parse_sync("*.md\n!docs/vendor/*.md\n")
+        self.assertTrue(cfg.rules[0].include)
+        self.assertFalse(cfg.rules[1].include)
+        self.assertEqual(cfg.rules[1].pattern, 'docs/vendor/*.md')
+
+    def test_righe_nude_nello_stesso_ordine_delle_chiavi(self):
+        # lista unica, last-match-wins: il ! sotto include: lo batte
+        cfg = parse_sync("include: *.md\nsecret.txt\n!secret.txt\n")
+        self.assertEqual([r.pattern for r in cfg.rules],
+                         ['*.md', 'secret.txt', 'secret.txt'])
+        self.assertEqual([r.include for r in cfg.rules], [True, True, False])
+
+    def test_riga_nuda_vuota_o_solo_bang_invalida(self):
+        with self.assertLogs(LOGGER, 'WARNING') as cm:
+            cfg = parse_sync("!\nok.md\n", log_level='info', origin='p.sync')
+        self.assertIn('p.sync:1', cm.output[0])
+        self.assertEqual([r.pattern for r in cfg.rules], ['ok.md'])
+
+    def test_righe_nude_del_config_utente_reale(self):
+        # REGRESSIONE: il .sync reale dell'utente (righe nude gitignore-style)
+        # veniva scartato per intero → allow-list vuota → la copia partiva
+        # comunque sui symlink, non sui file richiesti (SPEC.md §4.2/§5)
+        text = ".env\n.env.*\n.vault\n*.md\n"
+        with self.assertNoLogs(LOGGER, 'WARNING'):
+            cfg = parse_sync(text, origin='/Users/cla/projects/.sync')
+        self.assertEqual([r.pattern for r in cfg.rules],
+                         ['.env', '.env.*', '.vault', '*.md'])
+        self.assertTrue(all(r.include for r in cfg.rules))
 
     def test_defaults_e_ordine_libero_delle_chiavi(self):
         text = ("exclude: *.tmp\n"

@@ -174,9 +174,28 @@ class ReconcileTest(CopierTestCase):
     def test_symlink_ricreati_come_symlink(self):
         os.symlink('a.txt', os.path.join(self.src_root, 'alias.txt'))     # file link
         os.symlink('docs', os.path.join(self.src_root, 'docslink'))       # dir link
-        self.assertEqual(reconcile_project(**self.kwargs), 5)             # 3 file + 2 link
+        # 3 file + il file-link: `alias.txt` matcha `include: *.txt`
+        self.assertEqual(reconcile_project(**self.kwargs), 4)
         self.assertEqual(os.readlink(os.path.join(self.dst_root, 'alias.txt')), 'a.txt')
-        self.assertEqual(os.readlink(os.path.join(self.dst_root, 'docslink')), 'docs')
+
+    def test_dir_symlink_non_inclusa_non_e_copiata(self):
+        # REGRESSIONE (copia-eccessiva): la dir-symlink è una FOGLIA, va
+        # valutata come file. Con `evaluate(r, True)` il default allow-list
+        # "nessun match → True" la copiava e creava l'intero scheletro di
+        # cartelle figlie nella dest, ignorando ogni include.
+        os.symlink('docs', os.path.join(self.src_root, 'buildlink'))
+        self.assertEqual(reconcile_project(**self.kwargs), 3)
+        self.assertFalse(os.path.lexists(os.path.join(self.dst_root, 'buildlink')))
+
+    def test_dir_symlink_inclusa_viene_copiata_come_link(self):
+        matcher = Matcher(BUILTIN_RULES,
+                          parse_rules(['include: *.md', 'include: docslink']))
+        os.symlink('docs', os.path.join(self.src_root, 'docslink'))
+        self.assertEqual(reconcile_project(source_root=self.src_root,
+                                           dest_root=self.dst_root,
+                                           matcher=matcher, layout='relative',
+                                           dest_path_fn=dest_path), 2)
+        self.assertTrue(os.path.islink(os.path.join(self.dst_root, 'docslink')))
 
     def test_dest_dentro_src_bloccata_a_monte(self):
         # il validate a monte impedisce il loop: reconcile non ricece mai questo caso

@@ -159,8 +159,11 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
             full = os.path.join(dirpath, name)
             r = base + name
             if os.path.islink(full):
-                # dir symlink: nessun descend, ricreata come symlink (SPEC.md §7.3)
-                if matcher.evaluate(r, True):
+                # dir symlink: nessun descend, ricreata come symlink (SPEC.md §7.3).
+                # È una FOGLIA: va valutata come file, altrimenti il default
+                # allow-list "nessun match → True" (che serve a far attraversare
+                # le directory) la copierebbe ignorando ogni include (§4.3).
+                if matcher.evaluate(r, False):
                     dst = dest_path_fn(dest_root, base_root,
                                        os.path.join(prefix, r), layout)
                     if dry_run or copy_one(full, dst):

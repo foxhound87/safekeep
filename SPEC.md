@@ -171,11 +171,30 @@ Esempio commentato completo: [`examples/safekeep.example`](examples/safekeep.exa
 | `name: <nome>` | nome leggibile del progetto (usato nei log e in `status`) |
 | `defaults: <regola>` | regole di default per questo progetto (priorità sopra quelle globali, sotto le regole del file) |
 
+**Righe nude stile gitignore.** Una riga che non è vuota, non è commento e non ha la forma di
+una chiave è una **regola `include:`**; una riga che inizia con `!` è una **regola `exclude:`**
+(il `!` va tolto dal pattern):
+
+```
+.env            #  ≡  include: .env
+*.md            #  ≡  include: *.md
+!docs/vendor/   #  ≡  exclude: docs/vendor/
+```
+
+Le righe nude entrano nella **stessa lista ordinata** di `include:`/`exclude:` esplicite
+(un solo elenco, last-match-wins in base alla posizione nel file).
+
+> ⚠️ **È l'inverso di gitignore**: qui la riga elenca i file da **COPIARE**, non quelli da
+> ignorare. In un `.gitignore` scriveresti `*.md` per *escludere* i markdown, qui `*.md`
+> li *include*. Il `!` vale in entrambi, ma con il segno opposto: in `.gitignore` `!x`
+> re-include, qui `!x` esclude.
+
 **Nessuna chiave di destinazione.** Un `.sync` contiene solo regole: `dest:` e `-dest:` non
-esistono più (le destinazioni vivono esclusivamente in `~/.safekeep`, §3) e una riga del
-genere è una **riga invalida** con lo stesso trattamento delle righe nude: warning + skip con
-`log_level: info`, `ConfigError` con `log_level: debug`. Vale lo stesso per ogni chiave
-sconosciuta.
+esistono più (le destinazioni vivono esclusivamente in `~/.safekeep`, §3). Una riga **a forma
+di chiave** (`^[A-Za-z_-][A-Za-z0-9_-]*\s*:`) che non è una chiave nota è una **riga invalida**:
+warning + skip con `log_level: info`, `ConfigError` con `log_level: debug`. Vale lo stesso per
+ogni chiave ignota. La forma di chiave ha la precedenza sulla forma nuda, quindi `dest: /x`
+resta invalida e non viene interpretata come pattern.
 
 Le chiavi di sezione devono stare **prima** delle regole `include:`/`exclude:`; il parser le
 accetta comunque in qualunque ordine, ma per leggibilità si raccomanda l'ordine
@@ -183,11 +202,13 @@ accetta comunque in qualunque ordine, ma per leggibilità si raccomanda l'ordine
 
 ### 4.3 Regole `include:` / `exclude:` e last-match-wins
 
-Ogni riga che non è chiave di sezione è una regola:
+Ogni riga che non è chiave di sezione è una regola, nella forma esplicita o nuda (§4.2):
 
 ```
 include: <pattern>
 exclude: <pattern>
+<pattern>            # forma nuda ≡ include:
+!<pattern>           # forma nuda ≡ exclude:
 ```
 
 **Semantica last-match-wins** (l'ultima regola che matcha il path decide):
@@ -200,7 +221,10 @@ exclude: <pattern>
 4. Se nessuna regola matcha (in nessun layer), vale il **default allow-list**:
    **file → NON copiato**, **directory → attraversata**. Le directory si potano SOLO su
    un'esclusione esplicita: altrimenti una dir non matchata (es. `src` con `include: *.md`)
-   bloccherebbe l'accesso a `src/README.md`.
+   bloccherebbe l'accesso a `src/README.md`. Una **directory symlink** è però una **foglia**
+   (il walk non la scende, §7.3): viene valutata come un *file*, quindi di default **non**
+   copiata — altrimenti il default "attraversa" la copierebbe senza che alcun `include:`
+   la citi.
 
 Conseguenze importanti:
 
@@ -268,10 +292,19 @@ __pycache__/
 *.swp
 ```
 
-Compatibilità: `include:`/`exclude:` sono le chiavi esplicite; una riga nuda (senza chiave) in
-`.sync` è ammessa come shorthand di `include:` se inizia con `!`? **No** — in 0.1.0 le righe nude
-senza chiave sono **errore di parse** (fail-fast, warning + ignora la riga con `log_level: info`,
-errore fatale con `log_level: debug`). Teniamo la sintassi esplicita: meno magia.
+Compatibilità: `include:`/`exclude:` sono le chiavi esplicite, ma **non sono obbligatorie** —
+in 0.2.0 una riga nuda (senza chiave) in `.sync` è ammessa come shorthand:
+
+| Forma | Equivale a |
+|---|---|
+| `pattern` | `include: pattern` |
+| `!pattern` | `exclude: pattern` |
+| `chiave: valore` (`dest:`, `-dest:`, chiave ignota) | riga invalida (§4.2) |
+
+Le righe nude condividono la lista e l'ordine delle chiavi esplicite (last-match-wins): un
+`!riga` scritto sotto un `include:` lo batte, come nel caso esplicito. Attenzione alla
+**semantica opposta rispetto a gitignore**: la riga elenca i file da copiare, non quelli da
+ignorare (§4.2).
 
 ---
 
@@ -381,7 +414,9 @@ di I/O (ENOSPC/EIO/EBUSY/ENODEV) **si propaga** al caller: è lui a decidere il 
   stesso target, relativo conservato): non si segue, non si copia il contenuto puntato.
 - Symlink rotto sorgente: ricreato identico (anche se rotto) + log debug.
 - Directory symlink: trattata come symlink (nessun recursive), coerente con "mai cancellare"
-  e con l'assenza di follow.
+  e con l'assenza di follow. Essendo una **foglia** viene valutata dal matcher come un file
+  (§4.3): senza un `include:` che la citi **non viene copiata** — la valutarla come directory
+  la coprirebbe sempre e creerebbe nella dest lo scheletro di tutte le cartelle figlie.
 
 ### 7.4 Altri casi di robustezza
 

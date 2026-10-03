@@ -4,40 +4,48 @@
 # Regola d'oro: una directory CON .sync è seguita; una directory SENZA .sync NON lo è.
 # Il file .sync stesso viene sempre copiato nel backup (serve per ricostruire la config).
 #
-# Sintassi:
-#   - righe che iniziano con #  → commento
-#   - righe vuote               → ignorate
-#   - chiavi di sezione         → name:, defaults:
-#   - regole                    → include: <pattern> / exclude: <pattern>
+# SINTASSI
+#   - righe che iniziano con #   → commento
+#   - righe vuote                → ignorate
+#   - riga nuda                  → INCLUDE: elenca cosa COPIARE   ← forma principale
+#   - riga che inizia con !      → EXCLUDE (il ! va tolto dal pattern)
+#   - chiavi di sezione          → name:, defaults:
+#   - regole esplicite           → include: <pattern> / exclude: <pattern>
+#
+# ⚠️  È L'INVERSO DI GITIGNORE.
+#     In un .gitignore la riga elenca i file da IGNORARE; qui elenca i file da
+#     COPIARE. `*.md` in .gitignore esclude i markdown, qui `*.md` li include.
+#     Il `!` vale in entrambi i file ma con il segno opposto: in .gitignore
+#     `!x` re-incluso, qui `!x` ESCLUDE.
 #
 # Semantica last-match-wins (l'ultima regola che matcha decide):
 #   defaults builtin < regole globali (config) < defaults: del progetto < regole di QUESTO file
 #   → un exclude: BATTE un include: se sta SOTTO di esso
 #   → un include: più in basso RI-INCLUDE ciò che un exclude: aveva escluso
+#   Le righe nude condividono lista e ordine con le chiavi esplicite.
 #
 # SEMANTICA ALLOW-LIST (SPEC.md §4.3): un file che non matcha NESSUNA regola
-# NON viene copiato. Ogni file da copiare deve matchare almeno un include: (come
-# in questo esempio: .env, .vault, *.md, docs/**). Le directory non matchate
-# vengono invece attraversate (si pota solo un'esclusione esplicita), così
-# `include: *.md` raggiunge anche `docs/note.md`.
+# NON viene copiato. Ogni file da copiare deve matchare almeno una riga di include.
+# Le directory non matchate vengono invece attraversate (si pota solo un'esclusione
+# esplicita), così `*.md` raggiunge anche `docs/note.md`.
 #   .sync senza nessun include → NON copia alcun file (solo .sync stesso).
 #   Per l'effetto opposto, "copia tutto tranne X":
-#     include: **            # come PRIMA regola (o nei defaults:)
-#     exclude: .git/          # ATTENZIONE: include: ** sta SOPRA i builtin,
-#     exclude: node_modules/  # quindi va rielencato ogni esclusione builtin
-#     exclude: .venv/         # (.git/ node_modules/ .venv/ __pycache__/
-#     exclude: __pycache__/   #  .DS_Store *.swp) più le tue X
-#     exclude: *.tmp
+#     **              # come PRIMA riga (o nei defaults:)
+#     !.git/
+#     !node_modules/  # ATTENZIONE: ** sta SOPRA i builtin, quindi va
+#     !.venv/         # rielencata ogni esclusione builtin (.git/ node_modules/
+#     !__pycache__/   #  .venv/ __pycache__/ .DS_Store *.swp) più le tue X
+#     !*.tmp
 
 # Nome leggibile del progetto: appare nei log e nel comando `status`.
 name: myapp
 
 # Nessuna destinazione in questo file: le dest vivono SOLO in ~/.safekeep.
-# Una riga `dest:` / `-dest:` qui sarebbe una riga invalida (warning con
-# log_level: info, errore fatale con log_level: debug).
+# Una riga `dest:` / `-dest:` ha la forma di una chiave → riga invalida
+# (warning con log_level: info, errore fatale con log_level: debug).
 
 # Regole di default di questo progetto: priorità sopra quelle globali,
-# sotto le regole include:/exclude: scritte qui sotto.
+# sotto le regole scritte qui sotto.
 defaults: exclude: *.log
 defaults: exclude: .env.local
 
@@ -46,33 +54,27 @@ defaults: exclude: .env.local
 # matcha il path vince.
 # ------------------------------------------------------------------
 
-# Include i file .env e le varianti (.env, .env.example, .env.production…)
-# Stanno alla radice del progetto (ancoraggio con / iniziale).
-include: /.env
-include: /.env.*
+# --- Forma nuda (scelta principale): una riga = "copia questo" ---
 
-# Include la vault personale (directory con tutto il contenuto).
-include: .vault/
+.env                # ≡ include: .env      (e .env.example, .env.production…)
+.env.*              # ≡ include: .env.*
+.vault/             # ≡ include: .vault/   (la directory e tutto il suo contenuto)
+*.md                # ≡ include: *.md      (README.md, docs/README.md, a/b/c.md)
+docs/**             # ≡ include: docs/**   (tutto sotto docs, anche i non-markdown)
 
-# Include tutti i file markdown a qualsiasi profondità
-# (`*.md` senza `/` interna → basename ovunque: README.md, docs/README.md, a/b/c.md).
-include: *.md
-include: docs/**   # tutto sotto docs (anche i non-markdown)
+# `!` = exclude. Questo .md non va copiato: la riga STA SOTTO `*.md`,
+# quindi vince (ultimo match) e lo esclude.
+!docs/vendor/CHANGELOG.md
 
-# …MA il changelog di terze parti non va copiato: `*.md` lo matcha già a qualsiasi
-# profondità, e questo exclude STA SOTTO gli include sopra, quindi BATTE
-# (ultimo match vince: esempio classico della regola last-match-wins).
-exclude: docs/vendor/CHANGELOG.md
+# --- Forma esplicita, del tutto equivalente ---
 
 # Esclude le dipendenze e la cartella git (anche i builtin lo fanno già,
-# ma qui è esplicito per rendere chiaro il funzionamento del pruning:
-# verdict "esclusa" su una directory = l'intero sottoalbero non viene visitato).
+# ma qui è esplicito: verdict "esclusa" su una directory = sottoalbero potato).
 exclude: node_modules/
 exclude: .git/
 
-# Ri-include un file specifico dentro una cartella altrimenti esclusa:
-# questo include STA SOTTO l'exclude qui sopra, quindi Vince per
-# node_modules/LICENSE-key.txt (ultimo match).
+# Ri-includo un file dentro una cartella altrimenti esclusa: questo include
+# STA SOTTO l'exclude qui sopra, quindi vince per node_modules/LICENSE-key.txt.
 include: node_modules/LICENSE-key.txt
 
 # I file temporanei degli editor non servono a nessuno.
@@ -86,3 +88,4 @@ exclude: *.tmp
 #   docs/**       → docs stessa e tutto il suo contenuto
 #   foo/          → solo directory foo (e tutto il suo contenuto, grazie al pruning)
 #   \#file        → il file letteralmente chiamato #file
+#   !foo          → esclude (forma nuda); uguale a `exclude: foo`

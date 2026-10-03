@@ -544,7 +544,9 @@ class Daemon:
             for name in sorted(dirnames):
                 full = os.path.join(dirpath2, name)
                 if os.path.islink(full):
-                    if project.matcher.evaluate(base + name, True):
+                    # foglia (come in classify): valutata come FILE, non come
+                    # directory — vedi reconcile_project
+                    if project.matcher.evaluate(base + name, False):
                         self._copy(full, project, is_link_dir=True)
                     continue
                 if project.matcher.evaluate(base + name, True):
