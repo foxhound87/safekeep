@@ -1,0 +1,55 @@
+# safekeep — configurazione globale (l'UNICO posto dove vivono le destinazioni)
+#
+# Percorso: ~/.safekeep   (file singolo nella home, niente ~/.config/…)
+# Sintassi: chiave: valore (una per riga), commenti con #, righe vuote ignorate.
+# Le chiavi `source` e `dest` sono RIPETIBILI: più righe = più valori.
+# I .sync dei progetti NON possono aggiungere o rimuovere destinazioni (SPEC.md §11).
+
+# --- Sorgenti (radici da osservare) ---------------------------------
+# Ogni riga = una radice monitorata da fswatch.
+# SOLO le directory che contengono un file `.sync` vengono seguite:
+# una directory senza .sync NON è seguita (nessuna copia).
+# (Decisione aperta: qui vanno i percorsi reali dei progetti — vedere SPEC.md §14.)
+source: /Users/REPLACEME/Code
+source: /Users/REPLACEME/Projects
+
+# --- Destinazioni globali -------------------------------------------
+# Usate per TUTTI i progetti: le destinazioni vivono SOLO qui.
+# Su volumi esterni/non montati la dest passa in stato `pending`:
+# backoff sullo stat del mountpoint, poi sync al remount.
+dest: /Volumes/BackupUSB/backup
+dest: /Volumes/NAS/generale
+
+# --- Layout dei path in destinazione --------------------------------
+# relative (default): <dest>/<path relativo alla radice sorgente>
+#     sorgente ~/Code/myapp/docs/a.md  →  /Volumes/BackupUSB/backup/myapp/docs/a.md
+# full:              <dest>/<path assoluto sorgente>
+#     sorgente ~/Code/myapp/docs/a.md  →  /Volumes/BackupUSB/backup/Users/REPLACEME/Code/myapp/docs/a.md
+layout: relative
+
+# --- Defaults -------------------------------------------------------
+# Regole di default a BASSA priorità (sotto le regole globali, sotto i .sync).
+# Sintassi identica a include:/exclude: dei .sync, una regola per riga.
+# Quelle builtin (sempre presenti, le sovrascrivi solo se vuoi):
+#   .git/  node_modules/  .venv/  __pycache__/  .DS_Store  *.swp
+#
+# Con la semantica allow-list (SPEC.md §4.3) dei soli exclude qui sotto non
+# bastano: un progetto il cui .sync non ha nessun include non copia alcun file.
+# Per un default "copia tutto tranne X" serve un include che copra tutto:
+#   defaults: include: **
+# (ma include: ** sta SOPRA i builtin e ri-includerebbe .git/, node_modules/, …:
+#  rielencali poi come `defaults: exclude:` o negli .sync — vedere
+#  examples/sync.example, blocco "copia tutto tranne X")
+defaults: exclude: *.log
+defaults: exclude: .cache/
+
+# --- Sicurezza ------------------------------------------------------
+# Non esiste nessuna chiave di sicurezza legata alle destinazioni: i file
+# `.sync` dei progetti contengono SOLO regole include/exclude — una riga
+# `dest:` (o `-dest:`) in un `.sync` è una riga invalida e viene rifiutata.
+# Chiave ignota in QUESTO file → errore fatale con numero di riga (fail-fast).
+
+# --- Logging --------------------------------------------------------
+# debug | info | warn | error  (default: info)
+# debug rende fatale anche una riga invalida nei file di config.
+log_level: info

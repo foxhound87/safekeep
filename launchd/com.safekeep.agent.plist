@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE safekeep — NON installare così com'è.
+
+  Placeholders resi da install.sh (mai path assoluti nel repo, così il repo
+  può essere spostato/rinominato senza rompere l'agent):
+
+    __REPO__    radice del repo safekeep (la cartella che contiene bin/ e launchd/)
+    __PYTHON__  interprete Python ≥ 3.9 (default: /opt/homebrew/bin/python3)
+    __HOME__    $HOME dell'utente — launchd NON espande `~` negli StandardOut/ErrorPath
+
+  Installazione manuale: sostituisci i tre placeholder e copia in
+  ~/Library/LaunchAgents/com.safekeep.agent.plist
+  Validazione: plutil -lint <file>
+  Caricamento:  launchctl bootstrap gui/$(id -u) <file>
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.safekeep.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__REPO__/bin/safekeep.py</string>
+        <string>run</string>
+    </array>
+
+    <!-- Avvio al boot -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Tenerlo vivo: se muore, launchd lo riavvia -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Niente restart-loop frenetico: al massimo un riavvio ogni 30s -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Background: non compete con l'interfaccia (CPU) -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- ...né con altre operazioni di I/O -->
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- Opzionale: (ri)avvio quando un volume viene montato (SPEC.md §8.3) -->
+    <!-- <key>StartOnMount</key><true/> -->
+
+    <!-- Log del daemon: ~/.local/state/safekeep/ (SPEC.md §8) -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/.local/state/safekeep/out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.local/state/safekeep/err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- fswatch (Homebrew) deve trovarsi nel PATH del processo -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
