@@ -1,0 +1,40 @@
+# Pipeline minima per safekeep: un solo job che esegue la suite di test
+# con l'immagine ufficiale Python sul runner Linux standard di GitLab.
+#
+# NOTA di portabilità (macOS → Linux), letta dai test prima di scriverla:
+#
+# - fswatch NON viene installato nel job, ed è così che i test vogliono girare.
+#   `tests/test_cli.py` è scritta per tollerarne l'assenza: l'assert sull'exit
+#   code di `doctor` c'è solo dentro `if shutil.which('fswatch')`, e il loop
+#   del daemon usa un fswatch finto (script Python), non il binario reale.
+#   Installare fswatch romperebbe invece la suite: su Linux `fswatch -M` non
+#   riporta `fsevents_monitor` (è il monitor FSEvents di macOS), `doctor` esce
+#   con 1 e `test_doctor_config_assente_warning_con_hint_non_fatale` pretende
+#   exit 0 → 1 fallimento. Verificato eseguendo la suite in python:3.12-slim
+#   con e senza un fswatch finto.
+#   (Se un giorno servisse fswatch nel runner, prima va addolcito il check
+#   `fsevents_monitor` in `bin/safekeep.py`, non basta apt-get install.)
+#   Per inciso il package `fswatch` ESISTE nei repo Debian/Ubuntu, quindi
+#   l'errore non sarebbe "package not found" ma proprio il test che fallisce.
+#
+# - nessun path `/Users/...` reale: i test usano `tempfile.mkdtemp()` e
+#   `$HOME` finto, quindi non toccano la home dell'utente del runner.
+# - `plutil` non esiste su Linux: `doctor` lo rileva e salta il lint del plist
+#   (riga ✔ "plutil assente"), nessun errore.
+# - `/var` vs `/private/var` (symlink di macOS): i test passano da
+#   `os.path.realpath`, e sotto il container Linux non ci sono symlink
+#   macOS-specifici da risolvere.
+# - gli esempi in `examples/` contengono path `/Users/REPLACEME/...` ma sono
+#   solo stringhe di parse, non vengono toccati dal filesystem.
+#
+# Rischio residuo (non verificabile qui, runner locale non disponibile):
+# l'unico job invoca subprocess della CLI con `sys.executable`, quindi serve
+# solo che l'immagine abbia python3 — `python:3.12-slim` lo garantisce.
+# Se il job fallisce con un check `doctor` mancante, controlla prima la
+# presenza dei marker di `tests/test_cli.py` nel suo stdout.
+
+test:
+  image: python:3.12-slim
+  script:
+    - python3 --version
+    - python3 -m unittest discover -s tests
