@@ -1,120 +1,128 @@
 # safekeep
 
-**Backup selettivo always-on per macOS**: osserva le cartelle sorgente con
-[fswatch](https://github.com/emcrisostomo/fswatch) e copia solo i file scelti
-nelle destinazioni — semantica **allow-list** e **mai cancella** nulla nel backup
-(file rimosso o rinominato alla sorgente resta nel backup).
+**Selective always-on backups for macOS**: watches source folders with
+[fswatch](https://github.com/emcrisostomo/fswatch) and copies only the files you
+chose to their destinations — an **allow-list** model that **never deletes**
+anything in the backup (a file removed or renamed at the source stays in the
+backup).
 
-## Caratteristiche
+## Features
 
-- **Allow-list**: un file viene copiato solo se matcha almeno un `include:`;
-  nessun match → non copiato. Le directory non matchate vengono attraversate,
-  quelle con verdict *esclusa* vengono potate con tutto il sottoalbero.
-- **Copia atomica, mai un file parziale**: tmp nella stessa cartella della
-  destinazione + `fsync` + `os.replace` → un lettore vede il file vecchio o
-  quello nuovo, mai una copia a metà.
-- **Reconcile** (riconciliazione) all'avvio, ogni 24h, al remount e con
-  `sync-once`: copia ciò che differisce per size/mtime, idempotente — eventi
-  persi, crash e riavvi non contano, al prossimo reconcile tutto converge.
-- **Volumi non montati**: destinazione assente → stato `pending` con backoff
-  esponenziale (1s → 60s cap), poi reconcile al ritorno del mount.
-- **launchd al boot**: agent con `RunAtLoad` + `KeepAlive` tiene vivo il
-  processo e lo riavvia se muore.
-- **`.sync` solo regole, destinazioni solo in `~/.safekeep`**: un `.sync` non
-  può aggiungere né rimuovere destinazioni (una riga `dest:` è riga invalida),
-  quindi un repo clonato da terzi non può far scrivere il backup altrove.
+- **Allow-list**: a file is copied only if it matches at least one `include:`;
+  no match → not copied. Unmatched directories are still traversed, while
+  directories with an *excluded* verdict are pruned together with their subtree.
+- **Atomic copy, never a half-written file**: the temp file lives in the
+  destination's own directory, followed by `fsync` + `os.replace` → a reader
+  sees either the old file or the new one, never a partial copy.
+- **Reconcile** at startup, every 24h, on remount, and on `sync-once`: copies
+  whatever differs by size/mtime, idempotently — lost events, crashes and reboots
+  don't matter, the next reconcile brings everything back in sync.
+- **Unmounted volumes**: missing destination → `pending` state with exponential
+  backoff (1s → 60s cap), then a reconcile once the mount is back.
+- **launchd at boot**: an agent with `RunAtLoad` + `KeepAlive` keeps the process
+  alive and restarts it if it dies.
+- **`.sync` carries rules only, destinations live only in `~/.safekeep`**: a
+  `.sync` file can neither add nor remove destinations (a `dest:` line is an
+  invalid line), so a repo cloned from a third party can't redirect the backup
+  somewhere else.
 
-## Installazione
+## Installation
 
 ```bash
 git clone git@gitlab.com:foxhound87/safekeep.git
 cd safekeep
 
-# unica dipendenza esterna
+# only external dependency
 brew install fswatch
 
-# copia l'esempio in ~/.safekeep, render del plist, controlli preflight
+# copies the example into ~/.safekeep, renders the plist, runs preflight checks
 bash install.sh
 ```
 
-Poi:
+Then:
 
-1. Compila `~/.safekeep` con le tue `source:` e `dest:` reali (sono placeholder
-   nell'esempio — vedi [`examples/safekeep.example`](examples/safekeep.example));
-2. metti un file `.sync` nella root di ogni progetto da seguire (vedi
-   [`examples/sync.example`](examples/sync.example)); una directory **senza**
-   `.sync` non è seguita;
-3. carica l'agent:
+1. Fill `~/.safekeep` with your real `source:` and `dest:` entries (the example
+   ships with placeholders — see [`examples/safekeep.example`](examples/safekeep.example));
+2. drop a `.sync` file in the root of every project you want to follow (see
+   [`examples/sync.example`](examples/sync.example)); a directory **without** a
+   `.sync` is not tracked;
+3. load the agent:
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
-# scarica con: launchctl bootout gui/$(id -u)/com.safekeep.agent
+# unload with: launchctl bootout gui/$(id -u)/com.safekeep.agent
 ```
 
-Dopo aver concesso i permessi TCC/FDA (Full Disk Access) all'interprete Python
-e a `fswatch`, lancia `python3 bin/safekeep.py doctor` per la diagnostica.
+Once you have granted TCC/FDA (Full Disk Access) permissions to the Python
+interpreter and to `fswatch`, run `python3 bin/safekeep.py doctor` for
+diagnostics.
 
-## Esempio rapido
+## Quick example
 
-`~/.safekeep` (unico posto dove vivono le destinazioni):
+`~/.safekeep` (the only place where destinations live):
 
 ```bash
-# radici osservate: SOLO le directory con un .sync vengono seguite
+# observed roots: only directories containing a .sync are followed
 source: ~/Code
 source: ~/Projects
 
-# destinazioni di TUTTI i progetti
+# destination for ALL projects
 dest: ~/Backup/safekeep
 
-# relative (default): <dest>/<path relativo alla radice source>
+# relative (default): <dest>/<path relative to the source root>
 #   ~/Code/myapp/docs/a.md → ~/Backup/safekeep/myapp/docs/a.md
 layout: relative
 
 log_level: info
 ```
 
-`~/Code/myapp/.sync` (solo regole, nessuna destinazione):
+`~/Code/myapp/.sync` (rules only, no destinations):
 
 ```bash
 name: myapp
 
-# semantica allow-list: senza questi include non verrebbe copiato NESSUN file
+# allow-list semantics: without these includes NOT A SINGLE file would be copied
 include: /.env
 include: /.env.*
 include: .vault/
 include: *.md
 ```
 
-Verifica cosa verrebbe copiato, senza copiare:
+See what would be copied, without copying anything:
 
 ```bash
 python3 bin/safekeep.py sync-once --dry-run
 ```
 
-## Comandi CLI
+## CLI commands
 
 ```
-bin/safekeep.py <comando> [--config PATH] [-v]
+bin/safekeep.py <command> [--config PATH] [-v]
 ```
 
-| Comando | Cosa fa |
+| Command | What it does |
 |---|---|
-| `run` | daemon: reconcile iniziale, watch fswatch, dispatch degli eventi, timer 24h |
-| `sync-once [--dry-run] [--project PATH]` | un singolo passaggio: walk sorgente e copia di ciò che differisce (con `--dry-run` stampa solo cosa copierebbe) |
-| `status` | sola lettura: config, source, progetti scoperti con N regole, stato delle destinazioni |
-| `doctor` | diagnostica: config, fswatch, TCC, plist launchd — exit ≠ 0 se un check fatale fallisce |
+| `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
+| `sync-once [--dry-run] [--project PATH]` | a single pass: walks the source and copies whatever differs (`--dry-run` only prints what it would copy) |
+| `status` | read-only: config, sources, discovered projects with N rules, destination states |
+| `doctor` | diagnostics: config, fswatch, TCC, launchd plist — exits non-zero if a fatal check fails |
 
-## Test
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
-Suite stdlib (`unittest`), nessuna dipendenza: 94 test su matcher, config,
-copia atomica, volumi, daemon e CLI. Non serve `fswatch` per i test.
+Stdlib (`unittest`) suite, zero dependencies: 94 tests covering the matcher,
+config, atomic copy, volumes, daemon and CLI. `fswatch` is not needed to run the
+tests.
 
-## Documentazione
+## Documentation
 
-Tutto il dettaglio (formato dei config, semantica dei pattern, flusso evento →
-sync, copia atomica, launchd, edge case) è in [`SPEC.md`](SPEC.md);
-esempi commentati in [`examples/`](examples/).
+Everything in detail (config format, pattern semantics, event → sync flow,
+atomic copy, launchd, edge cases) lives in [`SPEC.md`](SPEC.md); commented
+examples in [`examples/`](examples/).
+
+## License
+
+MIT — see [LICENSE](LICENSE)
