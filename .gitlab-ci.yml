@@ -13,7 +13,7 @@
 #   exit 0 → 1 fallimento. Verificato eseguendo la suite in python:3.12-slim
 #   con e senza un fswatch finto.
 #   (Se un giorno servisse fswatch nel runner, prima va addolcito il check
-#   `fsevents_monitor` in `bin/safekeep.py`, non basta apt-get install.)
+#   `fsevents_monitor` in `safekeep/cli.py`, non basta apt-get install.)
 #   Per inciso il package `fswatch` ESISTE nei repo Debian/Ubuntu, quindi
 #   l'errore non sarebbe "package not found" ma proprio il test che fallisce.
 #
@@ -38,3 +38,44 @@ test:
   script:
     - python3 --version
     - python3 -m unittest discover -s tests
+
+# Publish to PyPI with Trusted Publishing (OIDC = OpenID Connect, no stored
+# credentials). Doc followed:
+#   https://docs.pypi.org/trusted-publishers/using-a-publisher/ (GitLab CI/CD tab)
+#   https://docs.gitlab.com/ci/secrets/id_token_authentication/
+#
+# How the upload authenticates, per those docs (verified against twine 7.0.0):
+#
+# - `id_tokens` asks GitLab for an OIDC ID token named `PYPI_ID_TOKEN` with
+#   audience `pypi` — PyPI's expected audience (from
+#   https://pypi.org/_/oidc/audience). The name is not arbitrary: twine asks
+#   the `id` library for audience "pypi", which on GitLab reads the
+#   `PYPI_ID_TOKEN` environment variable (<AUD>_ID_TOKEN convention).
+# - `twine upload` is called with NO username/password: twine exchanges the
+#   OIDC token at https://pypi.org/_/oidc/mint-token for a short-lived (15 min)
+#   API token and uploads with it. No CI/CD variable or secret is needed.
+# - `environment: release` must match the pending publisher registered on
+#   pypi.org (Settings → Publishing); a mismatch makes PyPI reject the token
+#   ("token not valid for this workflow"). The pending publisher also creates
+#   the `safekeep` project on the first successful upload.
+# - runs only on version tags, after the test job passes.
+publish:
+  stage: deploy
+  image: python:3.12-slim
+  needs: [test]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+  environment:
+    name: release
+    url: https://pypi.org/project/safekeep/
+  id_tokens:
+    PYPI_ID_TOKEN:
+      # PyPI expects audience "pypi" ("testpypi" for TestPyPI)
+      aud: pypi
+  script:
+    - python3 --version
+    - python3 -m pip install -U build twine
+    - python3 -m build
+    - python3 -m twine check dist/*
+    # no credentials passed: twine performs the OIDC exchange itself
+    - python3 -m twine upload dist/*
