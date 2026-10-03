@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from safekeep.config import (
     ConfigError,
@@ -114,6 +115,43 @@ class SyncParseTest(unittest.TestCase):
         cfg = parse_sync("# solo commenti\n\n   \nname: z\n")
         self.assertEqual(cfg.name, 'z')
         self.assertEqual(cfg.rules, [])
+        self.assertEqual(cfg.discarded, 0)
+
+
+class SyncInvalidoTest(unittest.TestCase):
+    """REGRESSIONE CR-03: pattern da `.sync` non attendibile (regex invalida,
+    NUL) → warning + riga scartata con `log_level: info`, `ConfigError` con
+    `debug` (SPEC.md §4.2) — mai un traceback da `re.error`."""
+
+    def test_regex_invalida_warning_e_riga_scartata(self):
+        text = 'include: [z-a]*\ninclude: *.md\n'
+        with self.assertLogs(LOGGER, 'WARNING') as cm:
+            cfg = parse_sync(text, log_level='info', origin='p.sync')
+        self.assertIn('p.sync:1', cm.output[0])
+        self.assertIn('regex non valido', cm.output[0])
+        self.assertEqual([r.pattern for r in cfg.rules], ['*.md'])
+        self.assertEqual(cfg.discarded, 1)            # conteggio per doctor
+
+    def test_riga_nuda_regex_invalida_warning_e_skip(self):
+        # le righe nude passano da `bare_rule`: devono gestirsi allo stesso modo
+        with self.assertLogs(LOGGER, 'WARNING') as cm:
+            cfg = parse_sync('[z-a]*\n*.md\n', log_level='info', origin='p.sync')
+        self.assertIn('p.sync:1', cm.output[0])
+        self.assertEqual([r.pattern for r in cfg.rules], ['*.md'])
+        self.assertEqual(cfg.discarded, 1)
+
+    def test_regex_invalida_debug_fatale(self):
+        with self.assertRaises(ConfigError) as cm:
+            parse_sync('include: [z-a]*\n', log_level='debug', origin='p.sync')
+        self.assertIn('p.sync:1', str(cm.exception))
+
+    def test_pattern_nul_warning_e_skip(self):
+        with self.assertLogs(LOGGER, 'WARNING') as cm:
+            cfg = parse_sync('include: a\0b\n*.md\n', log_level='info', origin='p.sync')
+        self.assertIn('p.sync:1', cm.output[0])
+        self.assertIn('NUL', cm.output[0])
+        self.assertEqual([r.pattern for r in cfg.rules], ['*.md'])
+        self.assertEqual(cfg.discarded, 1)
 
 
 class GlobalConfigTest(unittest.TestCase):
@@ -267,6 +305,36 @@ class DiscoveryTest(unittest.TestCase):
             # NON diventa progetto (niente `.git`, `.venv`, `.local`, …)
             self._touch(tmp, '.hidden/proj/.sync')
             self.assertEqual(discover_projects([tmp], auto=True), [])
+
+    def test_auto_non_apre_le_cartelle_tcc_protette(self):
+        # Reale: senza Full Disk Access l'`opendir()` su `~/Desktop` resta
+        # sospeso nel kernel per un agent launchd → la dir va potata PRIMA che
+        # os.walk la apra, non dopo (l'assert è su "aperta", non su "scoperta":
+        # anche il pruning di prima generazione la lasciava scoperta).
+        # `Applications` è potato per lo stesso motivo strutturale: rami
+        # enormi (QtWebEngine/IBKR) senza alcun senso come progetto.
+        tcc = {'Desktop', 'Documents', 'Downloads', 'Movies', 'Music',
+               'Pictures', 'Public', 'Applications'}
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(tmp, 'Desktop/proj/.sync')          # TCC: non scoperto
+            self._touch(tmp, 'Documents/proj/.sync')        # idem
+            self._touch(tmp, 'a/Documents/proj/.sync')      # match sul basename
+            self._touch(tmp, 'Applications/proj/.sync')     # potato: non scoperto
+            self._touch(tmp, 'projects/proj/.sync')         # normale: scoperto
+            aperte = []
+            real_walk = os.walk
+
+            def spy(top):
+                for entry in real_walk(top):
+                    aperte.append(entry[0])
+                    yield entry
+
+            with mock.patch('os.walk', spy):
+                found = discover_projects([tmp], auto=True)
+            self.assertEqual(found, [os.path.join(tmp, 'projects', 'proj')])
+            self.assertEqual([p for p in aperte
+                              if os.path.basename(p) in tcc], [],
+                             'una cartella TCC non deve essere nemmeno aperta')
 
     def test_auto_sotto_progetto_annidato(self):
         with tempfile.TemporaryDirectory() as tmp:

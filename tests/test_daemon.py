@@ -1,3 +1,4 @@
+import errno
 import os
 import re
 import shutil
@@ -5,8 +6,10 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
-from safekeep.config import dest_path, parse_config
+from safekeep import copier
+from safekeep.config import ConfigError, dest_path, parse_config
 from safekeep.copier import reconcile_project
 from safekeep.daemon import (
     FLOOD_LIMIT,
@@ -18,6 +21,7 @@ from safekeep.daemon import (
     Project,
     classify,
     dedup,
+    dedup_flush,
     dedup_roots,
     exclude_regexes,
     find_project,
@@ -97,6 +101,161 @@ class DedupTest(unittest.TestCase):
     def test_default_usa_il_tempo_reale(self):
         state = {}
         self.assertEqual(dedup(state, ['/x']), ['/x'])   # now=None → monotonic
+
+
+class DedupScadenzaTest(unittest.TestCase):
+    """CR-04: una soppressione NON perde l'evento — emissione di coda (trailing edge)."""
+
+    def test_scadenza_fissa_non_estesa_dagli_arrivi_successivi(self):
+        state = {}
+        self.assertEqual(dedup(state, ['/a'], now=100.0), ['/a'])   # emesso
+        self.assertEqual(dedup(state, ['/a'], now=101.0), [])       # scadenza 102.0
+        self.assertEqual(dedup(state, ['/a'], now=101.5), [])       # non la estende
+        self.assertEqual(dedup_flush(state, now=101.9), [])         # non ancora scaduta
+        self.assertEqual(dedup_flush(state, now=102.0), ['/a'])     # emesso comunque
+        self.assertEqual(state['/a'], (101.5, None))
+        self.assertEqual(dedup_flush(state, now=103.0), [])         # una sola volta
+
+
+class DedupLoopTest(TmpTestCase):
+    """CR-04: la scadenza del dedup entra nel timeout del `select` → senza nuovi
+    eventi l'ultima modifica viene comunque copiata (niente thread)."""
+
+    def test_step_sveglia_alla_scadenza_e_copia(self):
+        src = self.path('src')
+        proj = os.path.join(src, 'proj')
+        dest = self.path('dst')
+        os.makedirs(dest)                       # dest esiste ⇒ dest_state == ok
+        write(os.path.join(proj, '.sync'), 'include: *.md\n')
+        target = write(os.path.join(proj, 'note.md'), 'v1')
+        cfg_path = write(self.path('safekeep.cfg'), f'source: {src}\ndest: {dest}\n')
+        clock = [100.0]
+        daemon = Daemon(cfg_path,
+                        argv=[sys.executable, '-c', 'import time; time.sleep(60)'],
+                        clock=lambda: clock[0])
+        daemon.load_config()
+        daemon.load_projects()
+        self.assertTrue(daemon.spawn())
+        self.addCleanup(daemon.close_proc)
+        dst = os.path.join(dest, 'proj/note.md')
+
+        daemon.run_batch([target])                       # t=100 → copia v1
+        with open(dst) as fh:
+            self.assertEqual(fh.read(), 'v1')
+
+        write(target, 'v2-piu-lungo')                    # size diversa → needs_copy
+        clock[0] = 101.0
+        daemon.run_batch([target])                       # soppresso (finestra 2s)
+        with open(dst) as fh:
+            self.assertEqual(fh.read(), 'v1', 'evento soppresso ma non perso')
+        self.assertEqual(daemon.next_deadline(), 1.0,    # scadenza 102.0 nel select
+                         daemon.seen)
+
+        clock[0] = 102.0
+        daemon.step(0.05)                                # sveglia → flush → copia
+        with open(dst) as fh:
+            self.assertEqual(fh.read(), 'v2-piu-lungo')
+
+
+class SyncMalevoloTest(TmpTestCase):
+    """CR-03: `.sync` non attendibile → warning + skip (info) o ConfigError (debug)."""
+
+    def cfg(self, level='info'):
+        return parse_config(f'dest: {self.path("dst")}\nlog_level: {level}\n')
+
+    def project_dir(self):
+        proj = self.path('src', 'proj')
+        os.makedirs(proj, exist_ok=True)
+        return proj
+
+    def test_regex_invalida_info_salta_la_riga_senza_crash(self):
+        proj = self.project_dir()
+        write(os.path.join(proj, '.sync'), '[z-a]*\n')
+        project = load_project(proj, self.cfg())         # nessuna eccezione
+        self.assertIsNotNone(project)
+        self.assertNotIn('[z-a]*', [r.pattern for r in project.matcher.rules])
+
+    def test_regex_invalida_debug_e_fatale(self):
+        proj = self.project_dir()
+        write(os.path.join(proj, '.sync'), '[z-a]*\n')
+        with self.assertRaises(ConfigError):
+            load_project(proj, self.cfg('debug'))
+
+    def test_sync_non_utf8_info_salta_il_progetto(self):
+        proj = self.project_dir()
+        with open(os.path.join(proj, '.sync'), 'wb') as fh:
+            fh.write(b'\xff\xfe include: *.md\n')
+        self.assertIsNone(load_project(proj, self.cfg()))
+        with self.assertRaises(ConfigError):
+            load_project(proj, self.cfg('debug'))
+
+    def test_nul_nel_pattern_warning_e_riga_saltata(self):
+        proj = self.project_dir()
+        write(os.path.join(proj, '.sync'), 'include: a\x00b\n')
+        project = load_project(proj, self.cfg())
+        self.assertIsNotNone(project)
+        self.assertNotIn('a\x00b', [r.pattern for r in project.matcher.rules])
+        with self.assertRaises(ConfigError):
+            load_project(proj, self.cfg('debug'))
+
+
+class ReconcilePendingTest(TmpTestCase):
+    """CR-05: errore di mount → dest in pending (§8.3); altri errori → solo log."""
+
+    def build(self):
+        src = self.path('src')
+        proj = os.path.join(src, 'proj')
+        dest = self.path('dst')
+        os.makedirs(dest)
+        write(os.path.join(proj, '.sync'), 'include: *.md\n')
+        write(os.path.join(proj, 'a.md'), 'x')
+        cfg_path = write(self.path('safekeep.cfg'), f'source: {src}\ndest: {dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        return daemon, dest
+
+    def test_errore_di_mount_mette_la_dest_in_pending(self):
+        daemon, dest = self.build()
+
+        def boom(*args, **kwargs):
+            raise OSError(errno.ENOSPC, 'No space left on device')
+
+        with mock.patch.object(copier, 'copy_one', new=boom):
+            daemon.reconcile(daemon.projects[0])
+        self.assertIn(dest, daemon.pending)
+
+    def test_eacces_non_mette_la_dest_in_pending(self):
+        daemon, dest = self.build()
+
+        def boom(*args, **kwargs):
+            raise OSError(errno.EACCES, 'Permission denied')
+
+        with mock.patch.object(copier, 'copy_one', new=boom):
+            daemon.reconcile(daemon.projects[0])
+        self.assertNotIn(dest, daemon.pending,
+                         'un errore su un file non blocca la dest intera')
+        self.assertFalse(os.path.exists(os.path.join(dest, 'proj/a.md')))
+
+    def test_backoff_non_resetta_a_1s_dopo_un_nuovo_fallimento(self):
+        # REGRESSIONE (CR-05): mount ok ma copia fallita di nuovo → se il
+        # retry ripartisse da 1s il daemon looperebbe a 1Hz fino al prossimo errore
+        daemon, dest = self.build()
+        project = daemon.projects[0]
+        daemon.mark_pending(project, dest)
+        entry = daemon.pending[dest]
+        for _ in range(6):
+            next(entry['sched'])                # 1,2,4,8,16,32 già consumati
+        entry['next'] = daemon.clock()          # scaduto adesso
+
+        def boom(*args, **kwargs):
+            raise OSError(errno.ENODEV, 'No such device')
+
+        with mock.patch.object(copier, 'copy_one', new=boom):
+            daemon.check_timers()
+        retry = daemon.pending[dest]
+        self.assertGreater(retry['next'] - daemon.clock(), 1,
+                           'il backoff riprende da dove era, non da 1s')
 
 
 class FindProjectTest(unittest.TestCase):
@@ -547,7 +706,10 @@ class AutoDiscoveryTest(HomeTestCase):
         self.assertEqual(argv[argv.index('--') + 1:], [self.home])
         regexes = [argv[i + 1] for i, a in enumerate(argv) if a == '-e']
         for path in ('/u/Library/Notes/x', '/u/.Trash/x', '/u/.cache/x',
-                     '/u/.local/state/safekeep/safekeep.log'):
+                     '/u/.local/state/safekeep/safekeep.log',
+                     '/u/Desktop/a.md', '/u/Documents/a.md', '/u/Downloads/a.md',
+                     '/u/Movies/a.md', '/u/Music/a.md', '/u/Pictures/a.md',
+                     '/u/Public/a.md'):
             self.assertTrue(any(re.search(rx, path) for rx in regexes),
                             f'exclude mancante per {path}')
 

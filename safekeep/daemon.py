@@ -22,8 +22,9 @@ from .config import (
     parse_config,
     parse_sync,
     source_root_for,
+    validate_dests,
 )
-from .copier import copy_one, needs_copy, reconcile_project
+from .copier import MOUNT_ERRNOS, copy_one, needs_copy, prune_project, reconcile_project
 from .matcher import BUILTIN_RULES, Matcher, _glob, parse_rule
 from .volumes import backoff_schedule, dest_state, partition_dests
 
@@ -48,7 +49,9 @@ SYNC_RULES = [parse_rule('include: .sync')]
 
 # Modalità auto-discovery (SPEC.md §6): pre-filtro `-e` per la `$HOME` — non
 # osserviamo le directory rumorose né i nostri stessi log.
-HOME_EXCLUDES = ('Library', '.Trash', '.cache', '.local/state/safekeep')
+HOME_EXCLUDES = ('Library', '.Trash', '.cache', '.local/state/safekeep',
+                 'Desktop', 'Documents', 'Downloads', 'Movies', 'Music',
+                 'Pictures', 'Public')        # TCC: anche gli eventi arrivano filtrati
 HOME_EXCLUDE_REGEXES = ['(^|/)' + _glob(p) + r'(/|$)' for p in HOME_EXCLUDES]
 
 
@@ -82,14 +85,29 @@ class Project:
 
 
 def load_project(root, cfg):
-    """Progetto dalla sua directory con `.sync`; None se il `.sync` manca."""
+    """Progetto dalla sua directory con `.sync`; None se il `.sync` manca o è
+    illeggibile (un `.sync` è "file altrui": con `log_level: info` un file
+    non validi/saltabile avvisa e salta, con `debug` è fatale, CR-03)."""
     sync_path = os.path.join(root, '.sync')
     try:
-        with open(sync_path) as fh:
+        with open(sync_path, encoding='utf-8') as fh:
             text = fh.read()
     except OSError:
         return None
-    sync = parse_sync(text, log_level=cfg.log_level, origin=sync_path)
+    except UnicodeDecodeError as e:
+        if cfg.log_level == 'debug':
+            raise ConfigError(f'{sync_path}: .sync non UTF-8 valido: {e}') from None
+        log.warning('%s: .sync non UTF-8 valido, progetto saltato: %s', sync_path, e)
+        return None
+    try:
+        sync = parse_sync(text, log_level=cfg.log_level, origin=sync_path)
+    except ConfigError:
+        raise                             # log_level: debug → fatale (SPEC.md §4.2)
+    except ValueError as e:               # difesa: eccezione di parse non prevista
+        if cfg.log_level == 'debug':
+            raise ConfigError(f'{sync_path}: {e}') from None
+        log.warning('%s: progetto saltato: %s', sync_path, e)
+        return None
     layers = [SYNC_RULES, BUILTIN_RULES, cfg.defaults, sync.defaults, sync.rules]
     excludes = [r for layer in layers for r in layer if not r.include]
     name = sync.name or os.path.basename(os.path.normpath(root))
@@ -112,21 +130,47 @@ def parse_events(data, residual=b''):
 
 
 def dedup(state, paths, now=None, window=DEDUP_WINDOW):
-    """Finestra di dedup: `state` è un dict path → ultimo visto (aggiornato in
-    place). Ritorna i path non visti negli ultimi `window` secondi; l'ultima
-    occorrenza vince (estende la finestra) e le entry scadute vengono potate.
+    """Finestra di dedup: `state` è un dict path → (ultimo arrivo, scadenza)
+    aggiornato in place. Ritorna i path non visti negli ultimi `window` secondi.
+
+    Una soppressione NON perde l'evento (CR-04): la prima soppressione dopo un
+    emissione programma una scadenza fissa `emissione + window` che gli arrivi
+    successivi NON estendono — alla scadenza `dedup_flush` emette il path
+    comunque (trailing edge). Le entry scadute e senza scadenza pendente
+    vengono potate.
     """
     now = time.monotonic() if now is None else now
     out = []
     for path in paths:
-        last = state.get(path)
-        state[path] = now
+        entry = state.get(path)
+        last = entry[0] if entry else None
         if last is None or now - last >= window:
             out.append(path)
-    for path, seen in list(state.items()):
-        if now - seen >= window:
+            state[path] = (now, None)          # emesso all'arrivo: niente scadenza
+        else:
+            # soppresso: la scadenza è quella dell'emissione precedente (ferma)
+            deadline = entry[1] if entry[1] is not None else last + window
+            state[path] = (now, deadline)
+    for path, (last, deadline) in list(state.items()):
+        # con una scadenza pendente l'entry resta: l'emissione va ancora fatta
+        if now - last >= window and deadline is None:
             del state[path]
     return out
+
+
+def dedup_flush(state, now=None):
+    """Path con scadenza passata: vengono emessi comunque (CR-04).
+
+    Chiamato a ogni wake del loop: la scadenza entra nel `timeout` del `select`
+    (vedi `Daemon.next_deadline`), quindi senza nuovi batch l'ultima modifica di
+    un path viene comunque processata entro `window` secondi — niente thread.
+    """
+    now = time.monotonic() if now is None else now
+    due = [p for p, (_, deadline) in state.items()
+           if deadline is not None and now >= deadline]
+    for path in due:
+        state[path] = (state[path][0], None)   # emesso: niente nuova scadenza
+    return due
 
 
 def find_project(path, projects):
@@ -264,12 +308,24 @@ class Daemon:
 
     def load_config(self):
         try:
-            with open(self.config_path) as fh:
+            with open(self.config_path, encoding='utf-8') as fh:
                 text = fh.read()
         except OSError as e:
             raise ConfigError(f'{self.config_path}: {e.strerror or e}') from None
+        except UnicodeDecodeError as e:
+            # il config globale è comunque un file letto da disco: fallisce pulito (CR-03)
+            raise ConfigError(f'{self.config_path}: non è UTF-8 valido: {e}') from None
         self.cfg = parse_config(text, origin=self.config_path)
         return self.cfg
+
+    def validate_dests(self):
+        """CR-02: dest dentro la sorgente → ConfigError, subito (SPEC.md §11/§12).
+
+        Base = `source` se presenti, altrimenti `$HOME` (modalità
+        auto-discovery): così viene bloccata anche una dest dentro la `$HOME`,
+        dove finirebbero comunque le copie dei progetti scoperti lì.
+        """
+        validate_dests(self.cfg.sources or [os.path.expanduser('~')], self.cfg.dests)
 
     def discovery_roots(self):
         """`(roots, auto)`: modalità source → le `source` (deduplicate);
@@ -293,12 +349,14 @@ class Daemon:
         return total
 
     def reconcile(self, project):
-        """Walk + copie su ogni dest pronta (§10.1); dest assente → pending."""
+        """Walk + copie su ogni dest pronta (§10.1); dest assente o con errore
+        di mount → pending con backoff (§8.3, CR-05)."""
         ready, absent = partition_dests(self.cfg.dests)
         for dest in absent:
             self.mark_pending(project, dest)
-        stats, copied = {}, 0
+        copied = 0
         for dest in ready:
+            stats = {}
             try:
                 copied += reconcile_project(project.root, dest, project.matcher,
                                             self.cfg.layout, dest_path,
@@ -307,10 +365,17 @@ class Daemon:
             except OSError as e:
                 log.warning('reconcile %s → %s fallito: %s', project.name, dest, e)
                 self.mark_pending(project, dest)
+                continue
+            if stats.get('dest_pendente'):
+                # ENODEV/EBUSY/ENOSPC: questa dest va in pending, le altre
+                # proseguono (il detail è già stato loggato dal copier)
+                self.mark_pending(project, dest)
         return copied
 
-    def sync_once(self, dry_run=False, only=None):
-        """Passaggio singolo per la CLI: [(project, stats, dest_assenti)]."""
+    def sync_once(self, dry_run=False, only=None, prune=False):
+        """Passaggio singolo per la CLI: [(project, stats, dest_assenti)].
+        `prune=True` rimuove dalla dest i file non più inclusi con sorgente
+        ancora presente (`--prune`, SPEC.md §9)."""
         only_abs = os.path.realpath(os.path.expanduser(only)) if only else None
         rows = []
         for project in self.projects:
@@ -326,6 +391,10 @@ class Daemon:
                                       dest_base=project.source_root)
                 except OSError as e:
                     log.warning('reconcile %s → %s fallito: %s', project.name, dest, e)
+                if prune:
+                    stats['rimossi'] = stats.get('rimossi', 0) + prune_project(
+                        project.root, dest, project.matcher, self.cfg.layout,
+                        dest_path, dest_base=project.source_root, dry_run=dry_run)
             rows.append((project, stats, len(absent)))
         return rows
 
@@ -419,9 +488,12 @@ class Daemon:
     # --- loop ------------------------------------------------------------
 
     def next_deadline(self):
-        """Secondi fino alla scadenza più vicina (reconcile 24h, retry dest, respawn)."""
+        """Secondi fino alla scadenza più vicina (reconcile 24h, retry dest,
+        respawn, scadenza dedup — CR-04: è ciò che fa svegliare il `select`
+        per emettere un path soppresso)."""
         now = self.clock()
         deadlines = [self.next_reconcile] + [e['next'] for e in self.pending.values()]
+        deadlines += [d for _, d in self.seen.values() if d is not None]
         if self.proc is None:
             deadlines.append(self.spawn_at)
         return max(0.0, min(deadlines) - now)
@@ -439,18 +511,26 @@ class Daemon:
             self.reconcile_all()
         for dest in [d for d, e in self.pending.items() if now >= e['next']]:
             entry = self.pending[dest]
-            if dest_state(dest) == 'ok':
-                log.info('dest %s di nuovo montata: reconcile di %d progetto/i',
-                         dest, len(entry['projects']))
-                del self.pending[dest]
-                for project in entry['projects']:
-                    self.reconcile(project)
-            else:
+            if dest_state(dest) != 'ok':
                 entry['next'] = now + next(entry['sched'])
+                continue
+            log.info('dest %s di nuovo montata: reconcile di %d progetto/i',
+                     dest, len(entry['projects']))
+            del self.pending[dest]
+            for project in entry['projects']:
+                self.reconcile(project)
+            if dest in self.pending:
+                # il mount c'è ma la copia è fallita di nuovo (ENODEV/EBUSY/ENOSPC):
+                # il backoff riprende da dove era — niente retry-loop a 1Hz (CR-05)
+                failed = self.pending[dest]
+                failed['sched'] = entry['sched']
+                failed['next'] = self.clock() + next(entry['sched'])
 
     def step(self, timeout=None):
-        """Un passo del loop: timer/pending, respawn, select su fswatch, batch."""
+        """Un passo del loop: timer/pending, scadenze dedup, respawn, select
+        su fswatch, batch."""
         self.check_timers()
+        self.flush_dedup()               # CR-04: emissione "di coda" alla scadenza
         if self.proc is None:
             wait = self.next_deadline()         # include spawn_at + timer
             if wait > 0:
@@ -473,10 +553,20 @@ class Daemon:
         if eof:
             self.on_death()
 
+    def flush_dedup(self):
+        """Emissione alla scadenza del dedup (CR-04): i path soppressi con
+        `deadline` passata vengono processati anche senza nuovi batch."""
+        due = dedup_flush(self.seen, now=self.clock())
+        if due:
+            log.debug('%d path emessi alla scadenza della finestra di dedup', len(due))
+            self.dispatch(due)
+
     def run_batch(self, paths):
         paths = dedup(self.seen, paths, now=self.clock())
-        if not paths:
-            return
+        if paths:
+            self.dispatch(paths)
+
+    def dispatch(self, paths):
         reloads, plan = plan_batch(paths, self.projects)
         for path in reloads:
             self.reload(path)
@@ -514,7 +604,9 @@ class Daemon:
         log.info('nessun progetto seguito in %s (.sync rimosso o nuovo)', root)
 
     def _copy(self, src, project, is_link_dir=False):
-        """Copia su ogni dest pronta; dest assente o errore I/O → pending (§8.3)."""
+        """Copia su ogni dest pronta; dest assente o errore di mount → pending
+        (§8.3); altri errori I/O → solo log (l'evento non deve mettere la dest
+        in pending: al prossimo reconcile il file viene ritentato, CR-05)."""
         # rel rispetto alla radice `source` (non del progetto): il path dest
         # include il segmento del progetto, come in reconcile (SPEC.md §4.3)
         rel = os.path.relpath(normalize(src), project.source_root)
@@ -525,12 +617,16 @@ class Daemon:
             dst = dest_path(dest, project.source_root, rel, self.cfg.layout)
             try:
                 if is_link_dir:
-                    copy_one(src, dst)          # symlink: sempre ricreato come link
-                elif needs_copy(src, dst) and copy_one(src, dst):
+                    copy_one(src, dst, dest)    # symlink: sempre ricreato come link
+                elif needs_copy(src, dst) and copy_one(src, dst, dest):
                     log.debug('copiato %s → %s', src, dst)
             except OSError as e:
-                log.warning('copia fallita %s → %s: %s', src, dst, e)
-                self.mark_pending(project, dest)
+                if e.errno in MOUNT_ERRNOS:
+                    log.warning('errore di mount %s → %s: %s: dest in pending',
+                                src, dst, e)
+                    self.mark_pending(project, dest)
+                else:
+                    log.error('copia fallita %s → %s: %s', src, dst, e)
 
     def walk_dir(self, dirpath, project):
         """Mini-walk: i figli di una directory appena creata potrebbero non
@@ -566,14 +662,15 @@ class Daemon:
     def run(self, verbose=False):
         """Setup → reconcile iniziale → watch → dispatch (SPEC.md §6).
 
-        Exit 0 su SIGTERM/SIGINT pulito, 1 se la config è invalida o fswatch
-        muore 5 volte in 60s.
+        Exit 0 su SIGTERM/SIGINT pulito, 1 se la config è invalida, se una dest
+        è dentro la sorgente (CR-02) o se fswatch muore 5 volte in 60s.
         """
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         try:
             self.load_config()
             setup_logging('debug' if verbose else self.cfg.log_level)
+            self.validate_dests()         # CR-02: dest dentro source/$HOME → blocca
             roots, auto = self.discovery_roots()
             if auto:
                 log.info('modalità auto-discovery: scan di %s alla ricerca di .sync',

@@ -6,7 +6,7 @@ from unittest import mock
 
 from safekeep import copier
 from safekeep.config import ConfigError, dest_path, validate_dests
-from safekeep.copier import copy_one, needs_copy, reconcile_project
+from safekeep.copier import copy_one, needs_copy, prune_project, reconcile_project
 from safekeep.matcher import BUILTIN_RULES, Matcher, parse_rules
 
 LOGGER = 'safekeep'
@@ -202,6 +202,134 @@ class ReconcileTest(CopierTestCase):
         with self.assertRaises(ConfigError):
             validate_dests([self.src_root],
                            [os.path.join(self.src_root, 'backup')])
+
+
+class DestEscapeTest(CopierTestCase):
+    """CR-01: mai scrivere fuori dalla dest via componente-symlink (SPEC.md §7.2)."""
+
+    def test_dir_symlink_sorgente_diventata_dir_il_file_resta_nella_dest(self):
+        ext = os.path.join(self.tmp, 'external')
+        os.makedirs(ext)
+        dst_root = os.path.join(self.tmp, 'dst')
+        src_link = os.path.join(self.tmp, 'src/linkdir')
+        os.makedirs(os.path.dirname(src_link))
+        os.symlink(ext, src_link)
+        # prima passata: la dir-symlink viene ricreata come link (SPEC.md §7.3)
+        self.assertTrue(copy_one(src_link, os.path.join(dst_root, 'proj/linkdir'),
+                                 dst_root))
+        self.assertTrue(os.path.islink(os.path.join(dst_root, 'proj/linkdir')))
+        # la sorgente diventa una directory reale: il figlio NON deve finire in ext
+        os.unlink(src_link)
+        os.makedirs(src_link)
+        write(os.path.join(src_link, 'x.md'), 'contenuto')
+        self.assertTrue(copy_one(os.path.join(src_link, 'x.md'),
+                                 os.path.join(dst_root, 'proj/linkdir/x.md'),
+                                 dst_root))
+        dst_link = os.path.join(dst_root, 'proj/linkdir')
+        self.assertFalse(os.path.islink(dst_link),
+                         'il componente di dest viene ripristinato come dir reale')
+        self.assertEqual(read(os.path.join(dst_link, 'x.md')), 'contenuto')
+        self.assertEqual(os.listdir(ext), [], 'mai scritto fuori dest')
+
+    def test_dst_costruita_fuori_dest_bloccata_e_niente_scrittura(self):
+        src = self.paths('src/a.txt')[0]
+        write(src, 'x')
+        fuori = self.paths('fuori/a.txt')[0]
+        self.assertFalse(copy_one(src, fuori, self.paths('dst')[0]))
+        self.assertFalse(os.path.exists(fuori))
+        self.assertFalse(os.path.exists(os.path.dirname(fuori)),
+                         'niente makedirs fuori dalla dest')
+
+    def test_copia_normale_con_dest_root_invariata(self):
+        dst_root = self.paths('dst')[0]
+        src, dst = self.paths('src/a.txt', 'dst/deep/a.txt')
+        write(src, 'contenuto', mtime=1_000_000_000)
+        self.assertTrue(copy_one(src, dst, dst_root))
+        self.assertEqual(read(dst), 'contenuto')
+        self.assertEqual(int(os.stat(dst).st_mtime), 1_000_000_000)
+
+
+class ErroriPerFileTest(CopierTestCase):
+    """CR-05: un errore I/O resta confinato al proprio file (SPEC.md §10.1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.src_root = os.path.join(self.tmp, 'src')
+        self.dst_root = os.path.join(self.tmp, 'dst')
+        write(os.path.join(self.src_root, 'a.txt'), 'A')
+        write(os.path.join(self.src_root, 'sub/b.txt'), 'B')
+        write(os.path.join(self.src_root, 'docs/c.md'), 'C')
+        matcher = Matcher(BUILTIN_RULES,
+                          parse_rules(['include: *.txt', 'include: *.md']))
+        self.kwargs = dict(source_root=self.src_root, dest_root=self.dst_root,
+                           matcher=matcher, layout='relative', dest_path_fn=dest_path)
+
+    def test_errore_su_un_file_gli_altri_vengono_copiati(self):
+        real = copy_one
+
+        def boom(src, dst, dest_root=None):
+            if os.path.basename(src) == 'b.txt':
+                raise OSError(13, 'Permission denied')
+            return real(src, dst, dest_root)
+
+        stats = {}
+        with mock.patch.object(copier, 'copy_one', new=boom):
+            copied = reconcile_project(stats=stats, **self.kwargs)
+        self.assertEqual(copied, 2)
+        self.assertEqual(stats['errati'], 1)
+        self.assertNotIn('dest_pendente', stats)
+        self.assertTrue(os.path.exists(os.path.join(self.dst_root, 'a.txt')))
+        self.assertTrue(os.path.exists(os.path.join(self.dst_root, 'docs/c.md')))
+        self.assertFalse(os.path.exists(os.path.join(self.dst_root, 'sub/b.txt')))
+
+    def test_errore_di_mount_dest_in_pending_e_walk_fermato(self):
+        def boom(*args, **kwargs):
+            raise OSError(28, 'No space left on device')
+
+        stats = {}
+        with mock.patch.object(copier, 'copy_one', new=boom):
+            copied = reconcile_project(stats=stats, **self.kwargs)
+        self.assertEqual(copied, 0)
+        self.assertEqual(stats['errati'], 1)
+        self.assertTrue(stats['dest_pendente'],
+                        'ENOSPC → il caller mette la dest in pending (§8.3)')
+        self.assertFalse(os.path.exists(self.dst_root),
+                         'il walk si ferma: niente scritture a metà')
+
+
+class PruneTest(CopierTestCase):
+    """`sync-once --prune`: cancellazione solo certa e solo sotto il prefisso."""
+
+    def setUp(self):
+        super().setUp()
+        self.src_root = os.path.join(self.tmp, 'src')
+        self.proj = os.path.join(self.src_root, 'proj')
+        self.dst_root = os.path.join(self.tmp, 'dst')
+        write(os.path.join(self.proj, '.sync'), 'include: *.md\n')
+        write(os.path.join(self.proj, 'keep.md'), 'k')
+        write(os.path.join(self.proj, 'old.txt'), 'vecchio')
+        # dest popolata da una passata precedente con regole diverse + residui
+        write(os.path.join(self.dst_root, 'proj/keep.md'), 'k')
+        write(os.path.join(self.dst_root, 'proj/old.txt'), 'vecchio')
+        write(os.path.join(self.dst_root, 'proj/gone.md'), 'sorgente sparita')
+        write(os.path.join(self.dst_root, 'proj/.sync'), 'include: *.md\n')
+        write(os.path.join(self.dst_root, 'fuori.md'), 'fuori dal prefisso')
+        # `.sync` è sempre incluso (SYNC_RULES, SPEC.md §4.1): qui va esplicitato
+        matcher = Matcher(BUILTIN_RULES,
+                          parse_rules(['include: *.md', 'include: .sync']))
+        self.kwargs = dict(source_root=self.proj, dest_root=self.dst_root,
+                           matcher=matcher, layout='relative', dest_path_fn=dest_path,
+                           dest_base=self.src_root)
+
+    def test_prune_rimuove_solo_gli_esclusi_con_sorgente_presente(self):
+        self.assertEqual(prune_project(**self.kwargs), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.dst_root, 'proj/old.txt')))
+        for keep in ('proj/keep.md', 'proj/gone.md', 'proj/.sync', 'fuori.md'):
+            self.assertTrue(os.path.exists(os.path.join(self.dst_root, keep)), keep)
+
+    def test_dry_run_conta_senza_rimuovere(self):
+        self.assertEqual(prune_project(dry_run=True, **self.kwargs), 1)
+        self.assertTrue(os.path.exists(os.path.join(self.dst_root, 'proj/old.txt')))
 
 
 if __name__ == '__main__':

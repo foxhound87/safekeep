@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from safekeep.config import ConfigError, validate_dests
+from safekeep.config import ConfigError, discover_projects, parse_sync
 from safekeep.copier import TMP_INFIX
 from safekeep.daemon import Daemon, setup_logging
 from safekeep.volumes import dest_state
@@ -34,6 +34,9 @@ def build_parser():
                       help='solo questo progetto (path della root o name)')
     once.add_argument('--dry-run', action='store_true',
                       help='stampa cosa copierebbe, senza copiare')
+    once.add_argument('--prune', action='store_true',
+                      help='rimuove dalla dest i file il cui sorgente esiste ancora ma '
+                           'non è più incluso dal matcher (default: mai cancellare)')
     sub.add_parser('status', parents=[common],
                    help='config, progetti e stato delle dest — sola lettura')
     sub.add_parser('doctor', parents=[common],
@@ -45,8 +48,10 @@ def cmd_sync_once(args):
     daemon = Daemon(args.config)
     daemon.load_config()
     setup_logging('debug' if args.v else daemon.cfg.log_level)
+    daemon.validate_dests()               # CR-02: dest dentro source/$HOME → exit ≠ 0
     daemon.load_projects()
-    rows = daemon.sync_once(dry_run=args.dry_run, only=args.project)
+    rows = daemon.sync_once(dry_run=args.dry_run, only=args.project,
+                            prune=args.prune)
     if args.project and not rows:
         print(f'progetto non trovato: {args.project}', file=sys.stderr)
         return 1
@@ -57,8 +62,14 @@ def cmd_sync_once(args):
             for src, dst in stats.get('pianificati', []):
                 print(f'  {src} -> {dst}')
         verb = 'da copiare' if args.dry_run else 'copie'
-        print(f'{project.name}: {stats.get("copiati", 0)} {verb}, '
-              f'{stats.get("esclusi", 0)} esclusi, dest assenti: {absent}')
+        line = (f'{project.name}: {stats.get("copiati", 0)} {verb}, '
+                f'{stats.get("skippati", 0)} già aggiornati, '
+                f'{stats.get("esclusi", 0)} esclusi, '
+                f'{stats.get("errati", 0)} errori, dest assenti: {absent}')
+        if args.prune:
+            verb = 'da rimuovere' if args.dry_run else 'rimossi'
+            line += f', {verb}: {stats.get("rimossi", 0)}'
+        print(line)
     return 0
 
 
@@ -85,6 +96,31 @@ def cmd_status(args):
     return 0
 
 
+def check_sync_files(daemon):
+    """SPEC.md §9.2 (CR-03): ogni `.sync` scoperto deve parsificare e avere
+    ≥1 regola valida. Non fatale: il conteggio delle righe scartate diventa
+    un warning di `doctor`.
+
+    → (progetti totali, `.sync` rotti con motivo, righe scartate totali)."""
+    roots, auto = daemon.discovery_roots()
+    total, broken, discarded = 0, [], 0
+    for root in discover_projects(roots, auto=auto):
+        total += 1
+        path = os.path.join(root, '.sync')
+        try:
+            with open(path, encoding='utf-8') as fh:
+                text = fh.read()
+        except (OSError, UnicodeError) as e:   # OSError + UnicodeDecodeError
+            broken.append(f'{path}: {e}')
+            continue
+        # log_level fisso a info: il parse di doctor NON deve mai essere fatale
+        sync = parse_sync(text, log_level='info', origin=path)
+        discarded += sync.discarded
+        if not (sync.rules or sync.defaults):
+            broken.append(f'{path}: nessuna regola valida')
+    return total, broken, discarded
+
+
 def cmd_doctor(args):
     """Un check per riga con esito ✔/✗; exit 1 se almeno un check fatale fallisce."""
     fatal = False
@@ -97,14 +133,17 @@ def cmd_doctor(args):
 
     cfg_path = os.path.expanduser(args.config or '~/.safekeep')
     cfg = None
+    daemon = None
     if not os.path.exists(cfg_path):
         example = os.path.join(REPO, 'examples', 'safekeep.example')
         out(False, f'config assente: {cfg_path} (creala: cp {example} {cfg_path})',
             is_fatal=bool(args.config))
     else:
         try:
-            cfg = Daemon(cfg_path).load_config()
+            daemon = Daemon(cfg_path)
+            cfg = daemon.load_config()
         except ConfigError as e:
+            daemon = None
             out(False, f'config non valida: {e}', is_fatal=True)
         else:
             # nessuna `source` → auto-discovery da $HOME: info, non warning (SPEC §6)
@@ -112,13 +151,28 @@ def cmd_doctor(args):
                     else f'auto-discovery da {os.path.expanduser("~")}')
             out(True, f'config valida: {cfg_path} ({mode}, {len(cfg.dests)} dest)')
 
-    if cfg is not None:
+    if daemon is not None:
+        # base = source, oppure $HOME in auto-mode: copre anche "dest dentro $HOME"
         try:
-            validate_dests(cfg.sources, cfg.dests)
+            daemon.validate_dests()
         except ConfigError as e:
             out(False, str(e), is_fatal=True)
         else:
-            out(True, 'dest non annidate nelle source (nessun loop di copia)')
+            out(True, 'dest non annidate nelle source/$HOME (nessun loop di copia)')
+
+    if daemon is not None:
+        total, broken, discarded = check_sync_files(daemon)
+        if broken:
+            detail = f' ({discarded} righe scartate)' if discarded else ''
+            out(False, '.sync non validi: ' + '; '.join(broken) + detail
+                + ' — warning non fatale')
+        elif discarded:
+            out(False, f'.sync: {discarded} righe scartate in {total} progetto/i '
+                       '— warning non fatale')
+        elif total:
+            out(True, f'.sync: {total} progetto/i parsificati con regole valide')
+        else:
+            out(True, '.sync: nessun progetto scoperto (niente da validare)')
 
     exe = shutil.which('fswatch')
     if exe is None:

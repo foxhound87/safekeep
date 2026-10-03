@@ -34,6 +34,7 @@ class SyncConfig:
         self.name = None
         self.defaults = []            # defaults: <regola> (list[Rule])
         self.rules = []               # include:/exclude: in ordine (list[Rule])
+        self.discarded = 0            # righe scartate come invalide (per doctor)
 
 
 _SYNC_KEY = re.compile(r'(name|defaults|include|exclude)\s*:\s*(.*)')
@@ -60,6 +61,7 @@ def parse_sync(text, *, log_level='info', origin='<.sync>'):
     cfg = SyncConfig()
 
     def invalid(lineno, detail):
+        cfg.discarded += 1
         msg = f'{origin}:{lineno}: {detail}'
         if log_level == 'debug':
             raise ConfigError(msg)
@@ -75,7 +77,13 @@ def parse_sync(text, *, log_level='info', origin='<.sync>'):
                 # chiave ignota / dest: → riga invalida (SPEC.md §4.2)
                 invalid(lineno, f'riga non valida: {raw.strip()}')
                 continue
-            rule = bare_rule(line)          # riga nuda stile gitignore
+            try:
+                rule = bare_rule(line)      # riga nuda stile gitignore
+            except ValueError as e:
+                # pattern da `.sync` non attendibile (regex invalida, NUL, …):
+                # warning + skip con info, ConfigError con debug (CR-03)
+                invalid(lineno, str(e))
+                continue
             if rule is None:
                 invalid(lineno, 'pattern vuoto')
                 continue
@@ -117,6 +125,10 @@ def parse_config(text, origin='config'):
         if not m:
             raise ConfigError(f'{origin}:{lineno}: riga non valida: {raw.strip()}')
         key, val = m.group(1), m.group(2).strip()
+        if '\0' in val:
+            # un valore con NUL dal config globale esploderebbe più avanti in
+            # modo opaco (os.path/Popen): fail-fast qui, con numero di riga (CR-03)
+            raise ConfigError(f'{origin}:{lineno}: valore con carattere NUL: {key}')
         if key == 'source':
             if not val:
                 raise ConfigError(f'{origin}:{lineno}: source vuota')
@@ -198,9 +210,15 @@ def validate_dests(sources, dests):
 # Modalità auto-discovery (SPEC.md §6): dir da potare durante lo scan di $HOME.
 # Le nascoste (iniziano con `.`) sono potate a monte, qui elencate per chiarezza
 # `.Trash` e `.cache` (e per `venv`, non coperto dai builtin).
+# Ultime sette: cartelle protette dalla privacy di macOS (TCC = Transparency,
+# Consent and Control). Senza "Accesso completo al disco" l'`opendir()` su una
+# di queste resta bloccato nel kernel — niente errore, niente prompt per un
+# agent launchd — e il discovery non finirebbe mai (SPEC.md §6).
 HOME_PRUNE_DIRS = frozenset({
     'Library', '.Trash', '.cache', 'node_modules', '.git', '.venv',
-    '__pycache__', 'venv',
+    '__pycache__', 'venv', 'Applications',
+    'Desktop', 'Documents', 'Downloads', 'Movies', 'Music', 'Pictures',
+    'Public',
 })
 
 
@@ -223,6 +241,9 @@ def discover_projects(sources, auto=False):
     `auto=False` (modalità source): si pota sul verdict *esclusa* delle regole
     builtin. Scan ordinato (root prima dei sotto-progetti): i `.sync` annidati
     restano progetti a sé (SPEC.md §4.1).
+    Il pruning è applicato ai *figli* prima di scendere: `os.walk` apre la
+    directory (`opendir`) solo quando ci si entra, così una dir potata — in
+    particolare una cartella protetta da TCC — non viene mai nemmeno aperta.
     """
     builtin = Matcher(BUILTIN_RULES)
     prune = home_prune if auto else (lambda rel: not builtin.evaluate(rel, True))
@@ -234,10 +255,12 @@ def discover_projects(sources, auto=False):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             rel = os.path.relpath(dirpath, root).replace(os.sep, '/')
-            if rel != '.' and prune(rel):
-                dirnames[:] = []        # pota: niente scan sotto dir esclusa
-                continue
             if '.sync' in filenames:
                 found.append(dirpath)   # dir senza .sync non è progetto
-            dirnames.sort()
+            # pota i figli PRIMA di scendere: os.walk apre (opendir) una dir
+            # solo quando ci si entra, così una dir esclusa — in particolare
+            # una cartella protetta da TCC — non viene mai nemmeno aperta
+            dirnames[:] = sorted(
+                name for name in dirnames
+                if not prune(name if rel == '.' else rel + '/' + name))
     return found

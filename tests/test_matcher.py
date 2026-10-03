@@ -165,5 +165,25 @@ class ParseRulesTest(unittest.TestCase):
         self.assertFalse(Matcher([r]).evaluate('#foo', False))
 
 
+class PatternInvalidoTest(unittest.TestCase):
+    """REGRESSIONE CR-03: `re.error` NON è un ValueError, un `.sync` malevolo
+    (`[z-a]*`, NUL) faceva esplodere parser e daemon."""
+
+    def test_regex_invalida_diventa_valueerror(self):
+        with self.assertRaises(ValueError) as cm:
+            parse_rule('include: [z-a]*')
+        self.assertIn('regex non valido', str(cm.exception))
+
+    def test_pattern_con_nul_diventa_valueerror(self):
+        with self.assertRaises(ValueError) as cm:
+            parse_rule('exclude: a\0b')
+        self.assertIn('NUL', str(cm.exception))
+
+    def test_pattern_validi_invariati(self):
+        r = parse_rule('include: [abc]*.md')
+        self.assertTrue(r.include)
+        self.assertTrue(Matcher([r]).evaluate('a.md'))
+
+
 if __name__ == '__main__':
     unittest.main()

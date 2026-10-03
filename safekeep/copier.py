@@ -2,9 +2,11 @@
 
 Semantica: solo copia/aggiorna, mai cancellare. `copy_one` restituisce False
 quando la copia non è fattibile in questo momento (sorgente instabile o
-sparita) mentre `OSError` di I/O (ENOSPC/EIO/EBUSY/ENODEV) viene rilanciato
-com'è: a decidere il retry è il caller.
+sparita, oppure scrittura fuori dest) mentre `OSError` di I/O
+(ENOSPC/EIO/EBUSY/ENODEV) viene rilanciato com'è: a decidere il retry è il
+caller. Nel reconcile ogni errore resta confinato al proprio file (CR-05).
 """
+import errno
 import logging
 import os
 import shutil
@@ -16,6 +18,8 @@ STABILITY_PAUSE = 0.2      # secondi fra i due stat (SPEC.md §7.1)
 STABILITY_RETRIES = 2      # ritentativi extra se il file cambia fra i due stat
 MTIME_TOLERANCE = 1.0      # secondi: tolleranza mtime per volumi a risoluzione limitata
 TMP_INFIX = '.safekeep.tmp.'
+# errori che dicono "questa dest non è usabile adesso" → pending + backoff (§8.3)
+MOUNT_ERRNOS = (errno.ENODEV, errno.EBUSY, errno.ENOSPC)
 
 
 def _tmp_path(dst):
@@ -59,12 +63,48 @@ def _stable(src):
     return False
 
 
-def _copy_symlink(src, dst):
+def _inside(path, root):
+    return path == root or path.startswith(root + os.sep)
+
+
+def _make_contained(dst, dest_root):
+    """True se la directory di `dst` sta dentro `dest_root` (CR-01, SPEC.md §7.2).
+
+    Un componente-symlink della dest che punta fuori è un artefatto di copie
+    precedenti (§7.3 ricrea i link sorgente): è roba della dest → viene rimosso
+    e ricreato come directory reale. Se dopo il ripristino la directory risolve
+    ancora fuori → False: mai scrivere fuori dest.
+    """
+    base = os.path.abspath(os.path.expanduser(dest_root))
+    target = os.path.dirname(os.path.abspath(dst))
+    rel = os.path.relpath(target, base)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return False                       # dst fuori dalla dest per costruzione
+    root = os.path.realpath(base)
+    cur = base
+    for part in rel.split(os.sep):
+        if part in ('', os.curdir):
+            continue
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur) and not _inside(os.path.realpath(cur), root):
+            log.warning('symlink di dest fuori da %s: lo rimuovo (roba della dest): %s',
+                        root, cur)
+            try:
+                os.unlink(cur)             # unlink NON segue il link: safe
+            except OSError as e:
+                log.error('impossibile rimuovere il symlink %s: %s', cur, e)
+    return _inside(os.path.realpath(target), root)
+
+
+def _copy_symlink(src, dst, dest_root=None):
     """Ricrea il symlink senza seguirlo (SPEC.md §7.3), anche se rotto."""
     try:
         target = os.readlink(src)
     except OSError:
         return False                      # symlink sparito fra islink e readlink
+    if dest_root is not None and not _make_contained(dst, dest_root):
+        log.error('scrittura fuori da dest bloccata: %s', dst)
+        return False
     dirname = os.path.dirname(dst)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
@@ -80,18 +120,23 @@ def _copy_symlink(src, dst):
     return True
 
 
-def copy_one(src: str, dst: str) -> bool:
+def copy_one(src: str, dst: str, dest_root=None) -> bool:
     """Copia atomica src → dst. True se copiato, False se da ritentare più tardi.
 
     - src sparito (FileNotFoundError) → False silenzioso: la policy "mai
       cancellare" conserva già il backup esistente;
+    - `dest_root` passato ⇒ containment check prima di ogni scrittura: mai
+      scrivere fuori dalla dest via symlink (CR-01);
     - OSError di I/O → rilanciato così com'è (il caller decide il retry);
     - chmod/utime non riusciti (volumi exFAT) → non fatali (log debug).
     """
     if os.path.islink(src):
-        return _copy_symlink(src, dst)
+        return _copy_symlink(src, dst, dest_root)
     if not _stable(src):
         return False                      # instabile o sparito
+    if dest_root is not None and not _make_contained(dst, dest_root):
+        log.error('scrittura fuori da dest bloccata: %s', dst)
+        return False
     dirname = os.path.dirname(dst)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
@@ -141,17 +186,41 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
     progetto (SPEC.md §4.3): il path dest include il segmento del progetto e
     due progetti diversi non si sovrappongono. `stats` (opzionale, dict
     aggiornato in place): `copiati` si somma su più dest (passa lo stesso dict
-    per ogni dest), `esclusi` = file con verdict escluso incontrati nel walk
-    (indipendente dalla dest), `pianificati` = [(src, dst)] con `dry_run=True`.
+    per ogni dest), `skippati` = file già aggiornati, `errati` = copie fallite,
+    `esclusi` = file con verdict escluso incontrati nel walk (indipendente
+    dalla dest), `pianificati` = [(src, dst)] con `dry_run=True`, e
+    `dest_pendente` = True se un errore di mount (ENODEV/EBUSY/ENOSPC) ha
+    fermato la passata: il caller metta quella dest in pending (CR-05).
     `dry_run`: conta ed elenca senza copiare.
+
+    Nessun errore I/O di un singolo file abortisce il walk: viene loggato e
+    contato, e gli altri file vengono processati comunque.
     """
     root = os.path.abspath(os.path.expanduser(source_root))
     base_root = os.path.abspath(os.path.expanduser(dest_base)) if dest_base else root
     prefix = os.path.relpath(root, base_root)   # radice del walk rispetto a base_root
     copied = 0
     excluded = 0
+    skipped = 0
+    errors = 0
+    mount_error = None
     plan = stats.setdefault('pianificati', []) if (stats is not None and dry_run) else None
+
+    def failed(e, src, dst):
+        """Conteggia l'errore; True ⇒ errore di mount: la dest va in pending."""
+        nonlocal errors, mount_error
+        errors += 1
+        if e.errno in MOUNT_ERRNOS:
+            mount_error = e
+            log.error('errore di mount su %s → %s: %s: la dest va in pending',
+                      src, dst, e)
+            return True
+        log.error('copia fallita %s → %s: %s', src, dst, e)
+        return False
+
     for dirpath, dirnames, filenames in os.walk(root):
+        if mount_error is not None:
+            break                          # dest in pending: il resto verrà copiato al remount
         rel = os.path.relpath(dirpath, root)
         base = '' if rel == os.curdir else rel.replace(os.sep, '/') + '/'
         keep = []
@@ -166,14 +235,20 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
                 if matcher.evaluate(r, False):
                     dst = dest_path_fn(dest_root, base_root,
                                        os.path.join(prefix, r), layout)
-                    if dry_run or copy_one(full, dst):
-                        copied += 1
-                        if plan is not None:
-                            plan.append((full, dst))
+                    try:
+                        if dry_run or copy_one(full, dst, dest_root):
+                            copied += 1
+                            if plan is not None:
+                                plan.append((full, dst))
+                    except OSError as e:
+                        if failed(e, full, dst):
+                            break
                 continue
             if matcher.evaluate(r, True):        # False → pota il sottoalbero
                 keep.append(name)
         dirnames[:] = keep
+        if mount_error is not None:
+            break                          # errore di mount nella dir-symlink
         for name in filenames:
             r = base + name
             if not matcher.evaluate(r, False):
@@ -182,11 +257,77 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
             src = os.path.join(dirpath, name)
             dst = dest_path_fn(dest_root, base_root,
                                os.path.join(prefix, r), layout)
-            if needs_copy(src, dst) and (dry_run or copy_one(src, dst)):
-                copied += 1
-                if plan is not None:
-                    plan.append((src, dst))
+            try:
+                if needs_copy(src, dst):
+                    if dry_run or copy_one(src, dst, dest_root):
+                        copied += 1
+                        if plan is not None:
+                            plan.append((src, dst))
+                else:
+                    skipped += 1                 # già aggiornato su questa dest
+            except OSError as e:
+                if failed(e, src, dst):
+                    break
     if stats is not None:
         stats['copiati'] = stats.get('copiati', 0) + copied
+        stats['skippati'] = stats.get('skippati', 0) + skipped
+        stats['errati'] = stats.get('errati', 0) + errors
         stats['esclusi'] = excluded
+        if mount_error is not None:
+            stats['dest_pendente'] = True
     return copied
+
+
+def prune_project(source_root, dest_root, matcher, layout, dest_path_fn,
+                  dest_base=None, dry_run=False) -> int:
+    """Rimuove dalla dest i file il cui sorgente esiste ancora ma che il
+    matcher ora esclude (`sync-once --prune`, SPEC.md §9).
+
+    Solo sotto il prefisso del progetto (niente tocco fuori) e solo dove la
+    corrispondenza è certa: sorgente sparita o diventata directory → file
+    intatto (policy "mai cancellare"). Ritorna il numero di rimozioni
+    (anche con `dry_run=True`, dove conta quelle che verrebbe rimosso).
+    """
+    root = os.path.abspath(os.path.expanduser(source_root))
+    base_root = os.path.abspath(os.path.expanduser(dest_base)) if dest_base else root
+    prefix = os.path.relpath(root, base_root)
+    proj_dst = dest_path_fn(dest_root, base_root, prefix, layout)
+    # difesa: mai camminare (e tantomeno cancellare) fuori dalla dest (CR-01)
+    if not _inside(os.path.realpath(proj_dst),
+                   os.path.realpath(os.path.abspath(os.path.expanduser(dest_root)))):
+        log.warning('prefisso progetto fuori dalla dest: prune saltato: %s', proj_dst)
+        return 0
+
+    def pruneable(rel):
+        src = os.path.join(root, rel.replace('/', os.sep))
+        if not (os.path.isfile(src) or os.path.islink(src)):
+            return False                    # sorgente sparita o diventata dir → intatto
+        return not matcher.evaluate(rel, False)
+
+    removed = 0
+    for dirpath, dirnames, filenames in os.walk(proj_dst):
+        rel_dir = os.path.relpath(dirpath, proj_dst)
+        base = '' if rel_dir == os.curdir else rel_dir.replace(os.sep, '/') + '/'
+        # le dir-symlink della dest sono foglie come lo erano alla sorgente
+        for name in list(dirnames):
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full) and pruneable(base + name):
+                removed += _drop(full, dry_run)
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            if pruneable(base + name):
+                removed += _drop(full, dry_run)
+    return removed
+
+
+def _drop(path, dry_run):
+    if dry_run:
+        log.info('prune (dry-run): rimuoverei %s', path)
+        return 1
+    try:
+        os.unlink(path)
+    except OSError as e:
+        log.warning('prune: impossibile rimuovere %s: %s', path, e)
+        return 0
+    log.info('prune: rimosso %s', path)
+    return 1

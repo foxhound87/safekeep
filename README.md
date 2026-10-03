@@ -119,7 +119,7 @@ bin/safekeep.py <command> [--config PATH] [-v]
 | Command | What it does |
 |---|---|
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
-| `sync-once [--dry-run] [--project PATH]` | a single pass: walks the source and copies whatever differs (`--dry-run` only prints what it would copy) |
+| `sync-once [--dry-run] [--project PATH] [--prune]` | a single pass: walks the source and copies whatever differs (`--dry-run` only prints what it would copy; `--prune` also removes dest files whose source still exists but is no longer included) |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
 | `doctor` | diagnostics: config, fswatch, TCC, launchd plist — exits non-zero if a fatal check fails |
 
@@ -129,7 +129,7 @@ bin/safekeep.py <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 113 tests covering the matcher,
+Stdlib (`unittest`) suite, zero dependencies: 155 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery and CLI. `fswatch` is not
 needed to run the tests.
 

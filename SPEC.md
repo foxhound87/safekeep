@@ -154,8 +154,15 @@ Esempio commentato completo: [`examples/safekeep.example`](examples/safekeep.exa
 - Le sorgenti sono le `source` globali; per ciascuna radice viene cercato un `.sync`.
   In **modalità auto-discovery** (nessuna `source`, §3 e §6) la ricerca parte da `$HOME`
   con pruning dedicato: si saltano le directory che iniziano con `.` e `Library`,
-  `.Trash`, `.cache`, `node_modules`, `.git`, `.venv`, `__pycache__`, `venv` —
+  `.Trash`, `.cache`, `node_modules`, `.git`, `.venv`, `__pycache__`, `venv`,
+  `Applications` (rami enormi tipo QtWebEngine, un `.sync` lì non ha senso) —
   un `.sync` dentro una di queste **non** diventa progetto.
+  Saltano anche le cartelle protette dalla privacy di macOS (TCC = Transparency,
+  Consent and Control: `Desktop`, `Documents`, `Downloads`, `Movies`, `Music`,
+  `Pictures`, `Public`): senza il permesso "Accesso completo al disco" (Full Disk
+  Access, FDA) l'`opendir()` su una di queste resta bloccato nel kernel per un
+  agent launchd e il discovery non finirebbe mai. L'esclusione è applicata ai
+  figli *prima* di scendere, quindi queste cartelle non vengono nemmeno aperte.
   **Directory senza `.sync` non sono seguite** (nessuna copia, nessun watch esplicito sulle
   sottocartelle oltre al normale recursive di fswatch filtrato dal matcher).
 - Un `.sync` trovato più in profondità (sotto-progetto) è rispettato come unità con le sue
@@ -360,6 +367,13 @@ ignorare (§4.2).
    creato dopo l'avvio (anche in una directory finora ignota) viene scoperto e
    riconciliato subito, senza aspettare il rescan.
 
+   **Dedup della finestra (2s)**: lo stesso path arrivato due volte entro 2s viene
+   processato una volta sola, ma la soppressione **non perde l'evento**: la prima
+   soppressione dopo un'emissione programma una scadenza fissa `emissione + 2s`
+   che gli arrivi successivi non estendono, e alla scadenza il path viene emesso
+   comunque (emissione di coda). La scadenza entra nel timeout del `select` del
+   loop — nessun thread e nessun timer dedicato.
+
 6. **Debounce/stability**: per ogni path in coda, **stability check** (§7): due `stat` con la
    stessa `size` e `mtime` → procedi; altrimenti ri-programma il path tra ~1s (max N tentativi).
 7. **Copia atomica** su ogni destinazione globale.
@@ -407,6 +421,13 @@ Per ogni file da copiare:
 
 Un lettore sul destino vede o il file vecchio o il file nuovo, mai uno parziale. Un `OSError`
 di I/O (ENOSPC/EIO/EBUSY/ENODEV) **si propaga** al caller: è lui a decidere il retry.
+
+**Containment della dest**: prima di ogni scrittura la directory di destinazione deve
+risolversi **dentro** la dest. Un componente-symlink della dest che punta fuori è un
+artefatto della dest stessa (§7.3 ricrea i link sorgente): viene rimosso e ricreato come
+directory reale, e la scrittura prosegue solo se dopo il ripristino il path risolve ancora
+dentro — altrimenti la copia è bloccata (`scrittura fuori da dest bloccata`): **mai scrivere
+fuori dalla dest**, nemmeno via symlink creati da copie precedenti.
 
 ### 7.3 Symlink
 
@@ -523,10 +544,17 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 
 | Comando | Cosa fa | Exit code |
 |---|---|---|
-| `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito |
-| `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce | 0 se tutto ok |
+| `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
+| `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
 | `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor, python ≥ 3.9, probe TCC, residui tmp, lint plist | 1 se un check **fatale** fallisce |
+
+`sync-once --prune` è l'unica opzione che **cancella**: rimuove dalla dest i file il cui
+sorgente esiste ancora ma che il matcher ora esclude (regole cambiate), solo sotto il
+prefisso del progetto e solo dove la corrispondenza è certa — sorgente sparita o diventata
+directory → file intatto (policy "mai cancellare"). Default senza `--prune`: nessuna
+rimozione. Il controllo "dest dentro source/$HOME" è lo stesso di `doctor`
+(vedi §11): con `run` e `sync-once` esce con codice ≠ 0.
 
 Esempi:
 
@@ -551,8 +579,11 @@ python3 bin/safekeep.py run -v
 `doctor` controlla almeno:
 
 1. presenza e versione di `fswatch` (`fswatch --version`);
-2. sintassi config globale e di ogni `.sync`;
-3. **che nessuna destinazione sia una sottodirectory di una sorgente** (loop di copia infinito);
+2. sintassi config globale e di ogni `.sync` (`.sync` illeggibile o senza regole valide →
+   riga ✗ **non fatale**, con il conteggio delle righe scartate);
+3. **che nessuna destinazione sia una sottodirectory di una sorgente** (loop di copia
+   infinito): check fatale (exit ≠ 0) anche in `run` e `sync-once`, con base = `source`
+   se presenti, altrimenti `$HOME` in modalità auto-discovery (§11);
 4. che le dest siano scrivibili;
 5. che il plist di launchd esista e passi `plutil -lint`;
 6. accesso ai source (test read + probe TCC);
@@ -570,6 +601,14 @@ verdict *esclusa*; un file non matchato da nessuna regola non è incluso → non
 - dest non esiste → copia;
 - dest esiste ma `size` o `mtime` differiscono → copia (atomicamente);
 - dest uguale → skip (idempotenza).
+
+**Errori per file** (nessun errore I/O di un singolo file abortisce il walk): ogni copia
+fallita viene loggata e contata in `stats['errati']`, e il resto del progetto viene
+processato comunque; i file già aggiornati contano in `stats['skippati']`. Un errore di
+**mount** (`ENODEV`/`EBUSY`/`ENOSPC`) dice invece che la dest non è usabile adesso: il walk
+si ferma, `stats['dest_pendente']` segnala al caller di mettere quella dest in `pending`
+(§8.3) — le altre dest proseguono. Al retry la dest rifallisce → il backoff **riprende da
+dove era** (mai ripartire da 1s: niente loop a 1Hz).
 
 **Quando gira:**
 
@@ -611,8 +650,10 @@ illimitata della coda in memoria.
 - Senza FDA: `doctor` segnala `EACCES`/`Operation not permitted` con istruzioni; il daemon non
   deve loopare: un `PermissionError` su una radice source → log error + backoff lento (60s),
   non crash.
-- **Dest sotto source** → errore in `doctor` e warning in `run` (il file copiato verrebbe
-  riosservato all'infinito: loop).
+- **Dest sotto source** → errore fatale (exit ≠ 0) in `doctor`, `run` **e** `sync-once`
+  (il file copiato verrebbe riosservato all'infinito: loop). La base del controllo è la
+  `source` se presente, altrimenti `$HOME` in modalità auto-discovery: così viene bloccata
+  anche una dest dentro la `$HOME`, dove finirebbero comunque le copie.
 - **Destinazioni solo in `~/.safekeep`**: un `.sync` **non può aggiungere né rimuovere
   destinazioni per costruzione** (§4.2) — la sua sintassi non prevede chiavi di destinazione,
   quindi un `.sync` malevolo incluso in un repo clonato da terzi non può far scrivere il
@@ -636,7 +677,7 @@ illimitata della coda in memoria.
 | File cancellato alla sorgente | resta nel backup (semantica confermata) |
 | Volume dest non montato | pending + backoff stat mountpoint; reconcile al remount |
 | `.sync` malevolo in repo clonato | le dest vivono solo in `~/.safekeep`: `dest:` in un `.sync` è riga invalida (§4.2, §11) |
-| Dest dentro la sorgente (loop) | `doctor` blocca, `run` warna e salta quella dest |
+| Dest dentro la sorgente (loop) | errore in `doctor`, `run` e `sync-once` → exit ≠ 0 (base = `source` o `$HOME` in auto-discovery, §11) |
 | Subdirectory senza `.sync` | non seguita (nessuna copia) |
 | Symlink | ricreati come symlink, non seguiti |
 | Directory enorme (`node_modules`) | pruning dir sul verdict *esclusa* + regex pre-filtro `-e` di fswatch |
@@ -660,7 +701,7 @@ illimitata della coda in memoria.
 | **T4** | Destinazioni non montate (`safekeep/volumes.py`): `dest_state`, `backoff_schedule()` (1→2→…→60 cap), `partition_dests` | `dest_state` su path esistente/assente; backoff con cap a 60s; split (ready, absent) | ✅ fatto (`tests/test_volumes.py`) |
 | **T5** | `run`: subprocess fswatch (`-0 -m fsevents_monitor -r -l 1.0 -e …`), dispatcher eventi, debounce, timer 24h, pending/backoff mount, anti-flood (>5000 → collapse a reconcile) | modificare un file sorgente → compare sul dest entro ~2s; dest smontata → pending, remount → catch-up; flood simulato triggera il collapse | da fare |
 | **T6** | CLI `status`/`doctor` + plist launchd + comandi bootout/bootstrap/kickstart (`launchd/`, `install.sh`, `uninstall.sh`) | `doctor` verde su macchina con permessi; plist passa `plutil -lint`; kill del processo → launchd lo riavvia da solo | ✅ fatto (`tests/test_cli.py`) |
-| **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor` rileva dest sotto source; tabella edge case coperta da casi di test | da fare |
+| **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor`/`run`/`sync-once` escono con ≠ 0 su dest sotto source; `.sync` non attendibile gestito (info → warning + skip, debug → fatale); containment della dest (nessuna scrittura fuori); dedup senza perdita di eventi; errori I/O confinati al file; tabella edge case coperta da casi di test | ✅ fatto (`tests/test_matcher.py`, `tests/test_config.py`, `tests/test_copier.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 | **T8** | Auto-discovery (`source` opzionale): scan di `$HOME` con pruning dedicato, watch root `$HOME` con exclude home, evento su `/.sync` → nuovo progetto, rescan al timer 24h, dedup watch roots (`safekeep/config.py`, `safekeep/daemon.py`) | config senza `source` valida (senza `dest` → errore con hint); `.sync` in `$HOME` scoperto, `Library`/nascoste potato, sotto-progetto annidato scoperto; watch root source invariata (backward compat); evento `.sync` → discover + reconcile; rescan 24h | ✅ fatto (`tests/test_config.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 
 Ordinamento: T1→T2 (fondamenta), T3→T4 (nucleo sync), T5 (daemon), T6 (operatività),

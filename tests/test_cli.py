@@ -122,5 +122,100 @@ class AutoDiscoveryCliTest(CliTestCase):
             self.fail('check config mancante')
 
 
+class LoopDestTest(CliTestCase):
+    """CR-02: dest dentro la sorgente → `run` e `sync-once` escono con ≠ 0."""
+
+    def loop_cfg(self):
+        return write(os.path.join(self.tmp, 'loop.cfg'),
+                     f'source: {self.src}\ndest: {self.src}/backup\n')
+
+    def test_run_dest_dentro_source_esce_1_e_non_copia(self):
+        r = self.cli('run', '--config', self.loop_cfg())
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('loop di copia', r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.src, 'backup')),
+                         'nessuna copia prima del validate')
+
+    def test_sync_once_dest_dentro_source_esce_1_e_non_copia(self):
+        r = self.cli('sync-once', '--config', self.loop_cfg())
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('loop di copia', r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.src, 'backup')))
+
+    def test_sync_once_auto_dest_dentro_home_esce_1(self):
+        # nessuna `source` → base del validate = $HOME (auto-discovery)
+        cfg = write(os.path.join(self.tmp, 'auto-loop.cfg'),
+                    f'dest: {self.home}/backup\n')
+        r = self.cli('sync-once', '--config', cfg)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('loop di copia', r.stderr)
+
+
+class StatusConfigCattivoTest(CliTestCase):
+    def test_status_config_non_utf8_esce_1(self):
+        bad = os.path.join(self.tmp, 'bin.cfg')
+        with open(bad, 'wb') as fh:
+            fh.write(b'source: \xff\xfe\ndest: /d\n')
+        r = self.cli('status', '--config', bad)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('errore di config', r.stderr)
+
+
+class DoctorSyncTest(CliTestCase):
+    """SPEC.md §9.2 (CR-03): doctor segnala i `.sync` rotti senza essere fatale."""
+
+    def test_sync_senza_regole_valide_warning_non_fatale(self):
+        rotto = write(os.path.join(self.src, 'rotto', '.sync'), '[z-a]*\n')
+        r = self.cli('doctor', '--config', self.cfg)
+        line = next(l for l in r.stdout.splitlines()
+                    if 'nessuna regola valida' in l)
+        self.assertTrue(line.startswith('✗'), line)
+        self.assertIn(rotto, line)
+        self.assertIn('warning non fatale', line)
+
+    def test_sync_non_utf8_segnalato(self):
+        path = os.path.join(self.src, 'bin', '.sync')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as fh:
+            fh.write(b'\xff\xfe\n')
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertIn('.sync non validi', r.stdout)
+        self.assertIn(path, r.stdout)
+
+    def test_righe_scartate_diventano_warning(self):
+        write(os.path.join(self.src, 'misto', '.sync'),
+              'include: *.md\n[z-a]*\ninclude: *.txt\n')
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertIn('righe scartate', r.stdout)
+        self.assertIn('warning non fatale', r.stdout)
+
+
+class PruneCliTest(CliTestCase):
+    def test_help_mostra_prune(self):
+        r = self.cli('sync-once', '--help')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('--prune', r.stdout)
+
+    def test_prune_rimuove_solo_i_file_esclusi(self):
+        sync = os.path.join(self.src, 'proj', '.sync')
+        write(sync, 'include: *.md\ninclude: *.txt\n')
+        write(os.path.join(self.src, 'proj', 'keep.md'), 'k')
+        write(os.path.join(self.src, 'proj', 'old.txt'), 'vecchio')
+        r = self.cli('sync-once', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, 'proj/old.txt')))
+        # residui: sorgente sparita e file fuori dal prefisso del progetto
+        write(os.path.join(self.dest, 'proj/gone.md'), 'sorgente sparita')
+        write(os.path.join(self.dest, 'fuori.md'), 'fuori dal prefisso')
+
+        write(sync, 'include: *.md\n')                 # le regole cambiano
+        r = self.cli('sync-once', '--prune', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('rimossi: 1', r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, 'proj/old.txt')))
+        for keep in ('proj/keep.md', 'proj/gone.md', 'proj/.sync', 'fuori.md'):
+            self.assertTrue(os.path.exists(os.path.join(self.dest, keep)), keep)
+
+
 if __name__ == '__main__':
     unittest.main()

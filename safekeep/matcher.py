@@ -71,6 +71,10 @@ class Rule:
     """Singola regola `include:`/`exclude:` con pattern gitignore-like."""
 
     def __init__(self, pattern, include):
+        if '\0' in pattern:
+            # un pattern con NUL arriva da un `.sync` non attendibile e finirebbe
+            # in argv di fswatch → ValueError "embedded null byte" (CR-03)
+            raise ValueError(f'pattern contiene un carattere NUL: {pattern!r}')
         self.pattern = pattern
         self.include = include
         self.dir_only = pattern.endswith('/')          # foo/ → solo directory
@@ -80,7 +84,13 @@ class Rule:
             p = p[1:]
         # dir/** matcha anche dir stessa, così il pruning la esclude per intero
         body = _glob(p[:-3]) + '(?:/.*)?' if p.endswith('/**') else _glob(p)
-        self._re = re.compile('(?:' + body + r')\Z')
+        try:
+            self._re = re.compile('(?:' + body + r')\Z')
+        except re.error as e:
+            # `re.error` NON è un ValueError: un pattern malevolo/esotico
+            # (es. `[z-a]*`) va convertito così il parser lo gestisce come
+            # riga invalida invece di far crashare il daemon (CR-03)
+            raise ValueError(f'pattern regex non valido: {pattern!r} ({e})') from None
 
     def matches(self, path, is_dir=False):
         path = path.strip('/')
