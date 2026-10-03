@@ -9,6 +9,8 @@ chose to their destinations — an **allow-list** model that **never deletes**
 anything in the backup (a file removed or renamed at the source stays in the
 backup).
 
+Documentation: https://foxhound87.github.io/safekeep/
+
 ## Features
 
 - **Allow-list**: a file is copied only if it matches at least one `include:`;
