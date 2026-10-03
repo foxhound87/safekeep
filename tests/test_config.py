@@ -1,3 +1,5 @@
+import contextlib
+import logging
 import os
 import tempfile
 import unittest
@@ -14,6 +16,30 @@ from safekeep.config import (
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGGER = 'safekeep'
+
+if not hasattr(unittest.TestCase, 'assertNoLogs'):     # Py < 3.10 (floor >= 3.9)
+    @contextlib.contextmanager
+    def _assert_no_logs(self, logger, level=logging.WARNING):
+        log = logging.getLogger(logger)
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Capture(level)
+        old_level = log.level
+        log.addHandler(handler)
+        log.setLevel(level)
+        try:
+            yield
+        finally:
+            log.removeHandler(handler)
+            log.setLevel(old_level)
+        if records:
+            self.fail('log inattesi: %s' % [r.getMessage() for r in records])
+
+    unittest.TestCase.assertNoLogs = _assert_no_logs
 
 
 def read_example(name):

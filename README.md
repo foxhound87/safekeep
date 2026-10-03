@@ -29,10 +29,29 @@ backup).
 ## Installation
 
 ```bash
-git clone git@gitlab.com:foxhound87/safekeep.git
+pipx install safekeep     # recommended for a CLI
+# or
+pip install safekeep
+```
+
+**Requirements**: macOS, Python >= 3.9 and
+[fswatch](https://github.com/emcrisostomo/fswatch):
+
+```bash
+brew install fswatch
+```
+
+The **launchd agent** (daemon at boot) is installed from a checkout of this
+repository with `./install.sh` — not from the wheel — see
+[Agent (launchd)](#agent-launchd) below.
+
+## Agent (launchd)
+
+```bash
+git clone https://gitlab.com/foxhound87/safekeep.git
 cd safekeep
 
-# only external dependency
+# only external dependency, if not installed yet
 brew install fswatch
 
 # copies the example into ~/.safekeep, renders the plist, runs preflight checks
@@ -55,10 +74,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
 ```
 
 Once you have granted TCC/FDA (Full Disk Access) permissions to the Python
-interpreter and to `fswatch`, run `python3 bin/safekeep.py doctor` for
-diagnostics.
+interpreter and to `fswatch`, run `safekeep doctor` for diagnostics.
 
-## Quick example
+## Quickstart
 
 `~/.safekeep` (the only place where destinations live):
 
@@ -90,10 +108,8 @@ startup. `dest:` stays mandatory in both modes.
 name: myapp
 
 # allow-list semantics: without these lines NOT A SINGLE file would be copied
-.env
-.env.*
-.vault/
 *.md
+.env
 !secrets/old.env      # ! = exclude
 ```
 
@@ -104,16 +120,17 @@ Bare lines share the same ordered list as the explicit `include:`/`exclude:`
 keys, so last-match-wins works the same way (see
 [`examples/sync.example`](examples/sync.example)).
 
-See what would be copied, without copying anything:
+Dry run first, then start the daemon:
 
 ```bash
-python3 bin/safekeep.py sync-once --dry-run
+safekeep sync-once --dry-run   # prints what would be copied, copies nothing
+safekeep run                   # daemon: watch + copy (foreground)
 ```
 
 ## CLI commands
 
 ```
-bin/safekeep.py <command> [--config PATH] [-v]
+safekeep <command> [--config PATH] [-v]
 ```
 
 | Command | What it does |
@@ -129,7 +146,7 @@ bin/safekeep.py <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 155 tests covering the matcher,
+Stdlib (`unittest`) suite, zero dependencies: 156 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery and CLI. `fswatch` is not
 needed to run the tests.
 

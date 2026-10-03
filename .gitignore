@@ -4,3 +4,6 @@ __pycache__/
 .DS_Store
 *.log
 .vault/
+/dist/
+/build/
+/*.egg-info

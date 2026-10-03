@@ -1,0 +1,37 @@
+# Packaging per PyPI: package stdlib-only, un solo console script.
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safekeep"
+dynamic = ["version"]
+description = "Selective always-on backups for macOS: fswatch-driven copy of allow-listed files, never deletes"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+keywords = ["backup", "macos", "fswatch", "sync", "allow-list", "launchd"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Archiving :: Backup",
+]
+# zero runtime dependencies: solo stdlib (fswatch è un binario esterno)
+
+[project.urls]
+Homepage = "https://gitlab.com/foxhound87/safekeep"
+Repository = "https://gitlab.com/foxhound87/safekeep"
+
+[project.scripts]
+safekeep = "safekeep.cli:main"
+
+[tool.setuptools]
+# NO auto-discovery: bin/ e tests/ farebbero errore di build
+packages = ["safekeep"]
+
+[tool.setuptools.dynamic]
+version = {attr = "safekeep.__version__"}
