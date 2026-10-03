@@ -1,0 +1,23 @@
+# Same contract as the `test` job in .gitlab-ci.yml: run the unittest suite on
+# a stock Linux runner with Python only. fswatch is deliberately NOT installed —
+# `tests/test_cli.py` tolerates its absence, and on Linux the `fsevents_monitor`
+# check would make `doctor` fail (see the portability note in .gitlab-ci.yml).
+name: tests
+
+on:
+  push:
+    branches: [main, docs]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run test suite
+        run: |
+          python3 --version
+          python3 -m unittest discover -s tests
