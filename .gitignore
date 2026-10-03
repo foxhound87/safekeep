@@ -7,3 +7,8 @@ __pycache__/
 /dist/
 /build/
 /*.egg-info
+
+# docs site (VitePress)
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
