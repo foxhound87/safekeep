@@ -21,7 +21,7 @@ class ConfigError(ValueError):
 
 class GlobalConfig:
     def __init__(self):
-        self.sources = []             # radici osservate (ripetibili)
+        self.sources = []             # radici osservate (ripetibili, opzionali)
         self.dests = []               # destinazioni globali (ripetibili) — le UNICHE
         self.layout = 'relative'      # relative | full
         self.defaults = []            # regole a bassa priorità (list[Rule])
@@ -81,7 +81,11 @@ def parse_sync(text, *, log_level='info', origin='<.sync>'):
 
 
 def parse_config(text, origin='config'):
-    """Parse del config globale → GlobalConfig. Errori fatali sempre (fail-fast)."""
+    """Parse del config globale → GlobalConfig. Errori fatali sempre (fail-fast).
+
+    `source` è opzionale (nessuna riga → modalità auto-discovery da `$HOME`,
+    SPEC.md §6); `dest` è obbligatoria: è l'unico posto dove vivono le
+    destinazioni (SPEC.md §3)."""
     cfg = GlobalConfig()
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = strip_comment(raw).strip()
@@ -117,6 +121,9 @@ def parse_config(text, origin='config'):
             cfg.log_level = val
         else:
             raise ConfigError(f'{origin}:{lineno}: chiave sconosciuta: {key}')
+    if not cfg.dests:
+        raise ConfigError(f'{origin}: nessuna dest: serve almeno una riga '
+                          f'`dest: <path>` (esempio: examples/safekeep.example)')
     return cfg
 
 
@@ -166,9 +173,37 @@ def validate_dests(sources, dests):
                 raise ConfigError(f'dest {d} è dentro la sorgente {s}: loop di copia infinito')
 
 
-def discover_projects(sources):
-    """Directory che contengono `.sync` sotto ogni radice (scan con pruning dei builtin)."""
-    prune = Matcher(BUILTIN_RULES)
+# Modalità auto-discovery (SPEC.md §6): dir da potare durante lo scan di $HOME.
+# Le nascoste (iniziano con `.`) sono potate a monte, qui elencate per chiarezza
+# `.Trash` e `.cache` (e per `venv`, non coperto dai builtin).
+HOME_PRUNE_DIRS = frozenset({
+    'Library', '.Trash', '.cache', 'node_modules', '.git', '.venv',
+    '__pycache__', 'venv',
+})
+
+
+def home_prune(rel):
+    """Pruning dell'auto-discovery: True = non scendere in questa directory.
+
+    `rel` è il path relativo alla radice con `/` come separatore; la radice
+    stessa (rel '.') non viene mai potata.
+    """
+    name = rel.rsplit('/', 1)[-1]
+    return name.startswith('.') or name in HOME_PRUNE_DIRS
+
+
+def discover_projects(sources, auto=False):
+    """Directory che contengono `.sync` sotto ogni radice (scan con pruning).
+
+    `auto=True` (modalità auto-discovery, scan della `$HOME`): si pota su
+    `home_prune` — nessuna directory nascosta e niente `Library`/`.Trash`/…,
+    così `.sync` dentro una di queste NON diventa progetto (SPEC.md §6).
+    `auto=False` (modalità source): si pota sul verdict *esclusa* delle regole
+    builtin. Scan ordinato (root prima dei sotto-progetti): i `.sync` annidati
+    restano progetti a sé (SPEC.md §4.1).
+    """
+    builtin = Matcher(BUILTIN_RULES)
+    prune = home_prune if auto else (lambda rel: not builtin.evaluate(rel, True))
     found = []
     for src in sources:
         root = os.path.abspath(os.path.expanduser(src))
@@ -177,7 +212,7 @@ def discover_projects(sources):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             rel = os.path.relpath(dirpath, root).replace(os.sep, '/')
-            if rel != '.' and not prune.evaluate(rel, True):
+            if rel != '.' and prune(rel):
                 dirnames[:] = []        # pota: niente scan sotto dir esclusa
                 continue
             if '.sync' in filenames:

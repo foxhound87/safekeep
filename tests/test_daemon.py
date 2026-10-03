@@ -17,6 +17,7 @@ from safekeep.daemon import (
     Project,
     classify,
     dedup,
+    dedup_roots,
     exclude_regexes,
     find_project,
     load_project,
@@ -141,7 +142,7 @@ class ClassifyTest(unittest.TestCase):
               'name: pippo\ninclude: *.md\nexclude: skipme/\nexclude: *.txt\n')
         write(os.path.join(self.root, 'a.md'))
         write(os.path.join(self.root, 'b.txt'))
-        self.project = load_project(self.root, parse_config(''))
+        self.project = load_project(self.root, parse_config('dest: /d\n'))
 
     def test_file_incluso_sync(self):
         self.assertEqual(classify(os.path.join(self.root, 'a.md'), self.project),
@@ -415,6 +416,135 @@ class SmokeLoopTest(unittest.TestCase):
             daemon.step(timeout=0.05)
         self.assertTrue(daemon.fatal, '5 morti in 60s devono essere fatali')
         self.assertIsNone(daemon.proc)
+
+
+class DedupRootsTest(unittest.TestCase):
+    """Radici watch annidate → saltate (fswatch -r copre già il sottoalbero)."""
+
+    def test_radice_annidata_sotto_unaltra_salta(self):
+        self.assertEqual(dedup_roots(['/a/b/c', '/a/b']), ['/a/b'])
+        self.assertEqual(dedup_roots(['/a/b', '/a/b/c']), ['/a/b'])
+
+    def test_prefisso_letterale_non_basta(self):
+        self.assertEqual(dedup_roots(['/a', '/ab']), ['/a', '/ab'])
+
+    def test_stessa_radice_due_volte(self):
+        self.assertEqual(dedup_roots(['/a', '/a']), ['/a'])
+
+
+class HomeTestCase(TmpTestCase):
+    """$HOME finto: auto-discovery e watch root leggono `expanduser('~')`."""
+
+    def setUp(self):
+        super().setUp()
+        old = os.environ.get('HOME')
+
+        def restore():
+            if old is None:
+                os.environ.pop('HOME', None)
+            else:
+                os.environ['HOME'] = old
+
+        self.addCleanup(restore)
+        self.home = self.path('home')
+        os.makedirs(self.home)
+        self.dest = self.path('dst')
+        os.makedirs(self.dest)              # dest esiste ⇒ dest_state == ok
+        os.environ['HOME'] = self.home
+
+    def daemon(self):
+        cfg_path = write(self.path('safekeep.cfg'), f'dest: {self.dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        return daemon
+
+
+class AutoDiscoveryTest(HomeTestCase):
+    """Modalità auto-discovery: nessuna `source:` → watch root = $HOME (SPEC §6)."""
+
+    def test_watch_root_e_exclude_dedicate(self):
+        daemon = self.daemon()
+        roots, auto = daemon.discovery_roots()
+        self.assertTrue(auto, 'nessuna source ⇒ modalità auto-discovery')
+        self.assertEqual(roots, [self.home])
+        argv = daemon.fswatch_argv()
+        self.assertEqual(argv[argv.index('--') + 1:], [self.home])
+        regexes = [argv[i + 1] for i, a in enumerate(argv) if a == '-e']
+        for path in ('/u/Library/Notes/x', '/u/.Trash/x', '/u/.cache/x',
+                     '/u/.local/state/safekeep/safekeep.log'):
+            self.assertTrue(any(re.search(rx, path) for rx in regexes),
+                            f'exclude mancante per {path}')
+
+    def test_pruning_library_e_dir_nascoste(self):
+        write(os.path.join(self.home, 'Library/.sync'), 'include: *.md\n')
+        write(os.path.join(self.home, '.hidden/.sync'), 'include: *.md\n')
+        write(os.path.join(self.home, 'node_modules/x/.sync'), 'include: *.md\n')
+        self.assertEqual(self.daemon().projects, [])
+
+    def test_progetto_sotto_home_scoperto(self):
+        write(os.path.join(self.home, 'Code/myapp/.sync'), 'include: *.md\n')
+        write(os.path.join(self.home, 'Code/myapp/sub/.sync'), 'include: *.md\n')
+        projects = self.daemon().projects
+        self.assertEqual([p.root for p in projects],
+                         [os.path.realpath(os.path.join(self.home, 'Code/myapp')),
+                          os.path.realpath(os.path.join(self.home, 'Code/myapp/sub'))])
+
+    def test_evento_su_sync_nuovo_progetto_scopra_e_reconcilia(self):
+        daemon = self.daemon()
+        self.assertEqual(daemon.projects, [])
+        sync = write(os.path.join(self.home, 'newproj/.sync'), 'include: *.md\n')
+        write(os.path.join(self.home, 'newproj/docs/note.md'), 'x')
+        daemon.run_batch([sync])            # path fuori da ogni progetto noto
+        self.assertEqual([p.root for p in daemon.projects],
+                         [os.path.realpath(os.path.join(self.home, 'newproj'))])
+        # layout relative con radice $HOME: il segmento resta nel path dest
+        self.assertTrue(os.path.exists(os.path.join(self.dest, 'newproj/docs/note.md')))
+
+    def test_rescan_discovery_al_timer_24h(self):
+        daemon = self.daemon()
+        self.assertEqual(daemon.projects, [])
+        write(os.path.join(self.home, 'late/.sync'), 'include: *.md\n')
+        write(os.path.join(self.home, 'late/a.md'), 'x')
+        daemon.next_reconcile = daemon.clock() - 1        # ciclo 24h scaduto
+        daemon.check_timers()
+        self.assertEqual(len(daemon.projects), 1, 'il rescan recupera il .sync perso')
+        self.assertTrue(os.path.exists(os.path.join(self.dest, 'late/a.md')))
+
+
+class WatchRootsSourceModeTest(TmpTestCase):
+    """Backward compat: con `source:` presenti le watch roots sono le source."""
+
+    def daemon(self, *sources):
+        dest = self.path('dst')
+        os.makedirs(dest, exist_ok=True)
+        cfg_path = write(self.path('safekeep.cfg'),
+                         ''.join(f'source: {s}\n' for s in sources)
+                         + f'dest: {dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        return daemon
+
+    def test_source_mode_invariata(self):
+        src = self.path('src')
+        write(os.path.join(src, 'proj/.sync'), 'include: *.md\n')
+        daemon = self.daemon(src)
+        roots, auto = daemon.discovery_roots()
+        self.assertFalse(auto, 'con source il comportamento resta quello di prima')
+        self.assertEqual(roots, [src])
+        argv = daemon.fswatch_argv()
+        self.assertEqual(argv[argv.index('--') + 1:], [src])
+
+    def test_source_annidate_niente_doppioni(self):
+        outer = self.path('outer')
+        write(os.path.join(outer, 'sub/proj/.sync'), 'include: *.md\n')
+        daemon = self.daemon(os.path.join(outer, 'sub'), outer)
+        roots, _ = daemon.discovery_roots()
+        self.assertEqual(roots, [outer], 'la radice annidata è coperta da quella esterna')
+        argv = daemon.fswatch_argv()
+        self.assertEqual(argv[argv.index('--') + 1:], [outer])
+        self.assertEqual(len(daemon.projects), 1, 'progetto scoperto una volta sola')
 
 
 if __name__ == '__main__':

@@ -3,18 +3,25 @@
 # Percorso: ~/.safekeep   (file singolo nella home, niente ~/.config/…)
 # Sintassi: chiave: valore (una per riga), commenti con #, righe vuote ignorate.
 # Le chiavi `source` e `dest` sono RIPETIBILI: più righe = più valori.
+# `dest` è OBBLIGATORIA, `source` è opzionale (vedi sopra le due modalità).
 # I .sync dei progetti NON possono aggiungere o rimuovere destinazioni (SPEC.md §11).
 
-# --- Sorgenti (radici da osservare) ---------------------------------
-# Ogni riga = una radice monitorata da fswatch.
-# SOLO le directory che contengono un file `.sync` vengono seguite:
-# una directory senza .sync NON è seguita (nessuna copia).
+# --- Sorgenti (radici da osservare) — OPZIONALE ------------------------
+# MODALITÀ SOURCE (queste righe presenti, backward compat): ogni riga è una
+# radice monitorata da fswatch, esattamente come sempre.
+# MODALITÀ AUTO-DISCOVERY (righe `source:` assenti): safekeep scandaglia $HOME
+# alla ricerca di file `.sync` (potando le dir nascoste, Library, .Trash,
+# .cache, node_modules, .git, .venv, __pycache__, venv) e osserva $HOME —
+# un `.sync` creato dopo l'avvio viene agganciato da solo (SPEC.md §6).
+# In entrambe le modalità SOLO le directory che contengono un file `.sync`
+# vengono seguite: una directory senza .sync NON è seguita (nessuna copia).
 # (Decisione aperta: qui vanno i percorsi reali dei progetti — vedere SPEC.md §14.)
-source: /Users/REPLACEME/Code
-source: /Users/REPLACEME/Projects
+# source: /Users/REPLACEME/Code
+# source: /Users/REPLACEME/Projects
 
-# --- Destinazioni globali -------------------------------------------
+# --- Destinazioni globali (OBBLIGTORIE) ------------------------------
 # Usate per TUTTI i progetti: le destinazioni vivono SOLO qui.
+# Nessuna riga `dest:` → il config è invalido (errore con hint).
 # Su volumi esterni/non montati la dest passa in stato `pending`:
 # backoff sullo stat del mountpoint, poi sync al remount.
 dest: /Volumes/BackupUSB/backup

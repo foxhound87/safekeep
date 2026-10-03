@@ -78,19 +78,33 @@ class SyncParseTest(unittest.TestCase):
 class GlobalConfigTest(unittest.TestCase):
     def test_esempio_config_valido(self):
         cfg = parse_config(read_example('safekeep.example'), origin='safekeep.example')
-        self.assertEqual(cfg.sources, ['/Users/REPLACEME/Code', '/Users/REPLACEME/Projects'])
+        # `source:` nel le righe sono commentate: il default è auto-discovery (§6)
+        self.assertEqual(cfg.sources, [])
         self.assertEqual(cfg.dests, ['/Volumes/BackupUSB/backup', '/Volumes/NAS/generale'])
         self.assertEqual(cfg.layout, 'relative')
         self.assertEqual(cfg.log_level, 'info')
         self.assertEqual([r.pattern for r in cfg.defaults], ['*.log', '.cache/'])
 
     def test_default_di_base(self):
-        cfg = parse_config('')
+        cfg = parse_config('dest: /d\n')
         self.assertEqual(cfg.sources, [])
-        self.assertEqual(cfg.dests, [])
+        self.assertEqual(cfg.dests, ['/d'])
         self.assertEqual(cfg.layout, 'relative')
         self.assertEqual(cfg.log_level, 'info')
         self.assertEqual(cfg.defaults, [])
+
+    def test_senza_source_e_valida_modalita_auto_discovery(self):
+        cfg = parse_config('dest: /d\nlog_level: warn\n', origin='cfg')
+        self.assertEqual(cfg.sources, [])        # nessun source ≠ errore
+
+    def test_senza_dest_errore_con_hint(self):
+        for text in ['', 'source: /a\n', 'layout: full\n']:
+            with self.subTest(text=text):
+                with self.assertRaises(ConfigError) as cm:
+                    parse_config(text, origin='cfg')
+                msg = str(cm.exception)
+                self.assertIn('dest', msg)
+                self.assertIn('safekeep.example', msg)   # hint su dove guardare
 
     def test_chiavi_ripetibili_e_valori(self):
         # stile ~/.safekeep: source: e dest: ripetibili, resto invariato
@@ -188,6 +202,47 @@ class DiscoveryTest(unittest.TestCase):
     def test_source_assente(self):
         with self.assertLogs(LOGGER, 'WARNING'):
             self.assertEqual(discover_projects(['/percorso/che/non/esiste']), [])
+
+    def test_auto_scopre_i_progetti_sotto_home(self):
+        # modalità auto-discovery: scan di $HOME con pruning dedicato
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(tmp, 'Code/myapp/.sync')
+            self._touch(tmp, 'Code/myapp/docs/a.md')
+            self._touch(tmp, 'notes/.sync')
+            self._touch(tmp, 'plain/x.txt')               # senza .sync → non progetto
+            self.assertEqual(discover_projects([tmp], auto=True),
+                             [os.path.join(tmp, 'Code', 'myapp'),
+                              os.path.join(tmp, 'notes')])
+
+    def test_auto_pruning_delle_dir_rumorose_e_nascoste(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(tmp, 'Library/.sync')             # macOS Library: pruned
+            self._touch(tmp, 'Library/Containers/x/.sync')
+            self._touch(tmp, 'node_modules/pkg/.sync')
+            self._touch(tmp, 'venv/lib/.sync')
+            self._touch(tmp, '.Trash/x/.sync')
+            self._touch(tmp, '.config/app/.sync')
+            # DECISIONE: anche una dir nascosta è pruned → il suo `.sync`
+            # NON diventa progetto (niente `.git`, `.venv`, `.local`, …)
+            self._touch(tmp, '.hidden/proj/.sync')
+            self.assertEqual(discover_projects([tmp], auto=True), [])
+
+    def test_auto_sotto_progetto_annidato(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(tmp, 'proj/.sync')
+            self._touch(tmp, 'proj/sub/.sync')            # sotto-progetto (§4.1)
+            self.assertEqual(discover_projects([tmp], auto=True),
+                             [os.path.join(tmp, 'proj'),
+                              os.path.join(tmp, 'proj', 'sub')])
+
+    def test_auto_e_source_stesso_scan_senza_pruning_nascosto(self):
+        # in modalità source la dir nascosta NON è pruned dai builtin
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(tmp, '.hidden/proj/.sync')
+            self._touch(tmp, 'Library/.sync')
+            self.assertEqual(discover_projects([tmp]),
+                             [os.path.join(tmp, '.hidden', 'proj'),
+                              os.path.join(tmp, 'Library')])
 
 
 if __name__ == '__main__':

@@ -90,5 +90,37 @@ class DoctorTest(CliTestCase):
             self.assertEqual(r.returncode, 0, r.stdout)
 
 
+class AutoDiscoveryCliTest(CliTestCase):
+    """Config SENZA `source:` → modalità auto-discovery (SPEC.md §6)."""
+
+    def auto_cfg(self):
+        return write(os.path.join(self.tmp, 'auto.cfg'), f'dest: {self.dest}\n')
+
+    def test_status_mostra_modalita_e_progetti_scoperti(self):
+        write(os.path.join(self.home, 'proj2', '.sync'), 'include: *.md\n')
+        r = self.cli('status', '--config', self.auto_cfg())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('auto-discovery', r.stdout)
+        self.assertIn('proj2', r.stdout)                 # progetto scoperto
+        self.assertNotIn('modalità  source', r.stdout)
+
+    def test_status_source_mode_invariato(self):
+        r = self.cli('status', '--config', self.cfg)     # config CON source
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('modalità  source', r.stdout)
+        self.assertNotIn('auto-discovery', r.stdout)
+
+    def test_doctor_senza_source_info_verde(self):
+        r = self.cli('doctor', '--config', self.auto_cfg())
+        self.assertIn(r.returncode, (0, 1), r.stdout + r.stderr)
+        self.assertIn('auto-discovery', r.stdout, 'nessuna source = info, non warning')
+        for line in r.stdout.splitlines():
+            if 'config valida' in line:
+                self.assertTrue(line.startswith('✔'), line)
+                break
+        else:
+            self.fail('check config mancante')
+
+
 if __name__ == '__main__':
     unittest.main()

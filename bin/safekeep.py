@@ -51,7 +51,7 @@ def cmd_sync_once(args):
         print(f'progetto non trovato: {args.project}', file=sys.stderr)
         return 1
     if not rows:
-        print('nessun progetto trovato (source senza .sync)', file=sys.stderr)
+        print('nessun progetto trovato (nessun .sync scoperto)', file=sys.stderr)
     for project, stats, absent in rows:
         if args.dry_run:
             for src, dst in stats.get('pianificati', []):
@@ -63,19 +63,23 @@ def cmd_sync_once(args):
 
 
 def cmd_status(args):
-    """Sola lettura: config, source, progetti con N regole, dest con dest_state."""
+    """Sola lettura: config, modalità, source/progetti con N regole, dest con dest_state."""
     daemon = Daemon(args.config)
     daemon.load_config()
     print(f'config    {daemon.config_path}')
     print(f'layout    {daemon.cfg.layout}')
-    for src in daemon.cfg.sources:
-        print(f'source    {src}')
+    if daemon.cfg.sources:
+        print('modalità  source')
+        for src in daemon.cfg.sources:
+            print(f'source    {src}')
+    else:
+        print(f'modalità  auto-discovery da {os.path.expanduser("~")}')
     daemon.load_projects()
     for project in sorted(daemon.projects, key=lambda p: p.root):
         print(f'progetto  {project.name} — {len(project.matcher.rules)} regole '
               f'— {project.root}')
     if not daemon.projects:
-        print('progetto  nessuno (source senza .sync)')
+        print('progetto  nessuno (.sync non trovato)')
     for dest in daemon.cfg.dests:
         print(f'dest      {dest} [{dest_state(dest)}]')
     return 0
@@ -103,8 +107,10 @@ def cmd_doctor(args):
         except ConfigError as e:
             out(False, f'config non valida: {e}', is_fatal=True)
         else:
-            out(True, f'config valida: {cfg_path} '
-                      f'({len(cfg.sources)} source, {len(cfg.dests)} dest)')
+            # nessuna `source` → auto-discovery da $HOME: info, non warning (SPEC §6)
+            mode = (f'{len(cfg.sources)} source' if cfg.sources
+                    else f'auto-discovery da {os.path.expanduser("~")}')
+            out(True, f'config valida: {cfg_path} ({mode}, {len(cfg.dests)} dest)')
 
     if cfg is not None:
         try:

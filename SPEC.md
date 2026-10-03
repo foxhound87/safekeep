@@ -107,8 +107,8 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 
 | Chiave | Tipo | Default | Descrizione |
 |---|---|---|---|
-| `source` | path (ripetibile) | — | radici da osservare; ogni radice è una "sorgente"; dir senza `.sync` = **non seguita** (vedi §4.1) |
-| `dest` | path (ripetibile) | — | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11) |
+| `source` | path (ripetibile) | **opzionale** | radici da osservare; ogni radice è una "sorgente"; assente → **modalità auto-discovery** da `$HOME` (vedi §6); dir senza `.sync` = **non seguita** (vedi §4.1) |
+| `dest` | path (ripetibile) | **obbligatoria** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11) |
 | `layout` | `relative` \| `full` | `relative` | layout dei path di destinazione (vedi nota sotto) |
 | `defaults` | lista regole | builtin | regole di default a **bassa priorità** (sotto le regole globali e sotto `.sync`) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | livello di log su stderr + file di log |
@@ -116,6 +116,14 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 Note:
 
 - `source` e `dest` sono **ripetibili**: più righe = più valori.
+- **Due modalità**, decise dalla presenza di `source`:
+  - **modalità source** (una o più righe `source:`): le radici watch sono le
+    `source` e il comportamento è quello storico (backward compat);
+  - **auto-discovery** (nessuna riga `source:`): watch root = `$HOME`, scan di
+    discovery alla ricerca dei `.sync`, `.sync` creato dopo l'avvio agganciato
+    da solo (vedi §6). Una config senza `source` **non** è un errore.
+- **`dest` è obbligatoria**: nessuna riga `dest:` → `ConfigError` con hint
+  (le destinazioni vivono solo qui, §4.2). Nessuna `source` invece non è un errore.
 - `defaults` accetta regole nella stessa sintassi di `include:`/`exclude:` di `.sync`,
   una per riga, oppure come righe multiple con la stessa chiave.
 - Questo file è **fail-fast**: chiave ignota o riga invalida → `ConfigError` con numero di
@@ -128,6 +136,9 @@ Note:
     del progetto resta nel path, quindi due progetti con lo stesso file relativo non si
     sovrappongono: `src/projA/docs/note.md` → `<dest>/projA/docs/note.md`,
     `src/projB/docs/note.md` → `<dest>/projB/docs/note.md`.
+    In **modalità auto-discovery** la radice di riferimento è `$HOME`, così il path dest
+    tiene il segmento sotto la home (`Code/myapp/docs/a.md`) e i progetti non si
+    sovrappongono.
   - `full`: `<dest>/<path assoluto senza / iniziale>`:
     `~/Code/myapp/docs/a.md` → `<dest>/Users/<user>/Code/myapp/docs/a.md`.
 
@@ -141,6 +152,10 @@ Esempio commentato completo: [`examples/safekeep.example`](examples/safekeep.exa
 
 - Un progetto è **seguito** se contiene un file `.sync` nella sua root.
 - Le sorgenti sono le `source` globali; per ciascuna radice viene cercato un `.sync`.
+  In **modalità auto-discovery** (nessuna `source`, §3 e §6) la ricerca parte da `$HOME`
+  con pruning dedicato: si saltano le directory che iniziano con `.` e `Library`,
+  `.Trash`, `.cache`, `node_modules`, `.git`, `.venv`, `__pycache__`, `venv` —
+  un `.sync` dentro una di queste **non** diventa progetto.
   **Directory senza `.sync` non sono seguite** (nessuna copia, nessun watch esplicito sulle
   sottocartelle oltre al normale recursive di fswatch filtrato dal matcher).
 - Un `.sync` trovato più in profondità (sotto-progetto) è rispettato come unità con le sue
@@ -267,35 +282,50 @@ errore fatale con `log_level: debug`). Teniamo la sintassi esplicita: meno magia
 1. **Carica** la config globale; se assente/invalida → exit code ≠ 0 (launchd con `KeepAlive`
    riprovarebbe: per questo `doctor` va lanciato a mano e il plist usa `KeepAlive` solo dopo un
    load riuscito).
-2. **Scopre i progetti** (scan dei `source` per `.sync`), costruisce la mappa
-   `radice → progetto → regole` (le dest sono quelle globali di `~/.safekeep`).
+2. **Scopre i progetti**, costruisce la mappa `radice → progetto → regole`
+   (le dest sono quelle globali di `~/.safekeep`): modalità source → scan delle
+   `source` per `.sync`; **modalità auto-discovery** (nessuna `source`) → scan di
+   `$HOME` con pruning dedicato (§4.1), stessa logica, radice unica.
 3. **Reconcile iniziale** di tutti i progetti (vedi §9).
 4. **Calcola le regex di esclusione** dai pattern (compresi builtin e regole di sezione `exclude:`
    statiche) e avvia il subprocess:
 
    ```
-   fswatch -0 -m fsevents_monitor -r -l 1.0 -e <regex esclusioni> -- <source roots>
+   fswatch -0 -m fsevents_monitor -r -l 1.0 -e <regex esclusioni> -- <radici watch>
    ```
 
+   - **radici watch**: le `source` del config (modalità source, deduplicate: una
+     radice annidata sotto un'altra già coperta viene saltata — `fswatch -r`
+     copre già il sottoalbero), oppure `$HOME` (modalità auto-discovery);
    - `-0`: separatore NUL (path con spazi/newline sicuri);
    - `-m fsevents_monitor`: monitor nativo FSEvents (File System Events — API di notifica
      filesystem di macOS);
    - `-r`: ricorsivo;
    - `-l 1.0`: batching di almeno 1s (anti-flood a monte);
    - `-e <regex>`: pre-filtro esclusioni lato fswatch (le regex sono un filtro grezzo; la
-     decisione finale resta al matcher Python, che è l'unica fonte di verità).
+     decisione finale resta al matcher Python, che è l'unica fonte di verità). In
+     **modalità auto-discovery** le regex includono in più le exclude dedicate della
+     `$HOME`: `Library`, `.Trash`, `.cache` e `.local/state/safekeep` — non osserviamo
+     i nostri stessi log.
 
 5. **Per ogni path ricevuto** (split su `\0`):
 
    ```
    for path in events:
        project = match_project(path)            # la radice source che lo contiene
-       if project is None: continue             # non seguito (niente .sync)
+       if project is None:
+           if path finisce con '/.sync' e la directory esiste:
+               discovery + reconcile del nuovo progetto   # aggancio istantaneo
+           continue                             # non seguito (niente .sync)
        if is_dir_pruned(path): continue         # verdict esclusa → skip subtree
        verdict = matcher.evaluate(path)          # last-match-wins (§4.3)
        if not verdict: continue                  # non incluso → non copiato (allow-list)
        queue.add(path)
    ```
+
+   L'eccezione su `<dir>/.sync` è il percorso di **nuovo progetto**: un `.sync`
+   creato dopo l'avvio (anche in una directory finora ignota) viene scoperto e
+   riconciliato subito, senza aspettare il rescan.
 
 6. **Debounce/stability**: per ogni path in coda, **stability check** (§7): due `stat` con la
    stessa `size` e `mtime` → procedi; altrimenti ri-programma il path tra ~1s (max N tentativi).
@@ -303,7 +333,9 @@ errore fatale con `log_level: debug`). Teniamo la sintassi esplicita: meno magia
 8. **Anti-flood**: se in una finestra di batch un progetto supera **5000 path** distinti →
    si abbandona la coda incrementale per quel progetto e si lancia un **reconcile completo del
    progetto** (§9).
-9. **Riconciliazione temporizzata**: timer ogni **24h** → reconcile di tutti i progetti.
+9. **Riconciliazione temporizzata**: timer ogni **24h** → **rescan di discovery**
+   (§4.1: recupera i `.sync` di cui è perso l'evento per un downtime) + reconcile
+   di tutti i progetti.
 10. **Mount**: se una dest non è raggiungibile (`dest_state` → `absent`) → stato
     `pending` per quel progetto/dest; backoff esponenziale (vedi §8.3); al remount → reconcile
     del progetto verso quelle dest.
@@ -458,7 +490,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 |---|---|---|
 | `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito |
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce | 0 se tutto ok |
-| `status` | sola lettura: config path, source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
+| `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
 | `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor, python ≥ 3.9, probe TCC, residui tmp, lint plist | 1 se un check **fatale** fallisce |
 
 Esempi:
@@ -577,6 +609,8 @@ illimitata della coda in memoria.
 | Ora di sistema spostata indietro | confronto per *differenza* mtime, non per "più recente": comunque copia |
 | Permessi insufficienti (TCC negato) | log + backoff 60s, `doctor` con istruzioni |
 | File `.sync` rimosso | il progetto smade di essere seguito; le copie esistenti restano intatte |
+| `.sync` creato dopo l'avvio (o perso per downtime) | evento su `<dir>/.sync` → discovery + reconcile del nuovo progetto; in più rescan di discovery ogni 24h (§6) |
+| Directory rumorose nella `$HOME` (auto-discovery) | pruning nello scan (nascoste + `Library`, `.Trash`, `.cache`, …) e regex `-e` dedicate di fswatch |
 | Omonimia di path tra due progetti | **risolto**: il path dest in `relative` è calcolato come relativo alla **radice `source`** che contiene il progetto (§3), quindi include il segmento del progetto — `projA/docs/note.md` e `projB/docs/note.md` non collidono. Resta solo l'omonia fra due *radici source diverse* con la stessa prima directory (prefisso col `name:` in futuro) |
 
 ---
@@ -592,6 +626,7 @@ illimitata della coda in memoria.
 | **T5** | `run`: subprocess fswatch (`-0 -m fsevents_monitor -r -l 1.0 -e …`), dispatcher eventi, debounce, timer 24h, pending/backoff mount, anti-flood (>5000 → collapse a reconcile) | modificare un file sorgente → compare sul dest entro ~2s; dest smontata → pending, remount → catch-up; flood simulato triggera il collapse | da fare |
 | **T6** | CLI `status`/`doctor` + plist launchd + comandi bootout/bootstrap/kickstart (`launchd/`, `install.sh`, `uninstall.sh`) | `doctor` verde su macchina con permessi; plist passa `plutil -lint`; kill del processo → launchd lo riavvia da solo | ✅ fatto (`tests/test_cli.py`) |
 | **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor` rileva dest sotto source; tabella edge case coperta da casi di test | da fare |
+| **T8** | Auto-discovery (`source` opzionale): scan di `$HOME` con pruning dedicato, watch root `$HOME` con exclude home, evento su `/.sync` → nuovo progetto, rescan al timer 24h, dedup watch roots (`safekeep/config.py`, `safekeep/daemon.py`) | config senza `source` valida (senza `dest` → errore con hint); `.sync` in `$HOME` scoperto, `Library`/nascoste potato, sotto-progetto annidato scoperto; watch root source invariata (backward compat); evento `.sync` → discover + reconcile; rescan 24h | ✅ fatto (`tests/test_config.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 
 Ordinamento: T1→T2 (fondamenta), T3→T4 (nucleo sync), T5 (daemon), T6 (operatività),
 T7 (indurimento). Ogni task è verificabile in isolamento. Test: `python3 -m unittest
@@ -604,7 +639,8 @@ discover -s tests`.
 1. **Dove stanno i progetti sorgente reali?** Le `source` globali del config globale vanno
    populate: non è ancora deciso se i progetti vivano sotto `~/Code`, `~/Projects`, o radici
    multiple (incluso `~/Documents`). Finché non si decide, `examples/safekeep.example` usa
-   placeholder commentati.
+   placeholder commentati — oppure si omette del tutto `source:` e si usa la **modalità
+   auto-discovery** da `$HOME` (§3, §6).
 2. **Inizializzazione git del progetto `safekeep`**: il repository è già inizializzato, ma
    **nessuna operazione git** (commit/push/branch/checkout) viene eseguita senza richiesta
    esplicita dell'utente. Da decidere: primo commit, o resta così.

@@ -46,6 +46,11 @@ RELOAD_SYNC = 'reload-sync'
 # dipende dalle regole del progetto (semantica allow-list, §4.3).
 SYNC_RULES = [parse_rule('include: .sync')]
 
+# Modalità auto-discovery (SPEC.md §6): pre-filtro `-e` per la `$HOME` — non
+# osserviamo le directory rumorose né i nostri stessi log.
+HOME_EXCLUDES = ('Library', '.Trash', '.cache', '.local/state/safekeep')
+HOME_EXCLUDE_REGEXES = ['(^|/)' + _glob(p) + r'(/|$)' for p in HOME_EXCLUDES]
+
 
 # ---------------------------------------------------------------- funzioni pure
 
@@ -88,8 +93,12 @@ def load_project(root, cfg):
     layers = [SYNC_RULES, BUILTIN_RULES, cfg.defaults, sync.defaults, sync.rules]
     excludes = [r for layer in layers for r in layer if not r.include]
     name = sync.name or os.path.basename(os.path.normpath(root))
+    # auto-discovery (nessuna `source`): la radice da cui calcolare il path
+    # dest è $HOME, così due progetti sotto la home non si sovrappongono
+    # (SPEC.md §3 layout `relative`)
+    roots = cfg.sources or [os.path.expanduser('~')]
     return Project(root, name, Matcher(*layers), excludes,
-                   source_root=source_root_for(cfg.sources, root))
+                   source_root=source_root_for(roots, root))
 
 
 def parse_events(data, residual=b''):
@@ -129,6 +138,25 @@ def find_project(path, projects):
         if (path == root or path.startswith(root + os.sep)) and len(root) > best_len:
             best, best_len = project, len(root)
     return best
+
+
+def dedup_roots(roots):
+    """Radici watch: quelle annidate sotto un'altra già coperta vengono saltate.
+
+    `fswatch -r` copre già il sottoalbero → niente doppioni in argv e niente
+    progetti scoperti due volte da radici sovrapposte. Ritorna i path come
+    sono scritti nel config (l'ordinamento è per profondità, il più corto
+    prima).
+    """
+    pairs = sorted(((os.path.abspath(os.path.expanduser(r)), r) for r in roots),
+                   key=lambda p: len(p[0]))
+    out, covered = [], []
+    for norm, orig in pairs:
+        if any(norm == c or norm.startswith(c + os.sep) for c in covered):
+            continue
+        out.append(orig)
+        covered.append(norm)
+    return out
 
 
 def exclude_regexes(rules):
@@ -243,9 +271,17 @@ class Daemon:
         self.cfg = parse_config(text, origin=self.config_path)
         return self.cfg
 
+    def discovery_roots(self):
+        """`(roots, auto)`: modalità source → le `source` (deduplicate);
+        auto-discovery → `$HOME` con pruning dedicato (SPEC.md §6)."""
+        if self.cfg.sources:
+            return dedup_roots(self.cfg.sources), False
+        return [os.path.expanduser('~')], True
+
     def load_projects(self):
         self.projects = []
-        for root in discover_projects(self.cfg.sources):
+        roots, auto = self.discovery_roots()
+        for root in discover_projects(roots, auto=auto):
             project = load_project(root, self.cfg)
             if project is not None:
                 self.projects.append(project)
@@ -308,10 +344,14 @@ class Daemon:
         argv = ['fswatch', '-0', '-m', 'fsevents_monitor', '-r', '-l', '1.0']
         for regex in self.exclude_regexes():
             argv += ['-e', regex]
-        return argv + ['--'] + list(self.cfg.sources)
+        return argv + ['--'] + self.discovery_roots()[0]
 
     def exclude_regexes(self):
-        return exclude_regexes(r for p in self.projects for r in p.excludes)
+        rules = [r for p in self.projects for r in p.excludes]
+        regexes = exclude_regexes(rules)
+        if not self.cfg.sources:
+            regexes += HOME_EXCLUDE_REGEXES   # auto-discovery: si guarda la $HOME
+        return regexes
 
     def spawn(self):
         argv = self.argv or self.fswatch_argv()
@@ -387,10 +427,15 @@ class Daemon:
         return max(0.0, min(deadlines) - now)
 
     def check_timers(self):
-        """Reconcile giornaliero + retry delle dest absent con backoff (§8.3)."""
+        """Reconcile giornaliero + retry delle dest absent con backoff (§8.3).
+
+        Il ciclo 24h fa anche il **rescan di discovery**: un `.sync` creato
+        mentre il daemon era spento (evento perso) viene agganciato qui (§6).
+        """
         now = self.clock()
         if now >= self.next_reconcile:
             self.next_reconcile = now + RECONCILE_INTERVAL
+            self.load_projects()
             self.reconcile_all()
         for dest in [d for d, e in self.pending.items() if now >= e['next']]:
             entry = self.pending[dest]
@@ -452,7 +497,13 @@ class Daemon:
     def reload(self, sync_path):
         """Un `.sync` è cambiato: ricarica i progetti e reconcilia quello
         interessato (le regole sono cambiate). Gli eventi di questo batch
-        potrebbero usare matcher vecchi: il reconcile subito dopo convergere."""
+        potrebbero usare matcher vecchi: il reconcile subito dopo convergere.
+
+        Il rescan completo copre anche il `.sync` di un progetto **nuovo** (un
+        evento su `<dir>/.sync` fuori da ogni progetto noto → discovery di quel
+        progetto + reconcile): così l'auto-discovery aggancia un `.sync` creato
+        dopo l'avvio istantaneamente.
+        """
         self.load_projects()
         root = os.path.dirname(sync_path)
         for project in self.projects:
@@ -521,9 +572,12 @@ class Daemon:
         try:
             self.load_config()
             setup_logging('debug' if verbose else self.cfg.log_level)
-            if not self.cfg.sources:
-                log.error('nessuna source in %s: niente da osservare', self.config_path)
-                return 1
+            roots, auto = self.discovery_roots()
+            if auto:
+                log.info('modalità auto-discovery: scan di %s alla ricerca di .sync',
+                         roots[0])
+            else:
+                log.info('modalità source: %d radice/i da osservare', len(roots))
             self.load_projects()
             log.info('%d progetto/i: %s', len(self.projects),
                      ', '.join(p.root for p in self.projects) or '-')

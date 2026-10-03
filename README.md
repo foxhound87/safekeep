@@ -41,8 +41,9 @@ bash install.sh
 
 Then:
 
-1. Fill `~/.safekeep` with your real `source:` and `dest:` entries (the example
-   ships with placeholders — see [`examples/safekeep.example`](examples/safekeep.example));
+1. Fill `~/.safekeep` with your real `dest:` entries — and, optionally, `source:`
+   (the example ships with placeholders — see
+   [`examples/safekeep.example`](examples/safekeep.example));
 2. drop a `.sync` file in the root of every project you want to follow (see
    [`examples/sync.example`](examples/sync.example)); a directory **without** a
    `.sync` is not tracked;
@@ -75,6 +76,13 @@ layout: relative
 
 log_level: info
 ```
+
+`source:` is **optional**. With it present (source mode) the watched roots are
+exactly those entries, as always. Without it safekeep switches to
+**auto-discovery**: it scans `$HOME` for `.sync` files (skipping hidden
+directories, `Library`, `.Trash`, `.cache`, `node_modules`, `.git`, `.venv`,
+`__pycache__`, `venv`), watches `$HOME`, and picks up any `.sync` created after
+startup. `dest:` stays mandatory in both modes.
 
 `~/Code/myapp/.sync` (rules only, no destinations):
 
@@ -113,9 +121,9 @@ bin/safekeep.py <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 94 tests covering the matcher,
-config, atomic copy, volumes, daemon and CLI. `fswatch` is not needed to run the
-tests.
+Stdlib (`unittest`) suite, zero dependencies: 113 tests covering the matcher,
+config, atomic copy, volumes, daemon, auto-discovery and CLI. `fswatch` is not
+needed to run the tests.
 
 ## Documentation
 
