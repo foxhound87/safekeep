@@ -363,5 +363,68 @@ class DoctorLingerTest(CliTestCase):
         self.assertEqual(code, 0, out)
 
 
+class DoctorWslTest(CliTestCase):
+    """SPEC.md §17.2: le tre righe WSL di `doctor` sono informative e non fatali."""
+
+    def doctor_wsl(self, distro='Ubuntu', systemd=False, dest='/mnt/c/backup'):
+        cfg = write(os.path.join(self.tmp, 'wsl.cfg'), f'dest: {dest}\n')
+        args = argparse.Namespace(config=cfg, v=False)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {'HOME': self.home}), \
+                mock.patch.object(cli, 'is_wsl', return_value=True), \
+                mock.patch.object(cli, 'wsl_distro', return_value=distro), \
+                mock.patch.object(cli, 'systemd_user_available',
+                                  return_value=systemd), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_doctor(args)
+        return code, buf.getvalue()
+
+    @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+    def test_wsle_righe_con_hint_systemd_e_drvfs(self):
+        code, out = self.doctor_wsl()
+        self.assertIn('✔ WSL rilevato: Ubuntu', out)
+        hint = next(l for l in out.splitlines()
+                    if 'systemd user non disponibile' in l)
+        self.assertTrue(hint.startswith('✗'), hint)
+        for needle in ('/etc/wsl.conf', 'systemd=true', 'safekeep run',
+                       'warning non fatale'):
+            self.assertIn(needle, hint, needle)
+        drvfs = next(l for l in out.splitlines() if 'drvfs' in l)
+        self.assertIn('/mnt/', drvfs)
+        self.assertEqual(code, 0, out)                     # mai fatale
+
+    @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+    def test_systemd_attivo_nessun_hint(self):
+        code, out = self.doctor_wsl(systemd=True)
+        self.assertNotIn('systemd user non disponibile', out)
+        self.assertIn('WSL rilevato', out)
+        self.assertEqual(code, 0, out)
+
+    @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+    def test_nessun_path_sotto_mnt_niente_drvfs(self):
+        code, out = self.doctor_wsl(dest=os.path.join(self.tmp, 'dst'))
+        self.assertNotIn('drvfs', out)
+        self.assertEqual(code, 0, out)
+
+    def test_detection_reale_via_env_fino_a_doctor(self):
+        """Detection reale (env) fino all'output di doctor: niente patch."""
+        env = dict(os.environ, HOME=self.home, WSL_DISTRO_NAME='Debian')
+        r = subprocess.run([sys.executable, CLI, 'doctor', '--config', self.cfg],
+                           capture_output=True, text=True, env=env, cwd=REPO,
+                           timeout=60)
+        self.assertIn('WSL rilevato: Debian', r.stdout)
+
+    @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+    def test_senza_wsl_nulla_cambia(self):
+        """Su Linux/macOS non-WSL nessuna riga WSL compare (SPEC §17)."""
+        env = {k: v for k, v in os.environ.items() if k != 'WSL_DISTRO_NAME'}
+        env['HOME'] = self.home
+        r = subprocess.run([sys.executable, CLI, 'doctor', '--config', self.cfg],
+                           capture_output=True, text=True, env=env, cwd=REPO,
+                           timeout=60)
+        self.assertNotIn('WSL', r.stdout)
+        self.assertNotIn('drvfs', r.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

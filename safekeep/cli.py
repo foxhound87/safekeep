@@ -20,8 +20,11 @@ from safekeep.platform import (
     install_hint,
     is_darwin,
     is_linux,
+    is_wsl,
     linger_enabled,
     recent_permission_errors,
+    systemd_user_available,
+    wsl_distro,
 )
 from safekeep.volumes import dest_state
 
@@ -243,6 +246,23 @@ def cmd_doctor(args):
                    'riconcedere i permessi al volume (FDA/Full Disk Access)')
     else:
         out(True, f'errori di permesso recenti: nessuno nelle ultime 24h — log: {log}')
+
+    # WSL (SPEC.md §17.2): tre righe informative — nessuna è mai fatale
+    if is_wsl():
+        out(True, f'WSL rilevato: {wsl_distro() or "sconosciuta"} '
+                  '(supporto best-effort, SPEC §17)')
+        if not systemd_user_available():
+            out(False, 'systemd user non disponibile (WSL1 o systemd spento) — '
+                       'abilita systemd in /etc/wsl.conf: [boot] systemd=true '
+                       '(poi wsl --shutdown da Windows) oppure esegui '
+                       '`safekeep run` a mano — warning non fatale')
+        if daemon is not None:
+            sotto_mnt = [p for p in list(daemon.cfg.sources)
+                         + list(daemon.cfg.dests) if p.startswith('/mnt/')]
+            if sotto_mnt:
+                out(True, f'drvfs: {len(sotto_mnt)} path sotto /mnt/ — I/O lento '
+                          'e case-insensitive di default: valuta una dest su ext4 '
+                          'nativa della distro (SPEC §17.2)')
 
     # Linux: il limite di watch di inotify è il rischio #1 sugli alberi grandi
     # (SPEC.md §14.4) — informativo, NON fatale

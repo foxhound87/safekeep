@@ -1,9 +1,10 @@
 """Rilevamento piattaforma (SPEC.md §14.1): l'unico posto che legge `sys.platform`.
 
 Funzioni/constanti minime: monitor fswatch atteso, hint di installazione,
-init system, limite di watch di inotify, log corrente, linger systemd.
-Tutto letto **a chiamata** (mai a import), così i test patchano `sys.platform`
-ed esercitano entrambi i rami anche girando su una sola piattaforma.
+init system, limite di watch di inotify, log corrente, linger systemd,
+rilevamento WSL. Tutto letto **a chiamata** (mai a import), così i test
+patchano `sys.platform` ed esercitano entrambi i rami anche girando su una
+sola piattaforma.
 
 I nomi dei monitor sono quelli stampati da `fswatch -M`: `fsevents_monitor`
 (FSEvents, macOS) e `inotify_monitor` (inotify, Linux) — attenzione, su Linux
@@ -11,6 +12,7 @@ il nome NON è `inotify` (SPEC.md §14.2).
 """
 import getpass
 import os
+import platform as _platform
 import re
 import shutil
 import sys
@@ -20,6 +22,7 @@ INOTIFY_LIMIT_PATH = '/proc/sys/fs/inotify/max_user_watches'
 INOTIFY_MIN_WATCHES = 16384        # sotto questa soglia un home medio lo supera
 LOG_PATH = '~/.local/state/safekeep/safekeep.log'   # log corrente (SPEC.md §3)
 LINGER_DIR = '/var/lib/systemd/linger'
+SYSTEMD_RUN_PATH = '/run/systemd/system'            # assente su WSL1/systemd off
 # EPERM (Errno 1) / EACCES (Errno 13) come li scrive il logger: codice errno
 # + testo del kernel (SPEC.md §14.4)
 PERM_ERR_RE = re.compile(r'\[Errno (?:1|13)\]|Operation not permitted|Permission denied')
@@ -117,3 +120,28 @@ def linger_enabled(user=None, linger_dir=None):
         except OSError:
             return None
     return user in entries
+
+
+def is_wsl():
+    """True dentro WSL (Windows Subsystem for Linux) — SPEC.md §17.1.
+
+    `sys.platform` resta `linux` su WSL: il rilevamento passa dall'env
+    `WSL_DISTRO_NAME` (ogni distro WSL lo settà) oppure dal kernel
+    (`platform.release()` contiene `microsoft` su WSL1 e WSL2)."""
+    if os.environ.get('WSL_DISTRO_NAME'):
+        return True
+    return 'microsoft' in _platform.release().lower()
+
+
+def wsl_distro():
+    """Nome della distro WSL (env `WSL_DISTRO_NAME`), vuoto se assente —
+    SPEC.md §17.1."""
+    return os.environ.get('WSL_DISTRO_NAME', '')
+
+
+def systemd_user_available(path=None):
+    """True se c'è un init systemd vivo (`/run/systemd/system`): assente su
+    WSL1 o con systemd spento in WSL2 — SPEC.md §17.2."""
+    if path is None:
+        path = SYSTEMD_RUN_PATH
+    return os.path.exists(path)

@@ -227,5 +227,70 @@ class LingerTest(unittest.TestCase):
             self.assertFalse(plat.linger_enabled(linger_dir=self._dir()))
 
 
+class WslTest(unittest.TestCase):
+    """SPEC.md §17.1: rilevamento WSL via env o kernel, letto a chiamata."""
+
+    def test_env_wsl_distro_name(self):
+        with mock.patch.dict(os.environ, {'WSL_DISTRO_NAME': 'Ubuntu'}):
+            self.assertTrue(plat.is_wsl())
+            self.assertEqual(plat.wsl_distro(), 'Ubuntu')
+
+    def test_kernel_microsoft_senza_env(self):
+        for release in ('5.15.167.4-microsoft-standard-WSL2',   # WSL2
+                        '4.4.0-19041-Microsoft'):              # WSL1 (maiuscolo)
+            with self.subTest(release=release), \
+                    mock.patch.dict(os.environ, {'WSL_DISTRO_NAME': ''}), \
+                    mock.patch.object(plat, '_platform') as p:
+                p.release.return_value = release
+                self.assertTrue(plat.is_wsl())
+                self.assertEqual(plat.wsl_distro(), '')
+
+    def test_non_wsl(self):
+        with mock.patch.dict(os.environ, {'WSL_DISTRO_NAME': ''}), \
+                mock.patch.object(plat, '_platform') as p:
+            p.release.return_value = '24.6.0'             # macOS, niente microsoft
+            self.assertFalse(plat.is_wsl())
+            self.assertEqual(plat.wsl_distro(), '')
+
+    def test_systemd_user_available(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(plat.systemd_user_available(path=d))
+        self.assertFalse(
+            plat.systemd_user_available(path='/non/esiste/qui'),
+            '/run/systemd/system assente = WSL1 o systemd spento (SPEC §17.2)')
+
+
+@unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+class InstallShSenzaSystemdTest(unittest.TestCase):
+    """SPEC.md §17.3: `install.sh` su Linux senza systemd → unit NON installata,
+    istruzioni di avvio manuale ed exit 0 (nessun errore duro)."""
+
+    def test_ramo_linux_senza_systemd_esce_0(self):
+        if os.path.isdir('/run/systemd/system'):
+            self.skipTest('questa macchina ha systemd: ramo diverso')
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        home, fake_bin = os.path.join(tmp, 'home'), os.path.join(tmp, 'bin')
+        os.makedirs(home)
+        os.makedirs(fake_bin)
+        uname = os.path.join(fake_bin, 'uname')            # uname finto → Linux
+        with open(uname, 'w') as fh:
+            fh.write('#!/bin/bash\necho Linux\n')
+        os.chmod(uname, 0o755)
+        env = dict(os.environ, HOME=home,
+                   PATH=fake_bin + os.pathsep + os.environ['PATH'])
+        r = subprocess.run(['bash', os.path.join(REPO, 'install.sh')],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('systemd non disponibile', r.stdout)
+        self.assertIn('safekeep.py run', r.stdout)         # avvio manuale
+        self.assertIn('systemd=true', r.stdout)            # hint /etc/wsl.conf
+        self.assertTrue(os.path.exists(os.path.join(home, '.safekeep')),
+                        'la config viene creata comunque')
+        self.assertFalse(os.path.exists(
+            os.path.join(home, '.config/systemd/user/safekeep.service')),
+            'niente unit senza systemd')
+
+
 if __name__ == '__main__':
     unittest.main()
