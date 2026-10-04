@@ -1,7 +1,18 @@
 # Same contract as the `test` job in .gitlab-ci.yml: run the unittest suite on
-# a stock Linux runner with Python only. fswatch is deliberately NOT installed —
-# `tests/test_cli.py` tolerates its absence, and on Linux the `fsevents_monitor`
-# check would make `doctor` fail (see the portability note in .gitlab-ci.yml).
+# a stock Linux runner with Python. fswatch IS installed since 0.3.0 — `doctor`
+# looks for the platform monitor (`fsevents_monitor` on Darwin, `inotify_monitor`
+# on Linux) and its TCC/plist checks are Darwin-only, so the suite runs against
+# the real binary here too (see the portability note in .gitlab-ci.yml).
+#
+# Plus the E2E (end-to-end) step that .gitlab-ci.yml cannot show us: a LIVE
+# daemon on Linux with the real fswatch (inotify), a real copy into a tmp
+# dest, the `.sync` exclusions under live events, `doctor --config` exit 0 and
+# a clean shutdown with no `*.safekeep.tmp.*` residue. That step is the gate —
+# every unittest drives a fake fswatch (see tests/e2e_linux.sh header).
+#
+# One job, not two: the suite and the E2E share the checkout, the Python and
+# the `apt-get install fswatch`, and a step-level failure already names the
+# phase that broke (GH = GitHub Actions).
 name: tests
 
 on:
@@ -17,7 +28,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install fswatch
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fswatch
+          fswatch --version
+          fswatch -M
       - name: Run test suite
         run: |
           python3 --version
           python3 -m unittest discover -s tests
+      # Live daemon: real fswatch + real copy + doctor, inside a mktemp sandbox
+      - name: E2E live daemon (Linux)
+        run: bash tests/e2e_linux.sh
