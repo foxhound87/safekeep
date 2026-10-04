@@ -4,11 +4,15 @@ Entry point del package (`safekeep.cli:main`): `bin/safekeep.py` è solo lo
 shim che usano launchd/systemd e i test.
 """
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 
+from safekeep import __version__
 from safekeep.config import ConfigError, discover_projects, parse_sync
 from safekeep.copier import TMP_INFIX
 from safekeep.daemon import Daemon, setup_logging
@@ -58,11 +62,14 @@ def build_parser():
                            'non è più incluso dal matcher (default: mai cancellare)')
     sub.add_parser('status', parents=[common],
                    help='config, progetti e stato delle dest — sola lettura')
-    sub.add_parser('doctor', parents=[common],
-                   help='diagnostica: config, fswatch + monitor di piattaforma, python, '
-                        'errori di permesso recenti nel log, TCC/plist (macOS), '
-                        'inotify/systemd/linger (Linux) — exit ≠ 0 se un check '
-                        'fatale fallisce')
+    doc = sub.add_parser('doctor', parents=[common],
+                         help='diagnostica: config, fswatch + monitor di piattaforma, '
+                              'python, errori di permesso recenti nel log, TCC/plist '
+                              '(macOS), inotify/systemd/linger (Linux) — exit ≠ 0 se '
+                              'un check fatale fallisce')
+    doc.add_argument('--json', action='store_true',
+                     help='stessi check, stesso exit code, ma un documento JSON su '
+                          'stdout (SPEC.md §9.1)')
     return parser
 
 
@@ -144,12 +151,28 @@ def check_sync_files(daemon):
 
 
 def cmd_doctor(args):
-    """Un check per riga con esito ✔/✗; exit 1 se almeno un check fatale fallisce."""
+    """Un check per riga con esito ✔/✗; exit 1 se almeno un check fatale fallisce.
+
+    Con `--json` le righe non vengono stampate: la stessa sequenza di check finisce
+    in un documento JSON su stdout, con lo stesso exit code (SPEC.md §9.1)."""
     fatal = False
+    checks, ids = [], {}
 
     def out(ok, msg, is_fatal=False):
         nonlocal fatal
-        print(('✔ ' if ok else '✗ ') + msg)
+        if args.json:
+            # id = slug del messaggio (prefisso fino a ':' o '('), id uguali
+            # ripetuti suffissati _2/_3 così restano chiave usabile (SPEC §9.1)
+            base = re.split(r'[:\(]', msg, maxsplit=1)[0]
+            ident = re.sub(r'[^a-z0-9]+', '_', base.lower()).strip('_') or 'check'
+            ids[ident] = ids.get(ident, 0) + 1
+            if ids[ident] > 1:
+                ident = f'{ident}_{ids[ident]}'
+            checks.append({'id': ident,
+                           'status': 'ok' if ok else ('fail' if is_fatal else 'warn'),
+                           'message': msg})
+        else:
+            print(('✔ ' if ok else '✗ ') + msg)
         if not ok and is_fatal:
             fatal = True
 
@@ -346,7 +369,20 @@ def cmd_doctor(args):
                            'senza login → loginctl enable-linger $USER — '
                            'warning non fatale')
 
-    return 1 if fatal else 0
+    code = 1 if fatal else 0
+    if args.json:
+        count, last = recent if recent is not None else (0, None)
+        print(json.dumps({
+            'safekeep': __version__,
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+            'exit': code,
+            'checks': checks,
+            'permission_errors': {
+                'count_24h': count,
+                'last': last.strftime('%Y-%m-%d %H:%M:%S') if last else None,
+            },
+        }, ensure_ascii=False, indent=2))
+    return code
 
 
 def main(argv=None):
