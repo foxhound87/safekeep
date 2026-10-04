@@ -963,6 +963,19 @@ gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
 Così i classifier Python di §14.7 (`3.9`, `3.12`, `3.14`) sono coperti **anche dalla
 CI**, non più solo dalla suite locale dell'utente.
 
+**Ramo WSL eseguito in CI**: fin da 0.4.0 §17 dichiarava che WSL non era verificabile
+in locale (nessuna macchina WSL). Entrambi i job `test` aggiungono quindi uno step
+`WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only` → grep sul
+marker `WSL rilevato: SafekeepCITest` → exit 0: sull'env del runner `is_wsl()` diventa
+`True` e `doctor` percorre **davvero** il blocco WSL (rilevamento + hint systemd +
+drvfs), non un test che lo finge. `--doctor-only` è il flag aggiunto a
+`tests/e2e_linux.sh`: crea il sandbox (source/dest/config tmp — un `--config`
+inesistente è un check fatale), lancia `doctor` e si ferma senza avviare il daemon.
+Gate = marker presente **e** exit 0: i tre check WSL sono non fatali (§17.2), quindi
+un check fatale qualsiasi (config, fswatch, monitor, python) rende comunque lo step
+rosso. Nessuna dipendenza nuova: solo python3 + `bash`/`grep`/`mktemp` e il `fswatch`
+che i job installano già.
+
 ### 14.7 Metadata release (`pyproject.toml`)
 
 Le metadata PyPI di un upload sono **immutabili**: ciò che cambia in `pyproject.toml`

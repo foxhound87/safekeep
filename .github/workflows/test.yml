@@ -53,3 +53,16 @@ jobs:
       # ubuntu-latest, unlike the GitLab -slim images)
       - name: E2E live daemon (Linux)
         run: bash tests/e2e_linux.sh
+      # WSL branch executed for REAL (SPEC.md §14.6/§17.2): WSL_DISTRO_NAME
+      # flips is_wsl() on this stock runner, so `doctor` really walks the WSL
+      # block instead of the unit tests faking the env. `--doctor-only` reuses
+      # the e2e sandbox (tmp source/dest/config — a missing --config is a fatal
+      # check) and skips the daemon. Gate = marker printed AND exit 0: all
+      # three WSL lines are non-fatal, so any fatal check still goes red.
+      # Needs nothing but bash/grep/mktemp + the already installed fswatch.
+      - name: WSL branch in doctor (WSL_DISTRO_NAME)
+        run: |
+          set -o pipefail
+          log="$(mktemp)"
+          WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only | tee "$log"
+          grep -F 'WSL rilevato: SafekeepCITest' "$log"
