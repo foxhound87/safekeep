@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/safekeep)](https://pypi.org/project/safekeep/)
 [![Python](https://img.shields.io/pypi/pyversions/safekeep)](https://pypi.org/project/safekeep/)
 
-**Selective always-on backups for macOS**: watches source folders with
+**Selective always-on backups for macOS and Linux**: watches source folders with
 [fswatch](https://github.com/emcrisostomo/fswatch) and copies only the files you
 chose to their destinations — an **allow-list** model that **never deletes**
 anything in the backup (a file removed or renamed at the source stays in the
@@ -24,7 +24,8 @@ Documentation: https://foxhound87.github.io/safekeep/
   don't matter, the next reconcile brings everything back in sync.
 - **Unmounted volumes**: missing destination → `pending` state with exponential
   backoff (1s → 60s cap), then a reconcile once the mount is back.
-- **launchd at boot**: an agent with `RunAtLoad` + `KeepAlive` keeps the process
+- **launchd (macOS) or systemd (Linux) at boot**: an agent with `RunAtLoad` +
+  `KeepAlive` (or `WantedBy=default.target` + `Restart=always`) keeps the process
   alive and restarts it if it dies.
 - **`.sync` carries rules only, destinations live only in `~/.safekeep`**: a
   `.sync` file can neither add nor remove destinations (a `dest:` line is an
@@ -39,27 +40,31 @@ pipx install safekeep     # recommended for a CLI
 pip install safekeep
 ```
 
-**Requirements**: macOS, Python >= 3.9 and
+**Requirements**: macOS or Linux (POSIX with systemd), Python >= 3.9 and
 [fswatch](https://github.com/emcrisostomo/fswatch):
 
 ```bash
-brew install fswatch
+brew install fswatch      # macOS
+sudo pacman -S fswatch    # Arch / Omarchy
+sudo apt install fswatch  # Debian / Ubuntu
+sudo dnf install fswatch  # Fedora
 ```
 
-The **launchd agent** (daemon at boot) is installed from a checkout of this
-repository with `./install.sh` — not from the wheel — see
-[Agent (launchd)](#agent-launchd) below.
+The **agent** (daemon at boot: launchd on macOS, a systemd *user unit* on Linux)
+is installed from a checkout of this repository with `./install.sh` — not from
+the wheel — see [Agent](#agent) below.
 
-## Agent (launchd)
+## Agent
 
 ```bash
-git clone https://gitlab.com/foxhound87/safekeep.git
+git clone https://github.com/foxhound87/safekeep.git
 cd safekeep
 
-# only external dependency, if not installed yet
-brew install fswatch
+# only external dependency, if not installed yet (see the per-OS list above)
+brew install fswatch      # macOS — the script suggests the right command on Linux
 
-# copies the example into ~/.safekeep, renders the plist, runs preflight checks
+# copies the example into ~/.safekeep, renders the plist / systemd unit,
+# runs preflight checks
 bash install.sh
 ```
 
@@ -74,12 +79,21 @@ Then:
 3. load the agent:
 
 ```bash
+# macOS (launchd)
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
 # unload with: launchctl bootout gui/$(id -u)/com.safekeep.agent
+
+# Linux (systemd user unit)
+systemctl --user enable --now safekeep
+# status with: systemctl --user status safekeep
+# logs with:   journalctl --user -u safekeep -f
+# unload with: systemctl --user disable --now safekeep
+# start at boot without a login session: loginctl enable-linger $USER
 ```
 
-Once you have granted TCC/FDA (Full Disk Access) permissions to the Python
-interpreter and to `fswatch`, run `safekeep doctor` for diagnostics.
+On macOS, once you have granted TCC/FDA (Full Disk Access) permissions to the
+Python interpreter and to `fswatch`, run `safekeep doctor` for diagnostics. On
+Linux the same command checks the `inotify` watch limit instead.
 
 ## Quickstart
 
@@ -143,7 +157,7 @@ safekeep <command> [--config PATH] [-v]
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--project PATH] [--prune]` | a single pass: walks the source and copies whatever differs (`--dry-run` only prints what it would copy; `--prune` also removes dest files whose source still exists but is no longer included) |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
-| `doctor` | diagnostics: config, fswatch, TCC, launchd plist — exits non-zero if a fatal check fails |
+| `doctor` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails |
 
 ## Tests
 
@@ -151,9 +165,12 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 156 tests covering the matcher,
-config, atomic copy, volumes, daemon, auto-discovery and CLI. `fswatch` is not
-needed to run the tests.
+Stdlib (`unittest`) suite, zero dependencies: 175 tests covering the matcher,
+config, atomic copy, volumes, daemon, auto-discovery, CLI and the POSIX
+portability layer (platform helper, per-OS fswatch monitor, systemd template).
+`fswatch` is not needed to run the suite — the few `doctor` checks that talk to
+the real binary are skipped when it's missing — but CI installs it so the
+Linux job exercises the real `inotify` monitor.
 
 ## Documentation
 

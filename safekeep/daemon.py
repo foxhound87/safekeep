@@ -4,7 +4,8 @@
 Un solo processo, nessun thread: `step()` fa `select` su stdout di fswatch con
 timeout pari alla scadenza più vicina (reconcile giornaliero, retry dest
 absent, respawn fswatch). Le regex `-e` sono un pre-filtro grezzo: la verità
-su cosa copiare resta al matcher Python (SPEC.md §6.4).
+su cosa copiare resta al matcher Python (SPEC.md §6.4). Il monitor di fswatch
+viene da `safekeep.platform` (SPEC.md §14.1).
 """
 import logging
 import logging.handlers
@@ -26,6 +27,7 @@ from .config import (
 )
 from .copier import MOUNT_ERRNOS, copy_one, needs_copy, prune_project, reconcile_project
 from .matcher import BUILTIN_RULES, Matcher, _glob, parse_rule
+from .platform import fswatch_monitor, init_system
 from .volumes import backoff_schedule, dest_state, partition_dests
 
 log = logging.getLogger('safekeep')
@@ -34,7 +36,7 @@ FLOOD_LIMIT = 5000        # path per progetto in un batch → collapse a reconci
 DEDUP_WINDOW = 2.0        # secondi: stessa path entro la finestra → un solo evento
 RECONCILE_INTERVAL = 24 * 3600
 DEATH_WINDOW = 60         # finestra di conteggio delle morti di fswatch
-MAX_DEATHS = 5            # 5 morti in 60s → esco con codice ≠ 0 (launchd ci riprova)
+MAX_DEATHS = 5            # 5 morti in 60s → esco con codice ≠ 0 (l'init system ci riprova)
 RESPAWN_CAP = 60          # backoff respawn 1 → 60s
 
 SKIP = 'skip'
@@ -409,8 +411,9 @@ class Daemon:
     # --- fswatch ---------------------------------------------------------
 
     def fswatch_argv(self):
-        """`fswatch -0 -m fsevents_monitor -r -l 1.0 -e <regex> -- <roots>` (§6.4)."""
-        argv = ['fswatch', '-0', '-m', 'fsevents_monitor', '-r', '-l', '1.0']
+        """`fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>` (§6.4, §14.2):
+        il monitor è dichiarato per piattaforma, mai il default implicito."""
+        argv = ['fswatch', '-0', '-m', fswatch_monitor(), '-r', '-l', '1.0']
         for regex in self.exclude_regexes():
             argv += ['-e', regex]
         return argv + ['--'] + self.discovery_roots()[0]
@@ -462,8 +465,8 @@ class Daemon:
         self.deaths.append(now)
         if len(self.deaths) >= MAX_DEATHS:
             log.error('fswatch morto %d volte in %ds: esco con codice != 0 '
-                      '(launchd con KeepAlive ci riproverà)',
-                      len(self.deaths), DEATH_WINDOW)
+                      '(%s ci riproverà)',
+                      len(self.deaths), DEATH_WINDOW, init_system())
             self.fatal = True
             return
         if now - self.last_spawn >= DEATH_WINDOW:
