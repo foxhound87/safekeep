@@ -6,25 +6,31 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "safekeep"
 dynamic = ["version"]
-description = "Selective always-on backups for macOS: fswatch-driven copy of allow-listed files, never deletes"
+description = "Selective always-on backups for macOS and Linux: fswatch-driven copy of allow-listed files, never deletes"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.9"
-keywords = ["backup", "macos", "fswatch", "sync", "allow-list", "launchd"]
+keywords = ["backup", "macos", "linux", "fswatch", "sync", "allow-list", "launchd", "systemd"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: System Administrators",
     "Operating System :: MacOS",
+    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: System :: Archiving :: Backup",
 ]
 # zero runtime dependencies: solo stdlib (fswatch è un binario esterno)
 
 [project.urls]
-Homepage = "https://gitlab.com/foxhound87/safekeep"
-Repository = "https://gitlab.com/foxhound87/safekeep"
+Repository = "https://github.com/foxhound87/safekeep"
+Homepage = "https://foxhound87.github.io/safekeep/"
+Documentation = "https://foxhound87.github.io/safekeep/"
 
 [project.scripts]
 safekeep = "safekeep.cli:main"
