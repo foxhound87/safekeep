@@ -911,3 +911,13 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
     vedono da `0.3.0`, mentre `0.2.0` resta con le vecchie.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
+
+---
+
+## 17. Roadmap / prossima versione
+
+**WSL (Windows Subsystem for Linux)**: supporto previsto per **0.4.0**. La base Linux di
+0.3.0 (systemd user unit, `inotify`, fswatch) dovrebbe girarci in gran parte; da valutare:
+`init` (systemd in WSL2 opzionale → fallback senza servizio, `safekeep run` manuale),
+path `/mnt/c` (drvfs: performance e case-sensitivity), fswatch su WSL e assenza di FSEvents.
+Solo design intent, nessun codice in 0.3.0.
