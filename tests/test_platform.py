@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest import mock
 
 from safekeep import platform as plat
@@ -144,6 +145,86 @@ class AgentTemplateTest(unittest.TestCase):
             text = fh.read()
         for needle in ('RunAtLoad', 'KeepAlive', '__REPO__', '__PYTHON__'):
             self.assertIn(needle, text, needle)
+
+
+class RecentPermissionErrorsTest(unittest.TestCase):
+    """SPEC.md §14.4: errori di permesso recenti nel log, finestra 24h,
+    non fatale; righe senza timestamp sicuro non vengono contate."""
+
+    NOW = datetime(2026, 10, 4, 20, 0, 0)
+
+    def _log(self, text):
+        fd, path = tempfile.mkstemp(suffix='.log')
+        self.addCleanup(os.unlink, path)
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(text)
+        return path
+
+    @staticmethod
+    def _stamp(dt):
+        return dt.strftime('%Y-%m-%d %H:%M:%S,000')   # formato %(asctime)s
+
+    def test_ricente_vecchio_e_normale_nello_stesso_log(self):
+        text = (
+            f'{self._stamp(self.NOW - timedelta(hours=2))} ERROR copia fallita '
+            "a → b: [Errno 1] Operation not permitted: '/x.tmp.1'\n"
+            f'{self._stamp(self.NOW - timedelta(days=3))} ERROR copia fallita '
+            "a → b: [Errno 13] Permission denied: '/y'\n"
+            f'{self._stamp(self.NOW - timedelta(minutes=5))} INFO reconcile: 0 copie\n'
+        )
+        count, last = plat.recent_permission_errors(self._log(text), now=self.NOW)
+        self.assertEqual(count, 1, 'solo la riga nelle ultime 24h')
+        self.assertEqual(last, self.NOW - timedelta(hours=2))
+
+    def test_log_assente(self):
+        self.assertIsNone(
+            plat.recent_permission_errors('/non/esiste/safekeep.log'),
+            'nessun log ⇒ check saltato, non warning')
+
+    def test_timestamp_illeggibile_non_e_contato(self):
+        text = ("senza-data ERROR [Errno 1] Operation not permitted: '/x'\n"
+                + f'{self._stamp(self.NOW - timedelta(hours=1))} ERROR '
+                  "[Errno 1] Operation not permitted: '/y'\n"
+                + f'{self._stamp(self.NOW + timedelta(hours=1))} ERROR '
+                  "[Errno 1] Operation not permitted: '/z'\n")
+        count, _ = plat.recent_permission_errors(self._log(text), now=self.NOW)
+        self.assertEqual(count, 1, 'non sicuri (o clock skew) ⇒ non contiamo')
+
+    def test_copre_eperm_e_eacces(self):
+        for riga in ('[Errno 1] Operation not permitted',
+                     'qualcosa Operation not permitted',
+                     '[Errno 13] Permission denied',
+                     'qualcosa Permission denied'):
+            with self.subTest(riga=riga):
+                self.assertIsNotNone(plat.PERM_ERR_RE.search(riga))
+        self.assertIsNone(plat.PERM_ERR_RE.search('INFO reconcile: 0 copie'))
+
+
+class LingerTest(unittest.TestCase):
+    """SPEC.md §14.4: linger systemd, directory finta al posto di
+    /var/lib/systemd/linger."""
+
+    def _dir(self, *entries):
+        path = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, path, ignore_errors=True)
+        for name in entries:
+            open(os.path.join(path, name), 'w').close()
+        return path
+
+    def test_abilitato_disabilitato_e_dir_assente(self):
+        d = self._dir('utente')
+        self.assertTrue(plat.linger_enabled(user='utente', linger_dir=d))
+        self.assertFalse(plat.linger_enabled(user='altro', linger_dir=d))
+        self.assertIsNone(
+            plat.linger_enabled(user='utente',
+                                linger_dir=os.path.join(os.sep, 'niente', 'qui')),
+            'niente systemd ⇒ non determinabile, check saltato')
+
+    def test_user_default_e_costante(self):
+        self.assertEqual(plat.LINGER_DIR, '/var/lib/systemd/linger')
+        with mock.patch('getpass.getuser', return_value='chi'):
+            self.assertTrue(plat.linger_enabled(linger_dir=self._dir('chi')))
+            self.assertFalse(plat.linger_enabled(linger_dir=self._dir()))
 
 
 if __name__ == '__main__':

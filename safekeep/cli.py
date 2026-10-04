@@ -14,11 +14,14 @@ from safekeep.copier import TMP_INFIX
 from safekeep.daemon import Daemon, setup_logging
 from safekeep.platform import (
     INOTIFY_MIN_WATCHES,
+    LOG_PATH,
     fswatch_monitor,
     inotify_limit,
     install_hint,
     is_darwin,
     is_linux,
+    linger_enabled,
+    recent_permission_errors,
 )
 from safekeep.volumes import dest_state
 
@@ -54,7 +57,8 @@ def build_parser():
                    help='config, progetti e stato delle dest — sola lettura')
     sub.add_parser('doctor', parents=[common],
                    help='diagnostica: config, fswatch + monitor di piattaforma, python, '
-                        'TCC/plist (macOS), inotify/systemd (Linux) — exit ≠ 0 se un check '
+                        'errori di permesso recenti nel log, TCC/plist (macOS), '
+                        'inotify/systemd/linger (Linux) — exit ≠ 0 se un check '
                         'fatale fallisce')
     return parser
 
@@ -226,6 +230,20 @@ def cmd_doctor(args):
     out(sys.version_info >= (3, 9),
         f'python {sys.version.split()[0]} (≥ 3.9)', is_fatal=True)
 
+    # Errori di permesso recenti nel log corrente (SPEC.md §14.4): sintomo
+    # delle ultime 24h, non stato del sistema → sempre NON fatale
+    log = os.path.expanduser(LOG_PATH)
+    recent = recent_permission_errors()
+    if recent is None:
+        out(True, f'errori di permesso recenti: log assente — check saltato ({log})')
+    elif recent[0] > 0:
+        out(False, f'errori di permesso recenti: {recent[0]} nelle ultime 24h '
+                   f'(ultimo: {recent[1]}) — log: {log} — warning non fatale: '
+                   'vedi i pending con `safekeep sync-once --dry-run`, poi '
+                   'riconcedere i permessi al volume (FDA/Full Disk Access)')
+    else:
+        out(True, f'errori di permesso recenti: nessuno nelle ultime 24h — log: {log}')
+
     # Linux: il limite di watch di inotify è il rischio #1 sugli alberi grandi
     # (SPEC.md §14.4) — informativo, NON fatale
     if is_linux():
@@ -296,6 +314,17 @@ def cmd_doctor(args):
                                'del template — rilancia install.sh', is_fatal=True)
                 else:
                     out(True, f'unit systemd: {unit}')
+            # linger: solo dove la unit è installata (SPEC.md §14.4) — non fatale
+            enabled = linger_enabled()
+            if enabled is None:
+                out(True, 'linger: non verificabile (/var/lib/systemd/linger '
+                          'assente) — check saltato')
+            elif enabled:
+                out(True, 'linger: abilitato (agent al boot anche senza login)')
+            else:
+                out(False, "linger: NON abilitato — l'agent non partirà al boot "
+                           'senza login → loginctl enable-linger $USER — '
+                           'warning non fatale')
 
     return 1 if fatal else 0
 

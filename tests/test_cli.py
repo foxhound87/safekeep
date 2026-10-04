@@ -4,6 +4,7 @@ Ogni run è un subprocess con HOME finto: niente scritture nella home reale.
 """
 import argparse
 import contextlib
+import getpass
 import io
 import os
 import shutil
@@ -11,9 +12,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest import mock
 
-from safekeep import cli
+from safekeep import cli, platform as plat
 from safekeep.platform import fswatch_monitor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -269,6 +271,96 @@ class PruneCliTest(CliTestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dest, 'proj/old.txt')))
         for keep in ('proj/keep.md', 'proj/gone.md', 'proj/.sync', 'fuori.md'):
             self.assertTrue(os.path.exists(os.path.join(self.dest, keep)), keep)
+
+
+class DoctorPermessiRecentiTest(CliTestCase):
+    """SPEC.md §14.4: errori di permesso nel log corrente — finestra 24h,
+    warning non fatale, log assente ⇒ check saltato."""
+
+    def log_path(self):
+        return os.path.join(self.home, '.local/state/safekeep/safekeep.log')
+
+    @staticmethod
+    def stamp(delta):
+        return (datetime.now() - delta).strftime('%Y-%m-%d %H:%M:%S,000')
+
+    def riga(self, delta, msg='[Errno 1] Operation not permitted: /x.tmp.1'):
+        return f'{self.stamp(delta)} ERROR copia fallita a → b: {msg}\n'
+
+    def riga_doctor(self, stdout):
+        self.assertIn('errori di permesso', stdout, stdout)
+        return next(l for l in stdout.splitlines() if 'errori di permesso' in l)
+
+    def test_errore_recente_warning_non_fatale(self):
+        write(self.log_path(), self.riga(timedelta(hours=3)))
+        r = self.cli('doctor', '--config', self.cfg)
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✗'), line)
+        for needle in ('nelle ultime 24h', 'warning non fatale',
+                       'sync-once --dry-run', 'Full Disk Access',
+                       self.log_path()):
+            self.assertIn(needle, line, needle)
+        self.assertEqual(r.returncode, 0, r.stdout)      # NON fatale
+
+    def test_errore_vecchio_verde(self):
+        write(self.log_path(),
+              self.riga(timedelta(days=3), '[Errno 13] Permission denied'))
+        r = self.cli('doctor', '--config', self.cfg)
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('nessuno nelle ultime 24h', line)
+
+    def test_log_assente_check_saltato(self):
+        r = self.cli('doctor', '--config', self.cfg)     # nessun log nel HOME finto
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('check saltato', line)
+
+
+@unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+class DoctorLingerTest(CliTestCase):
+    """SPEC.md §14.4: linger solo dove c'è la unit systemd, warning non fatale."""
+
+    def doctor_linux(self, unit=True, linger=()):
+        if unit:
+            write(os.path.join(self.home, '.config/systemd/user/safekeep.service'),
+                  '[Unit]\nDescription=safekeep\n')
+        linger_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, linger_dir, ignore_errors=True)
+        for name in linger:
+            open(os.path.join(linger_dir, name), 'w').close()
+        args = argparse.Namespace(config=self.cfg, v=False)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {'HOME': self.home}), \
+                mock.patch.object(cli, 'is_linux', return_value=True), \
+                mock.patch.object(cli, 'is_darwin', return_value=False), \
+                mock.patch.object(plat, 'LINGER_DIR', linger_dir), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_doctor(args)
+        return code, buf.getvalue()
+
+    @staticmethod
+    def riga_linger(out):
+        return next(l for l in out.splitlines() if 'linger' in l)
+
+    def test_unit_assenta_niente_linger(self):
+        code, out = self.doctor_linux(unit=False)
+        self.assertNotIn('linger', out, 'il check esiste solo con la unit installata')
+        self.assertEqual(code, 0, out)
+
+    def test_linger_disabilitato_warning_non_fatale(self):
+        code, out = self.doctor_linux(unit=True)
+        line = self.riga_linger(out)
+        self.assertTrue(line.startswith('✗'), line)
+        self.assertIn('loginctl enable-linger', line)
+        self.assertIn('warning non fatale', line)
+        self.assertEqual(code, 0, out)                   # NON fatale
+
+    def test_linger_abilitato_verde(self):
+        code, out = self.doctor_linux(unit=True, linger=(getpass.getuser(),))
+        line = self.riga_linger(out)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertEqual(code, 0, out)
 
 
 if __name__ == '__main__':
