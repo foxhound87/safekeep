@@ -10,6 +10,19 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 PY="${SAFEKEEP_PYTHON:-/opt/homebrew/bin/python3}"
 OS="$(uname -s)"
 
+# --trend (SPEC.md §9.2): render + bootstrap SOLO dell'agent orario del trend.
+# Non tocca, non ricarica la unit dell'agente principale.
+TREND=0
+for arg in "$@"; do
+    case "$arg" in
+        --trend) TREND=1 ;;
+        -h|--help)
+            echo "uso: $0 [--trend]   (--trend = installa solo l'agent trend orario, SPEC §9.2)"
+            exit 0 ;;
+        *) echo "uso: $0 [--trend]" >&2; exit 2 ;;
+    esac
+done
+
 # --- preflight: fswatch + python3 ---------------------------------------------
 if ! command -v fswatch >/dev/null 2>&1; then
     case "$OS" in
@@ -42,6 +55,38 @@ mkdir -p "$HOME/.local/state/safekeep"
 if [ ! -f "$HOME/.safekeep" ]; then
     cp "$REPO/examples/safekeep.example" "$HOME/.safekeep"
     echo "→ creata $HOME/.safekeep (da examples/safekeep.example)"
+fi
+
+# --- agent trend (SPEC §9.2): render + bootstrap, daemon principale intatto ---
+if [ "$TREND" = 1 ]; then
+    if [ "$OS" != Darwin ]; then
+        echo "✗ --trend: agent launchd solo su macOS (su Linux usa cron o un systemd-timer)" >&2
+        exit 1
+    fi
+    TPL="$REPO/launchd/com.safekeep.trend.plist"
+    AGENT="$HOME/Library/LaunchAgents/com.safekeep.trend.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    sed -e "s|__REPO__|$REPO|g" \
+        -e "s|__PYTHON__|$PY|g" \
+        -e "s|__SCRIPT__|$REPO/bin/safekeep-trend.sh|g" \
+        -e "s|__HOME__|$HOME|g" \
+        "$TPL" > "$AGENT"
+    if command -v plutil >/dev/null 2>&1; then
+        plutil -lint "$AGENT" >/dev/null
+    fi
+    echo "→ plist trend installato: $AGENT"
+    # idempotente: se il job è già caricato, scarica SOLO quello (bootout del
+    # singolo label) e lo ricarica — com.safekeep.agent non viene toccato
+    if launchctl print "gui/$(id -u)/com.safekeep.trend" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/com.safekeep.trend" 2>/dev/null || true
+    fi
+    launchctl bootstrap "gui/$(id -u)" "$AGENT"
+    echo "→ trend agent caricato (orario, StartInterval 3600)"
+    echo "   prima riga tra 1h, oppure forzala:"
+    echo "   launchctl kickstart gui/\$(id -u)/com.safekeep.trend"
+    echo "   CSV: ${SAFEKEEP_TREND_CSV:-$HOME/.local/state/safekeep/permission-trend.csv}"
+    echo "   log: $HOME/.local/state/safekeep/trend.log"
+    exit 0
 fi
 
 # --- render dell'agent (placeholder → path reali) ----------------------------

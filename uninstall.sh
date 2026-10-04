@@ -4,6 +4,20 @@
 # rimuoverli anche).
 set -euo pipefail
 
+# --trend (SPEC.md §9.2): rimuove SOLO l'agent orario del trend.
+if [ "${1:-}" = "--trend" ]; then
+    if [ "$(uname -s)" != Darwin ]; then
+        echo "✗ --trend: agent launchd solo su macOS" >&2
+        exit 1
+    fi
+    PLIST="$HOME/Library/LaunchAgents/com.safekeep.trend.plist"
+    launchctl bootout "gui/$(id -u)/com.safekeep.trend" 2>/dev/null || true
+    rm -f "$PLIST"
+    echo "→ rimosso $PLIST (daemon principale intatto)"
+    echo "→ conservati CSV e log: ${SAFEKEEP_TREND_CSV:-$HOME/.local/state/safekeep/permission-trend.csv}"
+    exit 0
+fi
+
 OS="$(uname -s)"
 
 case "$OS" in

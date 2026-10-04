@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE safekeep trend — NON installare così com'è.
+
+  Wrapper orario degli errori di permesso (SPEC.md §9.2): esegue
+  bin/safekeep-trend.sh, che appende una riga a
+  ~/.local/state/safekeep/permission-trend.csv.
+
+  Placeholders resi da `install.sh --trend` con lo STESSO meccanismo del
+  plist principale (launchd/com.safekeep.agent.plist):
+
+    __REPO__    radice del repo safekeep (la cartella che contiene bin/ e launchd/)
+    __PYTHON__  interprete Python ≥ 3.9 → env SAFEKEEP_PYTHON per lo script
+    __SCRIPT__  bin/safekeep-trend.sh (bash)
+    __HOME__    $HOME dell'utente — launchd NON espande `~` negli StandardOut/ErrorPath
+
+  Installazione:  ./install.sh --trend   (render + launchctl bootstrap)
+  Disinstallazione: ./uninstall.sh --trend
+  Non tocca, non ricarica com.safekeep.agent.
+
+  Validazione: plutil -lint <file>
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.safekeep.trend</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__SCRIPT__</string>
+    </array>
+
+    <!-- Orario (SPEC §9.2): una riga ogni 3600s = 24 righe/giorno.
+         Niente RunAtLoad: la prima riga arriva dopo StartInterval, oppure si
+         forza con: launchctl kickstart gui/$(id -u)/com.safekeep.trend -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <!-- Background: non compete con l'interfaccia (come il plist principale) -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- Log del trend: un unico file per stdout e stderr -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/.local/state/safekeep/trend.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.local/state/safekeep/trend.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Lo script usa questo interprete per doctor e per l'estrazione JSON -->
+        <key>SAFEKEEP_PYTHON</key>
+        <string>__PYTHON__</string>
+        <!-- fswatch (Homebrew) deve trovarsi nel PATH del processo -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
