@@ -725,7 +725,7 @@ illimitata della coda in memoria.
 | **T6** | CLI `status`/`doctor` + plist launchd + comandi bootout/bootstrap/kickstart (`launchd/`, `install.sh`, `uninstall.sh`) | `doctor` verde su macchina con permessi; plist passa `plutil -lint`; kill del processo → launchd lo riavvia da solo | ✅ fatto (`tests/test_cli.py`) |
 | **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor`/`run`/`sync-once` escono con ≠ 0 su dest sotto source; `.sync` non attendibile gestito (info → warning + skip, debug → fatale); containment della dest (nessuna scrittura fuori); dedup senza perdita di eventi; errori I/O confinati al file; tabella edge case coperta da casi di test | ✅ fatto (`tests/test_matcher.py`, `tests/test_config.py`, `tests/test_copier.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 | **T8** | Auto-discovery (`source` opzionale): scan di `$HOME` con pruning dedicato, watch root `$HOME` con exclude home, evento su `/.sync` → nuovo progetto, rescan al timer 24h, dedup watch roots (`safekeep/config.py`, `safekeep/daemon.py`) | config senza `source` valida (senza `dest` → errore con hint); `.sync` in `$HOME` scoperto, `Library`/nascoste potato, sotto-progetto annidato scoperto; watch root source invariata (backward compat); evento `.sync` → discover + reconcile; rescan 24h | ✅ fatto (`tests/test_config.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
-| **T9** | Portabilità POSIX/Linux 0.3.0 (§14): helper `safekeep/platform.py` unico lettore di `sys.platform`, `-m <monitor>` per piattaforma in `fswatch_argv`, `systemd/safekeep.service` (template) + ramo `uname -s` in `install.sh`/`uninstall.sh`, `doctor` per OS (hint distro, monitor per OS, TCC/plist solo Darwin, limite inotify non fatale), `fswatch` nei job Linux di CI, docs | suite verde su macOS **e** su Linux (CI Debian + E2E Omarchy/Arch): argv con monitor di piattaforma, `doctor` exit 0 con fswatch reale su Linux, unit renderizzata, `touch` sul sorgente → file sul dest entro 10s | da fare |
+| **T9** | Portabilità POSIX/Linux 0.3.0 (§14): helper `safekeep/platform.py` unico lettore di `sys.platform`, `-m <monitor>` per piattaforma in `fswatch_argv`, `systemd/safekeep.service` (template) + ramo `uname -s` in `install.sh`/`uninstall.sh`, `doctor` per OS (hint distro, monitor per OS, TCC/plist solo Darwin, limite inotify non fatale), `fswatch` nei job Linux di CI, docs | suite verde su macOS **e** su Linux (CI Debian + E2E Omarchy/Arch): argv con monitor di piattaforma, `doctor` exit 0 con fswatch reale su Linux, unit renderizzata, `touch` sul sorgente → file sul dest entro 10s | ✅ fatto (`tests/test_platform.py`, `tests/e2e_linux.sh`, CI Debian + E2E Omarchy/Arch) |
 
 Ordinamento: T1→T2 (fondamenta), T3→T4 (nucleo sync), T5 (daemon), T6 (operatività),
 T7 (indurimento). Ogni task è verificabile in isolamento. Test: `python3 -m unittest
@@ -827,6 +827,8 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
 | lint plist (`plutil -lint`) | ✔ | **assente** (`plutil` su Linux non esiste: già degradava a "lint saltato") |
 | agent dell'init system | plist (se presente) | unit systemd (se presente), riga informativa |
 | limite inotify | — | `fs.inotify.max_user_watches` letto da `/proc/sys/fs/inotify/max_user_watches` |
+| errori di permesso recenti nel log | ✔/✗ | ✔/✗ |
+| linger (solo con unit installata) | — | ✔/✗ |
 
 - Il check sul limite inotify è **informativo e non fatale**: ✗ + hint
   `sudo sysctl -w fs.inotify.max_user_watches=524288` se il valore è **< 16384**
@@ -835,6 +837,34 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
   quei path e gli eventi smettono di arrivare (le copie riprendono solo al prossimo
   reconcile, §10.1). File assente o illeggibile → check saltato con riga ✔ (non è
   Linux, o non è un kernel con inotify).
+- **Errori di permesso recenti nel log (0.3.1)**: `doctor` legge il log **corrente**
+  `~/.local/state/safekeep/safekeep.log` (niente rotazioni `.1`…`.5`) e conta le righe
+  che sono errori di permesso — regex `\[Errno (?:1|13)\]|Operation not permitted|
+  Permission denied`, quindi copre sia `EPERM` (`[Errno 1] Operation not permitted`)
+  sia `EACCES` (`[Errno 13] Permission denied`) — **e** il cui timestamp cade nelle
+  ultime **24h**. Il timestamp è il prefisso della riga nel formato `%(asctime)s`
+  (`YYYY-MM-DD HH:MM:SS`, prime 19 posizioni). Esito: conteggio `> 0` → **warning
+  non fatale** con conteggio, ultimo timestamp e hint (vedi sotto); `0` → riga ✔;
+  log assente o illeggibile → check **saltato** con riga ✔ (nessun log = niente da
+  controllare). **Limite dichiarato**: una riga il cui timestamp non si parsifica
+  (o che è fuori dalla finestra, comprese le timestamp future per clock skew) **non
+  viene conteggiata** — non essendo sicuri che sia recente, non la contiamo; il
+  conteggio è quindi un minimo, non un massimo. Perché esiste: segue direttamente
+  l'incidente EPERM (223 file copiabili solo dopo aver riconcesso i permessi al
+  volume) — quegli errori finiscono nel log e senza questo check l'unico modo per
+  vederli era leggere il file a mano. Hint stampati col warning: `safekeep sync-once
+  --dry-run` per vedere i pending, riconcedere i permessi al volume / FDA (Full Disk
+  Access), path del log. Finestra e non-fatalità volute: è un sintomo recente, non
+  uno stato del sistema.
+- **linger (0.3.1, solo Linux con unit installata)**: se
+  `~/.config/systemd/user/safekeep.service` esiste, `doctor` verifica che l'utente sia
+  in `/var/lib/systemd/linger/` (fonte di verità di systemd, leggibile senza root —
+  l'equivalente umano è `loginctl show-user $USER -p Linger`). Non abilitato →
+  **warning non fatale**: "l'agent non partirà al boot senza login" + hint
+  `loginctl enable-linger $USER` (§14.3: documentato, non automatizzato). Directory
+  `/var/lib/systemd/linger/` assente (niente systemd) → check saltato con riga ✔.
+  Unit assente o non-Linux → il check **non compare** (stessa regola del resto della
+  sezione: i check Linux esistono solo dove ha senso).
 - Nessun check `systemctl` live in `doctor`: il daemon deve poter girare anche in un
   container senza sessione utente. Lo stato dell'agent si guarda con
   `systemctl --user status safekeep`.
@@ -862,6 +892,22 @@ della piattaforma giusta la suite gira con il binario reale su Linux — che era
 esattamente l'incompatibilità documentata nella vecchia nota di portabilità di
 `.gitlab-ci.yml` (nota **aggiornata**, non contraddetta). I job `publish` e
 `publish-test` restano invariati.
+
+**Matrix delle versioni di Python (0.3.1)**: entrambi i job `test` girano su **tre
+gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
+
+- `.github/workflows/test.yml`: `strategy.matrix.python-version: ['3.9', '3.12',
+  '3.14']` con `actions/setup-python` sulla gamba corrente; lo step E2E
+  (`tests/e2e_linux.sh`, daemon live + fswatch reale) gira su **tutte** le gambe,
+  floor incluso.
+- `.gitlab-ci.yml`: `parallel: matrix` sulle stesse tre versioni con le immagini
+  `python:3.9-slim` / `python:3.12-slim` / `python:3.14-slim`, e lo step E2E
+  aggiunto al job `test`. Le immagini `-slim` non contengono `procps` (quindi niente
+  `pgrep`, che lo script E2E usa per il figlio del daemon): il job installa
+  `procps` insieme a `fswatch`.
+
+Così i classifier Python di §14.7 (`3.9`, `3.12`, `3.14`) sono coperti **anche dalla
+CI**, non più solo dalla suite locale dell'utente.
 
 ### 14.7 Metadata release (`pyproject.toml`)
 
@@ -909,6 +955,10 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
     classifier OS (`MacOS`, `POSIX`, `POSIX :: Linux`) e Python (`3.9` floor, `3.12` CI,
     `3.14` locale). I metadata su PyPI sono immutabili dopo l'upload: questi cambi si
     vedono da `0.3.0`, mentre `0.2.0` resta con le vecchie.
+- **0.3.1** — `doctor` + CI: due nuovi check **non fatali** (errori di permesso nel
+  log corrente nelle ultime 24h, e linger dell'utente dove c'è la unit systemd —
+  §14.4) e **matrix Python** 3.9 / 3.12 / 3.14 in entrambi i job `test`, con lo step
+  E2E su tutte le gambe (§14.6).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
