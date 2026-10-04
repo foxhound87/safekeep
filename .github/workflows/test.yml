@@ -19,6 +19,10 @@
 # One job, not two: the suite and the E2E share the checkout, the Python and
 # the `apt-get install fswatch`, and a step-level failure already names the
 # phase that broke (GH = GitHub Actions).
+#
+# Action majors: checkout@v7 + setup-python@v7 — both run on the node24 runtime
+# (`runs.using: node24`, verified against the upstream action.yml in 2026-10);
+# the old v4/v5 ran on node20, which GH now flags as deprecated.
 name: tests
 
 on:
@@ -34,8 +38,8 @@ jobs:
       matrix:
         python-version: ['3.9', '3.12', '3.14']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install fswatch
