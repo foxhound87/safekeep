@@ -1,5 +1,18 @@
-# Pipeline minima per safekeep: un solo job che esegue la suite di test
-# con l'immagine ufficiale Python sul runner Linux standard di GitLab.
+# Pipeline per safekeep: un job `test` in **matrix a 3 gambe** che esegue la
+# suite di test + lo step E2E con le immagini ufficiali Python sul runner
+# Linux standard di GitLab (SPEC.md §14.6).
+#
+# - matrix (0.3.1): `parallel: matrix` su `python:3.9-slim` (il floor di
+#   `requires-python`), `python:3.12-slim` e `python:3.14-slim` — le stesse
+#   tre versioni dei classifier PyPI di `pyproject.toml` e della matrix di
+#   `.github/workflows/test.yml`. `publish`/`publish-test` fanno `needs: [test]`
+#   → aspettano tutte e tre le gambe.
+# - E2E (0.3.1): `tests/e2e_linux.sh` (daemon live + fswatch reale) gira in
+#   ogni gamba, subito dopo la suite.
+# - `procps` (0.3.1): le immagini `-slim` non contengono `pgrep`, che lo
+#   script E2E usa per trovare il figlio del daemon → installato insieme a
+#   `fswatch`. Verificato in locale su `python:3.9-slim` (Debian 13/trixie):
+#   `fswatch` esiste nei repo, `pgrep` no, suite + E2E verdi.
 #
 # NOTA di portabilità (macOS → Linux), letta dai test prima di scriverla:
 #
@@ -15,8 +28,10 @@
 #   all'epoca eseguendo la suite in python:3.12-slim con e senza un fswatch
 #   finto. La nota è aggiornata, non contraddetta: il package `fswatch` ESISTE
 #   nei repo Debian/Ubuntu, era il check a non essere portabile.
-# - il loop del daemon usa comunque un fswatch finto (script Python), non il
-#   binario reale: nessun test dipende dal comportamento di fswatch.
+# - il loop del daemon della **suite** usa comunque un fswatch finto (script
+#   Python), non il binario reale: nessun unittest dipende dal comportamento di
+#   fswatch. Eccezione, aggiunta con la matrix: lo step **E2E** (sotto) gira col
+#   binario reale — è il gate che la suite da sola non può dare.
 # - nessun path `/Users/...` reale: i test usano `tempfile.mkdtemp()` e
 #   `$HOME` finto, quindi non toccano la home dell'utente del runner.
 # - `plutil` non esiste su Linux e non serve: il lint del plist è un check
@@ -29,22 +44,38 @@
 #   macOS-specifici da risolvere.
 # - gli esempi in `examples/` contengono path `/Users/REPLACEME/...` ma sono
 #   solo stringhe di parse, non vengono toccati dal filesystem.
+# - `doctor` (0.3.1) legge anche il log corrente
+#   (`~/.local/state/safekeep/safekeep.log`, SPEC §14.4): nel container non
+#   esiste → check "saltato" con riga ✔; il check **linger** compare solo dove
+#   è installata la unit systemd, quindi qui non compare affatto. Nessuno dei
+#   due è fatale.
 #
-# Rischio residuo (non verificabile qui, runner locale non disponibile):
-# l'unico job invoca subprocess della CLI con `sys.executable`, quindi serve
-# solo che l'immagine abbia python3 — `python:3.12-slim` lo garantisce.
-# Se il job fallisce con un check `doctor` mancante, controlla prima la
-# presenza dei marker di `tests/test_cli.py` nel suo stdout, poi `fswatch -M`
-# stampato qui sopra (deve elencare `inotify_monitor`).
+# Rischio residuo (non verificabile qui, runner GitLab non raggiungibile dal
+# locale): l'unico job invoca subprocess della CLI con `sys.executable`, quindi
+# serve solo che l'immagine abbia python3 — `python:3.9-slim` e le altre lo
+# garantiscono. Se il job fallisce con un check `doctor` mancante, controlla
+# prima la presenza dei marker di `tests/test_cli.py` nel suo stdout, poi
+# `fswatch -M` stampato qui sopra (deve elencare `inotify_monitor`).
 
 test:
-  image: python:3.12-slim
+  # tre immagini = tre gambe (SPEC §14.6); la matrix espande `parallel: matrix`
+  image: ${PYTHON_IMAGE}
+  parallel:
+    matrix:
+      - PYTHON_IMAGE:
+          - "python:3.9-slim"    # floor di requires-python
+          - "python:3.12-slim"
+          - "python:3.14-slim"
   script:
     - python3 --version
-    - apt-get update && apt-get install -y --no-install-recommends fswatch
+    # procps: `-slim` non ha `pgrep`, che serve allo step E2E
+    - apt-get update && apt-get install -y --no-install-recommends fswatch procps
     - fswatch --version
     - fswatch -M
+    - pgrep --version
     - python3 -m unittest discover -s tests
+    # E2E (0.3.1): daemon live col fswatch reale, stessa gamba della suite
+    - bash tests/e2e_linux.sh
 
 # Publish to PyPI with Trusted Publishing (OIDC = OpenID Connect, no stored
 # credentials). Doc followed:

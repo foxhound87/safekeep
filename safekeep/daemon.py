@@ -27,7 +27,7 @@ from .config import (
 )
 from .copier import MOUNT_ERRNOS, copy_one, needs_copy, prune_project, reconcile_project
 from .matcher import BUILTIN_RULES, Matcher, _glob, parse_rule
-from .platform import fswatch_monitor, init_system
+from .platform import LOG_PATH, fswatch_monitor, init_system
 from .volumes import backoff_schedule, dest_state, partition_dests
 
 log = logging.getLogger('safekeep')
@@ -271,7 +271,7 @@ def setup_logging(level='info', logfile=None):
     logger._safekeep_handlers = True
     fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
     if logfile is None:
-        logfile = os.path.expanduser('~/.local/state/safekeep/safekeep.log')
+        logfile = os.path.expanduser(LOG_PATH)
     try:
         os.makedirs(os.path.dirname(logfile), exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(

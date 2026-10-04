@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.3.0 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.4.0 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -725,7 +725,7 @@ illimitata della coda in memoria.
 | **T6** | CLI `status`/`doctor` + plist launchd + comandi bootout/bootstrap/kickstart (`launchd/`, `install.sh`, `uninstall.sh`) | `doctor` verde su macchina con permessi; plist passa `plutil -lint`; kill del processo → launchd lo riavvia da solo | ✅ fatto (`tests/test_cli.py`) |
 | **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor`/`run`/`sync-once` escono con ≠ 0 su dest sotto source; `.sync` non attendibile gestito (info → warning + skip, debug → fatale); containment della dest (nessuna scrittura fuori); dedup senza perdita di eventi; errori I/O confinati al file; tabella edge case coperta da casi di test | ✅ fatto (`tests/test_matcher.py`, `tests/test_config.py`, `tests/test_copier.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 | **T8** | Auto-discovery (`source` opzionale): scan di `$HOME` con pruning dedicato, watch root `$HOME` con exclude home, evento su `/.sync` → nuovo progetto, rescan al timer 24h, dedup watch roots (`safekeep/config.py`, `safekeep/daemon.py`) | config senza `source` valida (senza `dest` → errore con hint); `.sync` in `$HOME` scoperto, `Library`/nascoste potato, sotto-progetto annidato scoperto; watch root source invariata (backward compat); evento `.sync` → discover + reconcile; rescan 24h | ✅ fatto (`tests/test_config.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
-| **T9** | Portabilità POSIX/Linux 0.3.0 (§14): helper `safekeep/platform.py` unico lettore di `sys.platform`, `-m <monitor>` per piattaforma in `fswatch_argv`, `systemd/safekeep.service` (template) + ramo `uname -s` in `install.sh`/`uninstall.sh`, `doctor` per OS (hint distro, monitor per OS, TCC/plist solo Darwin, limite inotify non fatale), `fswatch` nei job Linux di CI, docs | suite verde su macOS **e** su Linux (CI Debian + E2E Omarchy/Arch): argv con monitor di piattaforma, `doctor` exit 0 con fswatch reale su Linux, unit renderizzata, `touch` sul sorgente → file sul dest entro 10s | da fare |
+| **T9** | Portabilità POSIX/Linux 0.3.0 (§14): helper `safekeep/platform.py` unico lettore di `sys.platform`, `-m <monitor>` per piattaforma in `fswatch_argv`, `systemd/safekeep.service` (template) + ramo `uname -s` in `install.sh`/`uninstall.sh`, `doctor` per OS (hint distro, monitor per OS, TCC/plist solo Darwin, limite inotify non fatale), `fswatch` nei job Linux di CI, docs | suite verde su macOS **e** su Linux (CI Debian + E2E Omarchy/Arch): argv con monitor di piattaforma, `doctor` exit 0 con fswatch reale su Linux, unit renderizzata, `touch` sul sorgente → file sul dest entro 10s | ✅ fatto (`tests/test_platform.py`, `tests/e2e_linux.sh`, CI Debian + E2E Omarchy/Arch) |
 
 Ordinamento: T1→T2 (fondamenta), T3→T4 (nucleo sync), T5 (daemon), T6 (operatività),
 T7 (indurimento). Ogni task è verificabile in isolamento. Test: `python3 -m unittest
@@ -827,6 +827,8 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
 | lint plist (`plutil -lint`) | ✔ | **assente** (`plutil` su Linux non esiste: già degradava a "lint saltato") |
 | agent dell'init system | plist (se presente) | unit systemd (se presente), riga informativa |
 | limite inotify | — | `fs.inotify.max_user_watches` letto da `/proc/sys/fs/inotify/max_user_watches` |
+| errori di permesso recenti nel log | ✔/✗ | ✔/✗ |
+| linger (solo con unit installata) | — | ✔/✗ |
 
 - Il check sul limite inotify è **informativo e non fatale**: ✗ + hint
   `sudo sysctl -w fs.inotify.max_user_watches=524288` se il valore è **< 16384**
@@ -835,6 +837,37 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
   quei path e gli eventi smettono di arrivare (le copie riprendono solo al prossimo
   reconcile, §10.1). File assente o illeggibile → check saltato con riga ✔ (non è
   Linux, o non è un kernel con inotify).
+- **Errori di permesso recenti nel log (0.3.1)**: `doctor` legge il log **corrente**
+  `~/.local/state/safekeep/safekeep.log` (niente rotazioni `.1`…`.5`) e conta le righe
+  che sono errori di permesso — regex `\[Errno (?:1|13)\]|Operation not permitted|
+  Permission denied`, quindi copre sia `EPERM` (`[Errno 1] Operation not permitted`)
+  sia `EACCES` (`[Errno 13] Permission denied`) — **e** il cui timestamp cade nelle
+  ultime **24h**. Il timestamp è il prefisso della riga nel formato `%(asctime)s`
+  (`YYYY-MM-DD HH:MM:SS`, prime 19 posizioni). Esito: conteggio `> 0` → **warning
+  non fatale** con conteggio, ultimo timestamp e hint (vedi sotto); `0` → riga ✔;
+  log assente o illeggibile → check **saltato** con riga ✔ (nessun log = niente da
+  controllare). **Limite dichiarato**: una riga il cui timestamp non si parsifica
+  (o che è fuori dalla finestra, comprese le timestamp future per clock skew) **non
+  viene conteggiata** — non essendo sicuri che sia recente, non la contiamo; il
+  conteggio è quindi un minimo, non un massimo. Perché esiste: segue direttamente
+  l'incidente EPERM (223 file copiabili solo dopo aver riconcesso i permessi al
+  volume) — quegli errori finiscono nel log e senza questo check l'unico modo per
+  vederli era leggere il file a mano. Hint stampati col warning: `safekeep sync-once
+  --dry-run` per vedere i pending, riconcedere i permessi al volume / FDA (Full Disk
+  Access), path del log. Finestra e non-fatalità volute: è un sintomo recente, non
+  uno stato del sistema.
+- **linger (0.3.1, solo Linux con unit installata)**: se
+  `~/.config/systemd/user/safekeep.service` esiste, `doctor` verifica che l'utente sia
+  in `/var/lib/systemd/linger/` (fonte di verità di systemd, leggibile senza root —
+  l'equivalente umano è `loginctl show-user $USER -p Linger`). Non abilitato →
+  **warning non fatale**: "l'agent non partirà al boot senza login" + hint
+  `loginctl enable-linger $USER` (§14.3: documentato, non automatizzato). Directory
+  `/var/lib/systemd/linger/` assente (niente systemd) → check saltato con riga ✔.
+  Unit assente o non-Linux → il check **non compare** (stessa regola del resto della
+  sezione: i check Linux esistono solo dove ha senso).
+- **WSL (0.4.0)**: le tre righe aggiunte per WSL (rilevamento, hint systemd,
+  info `/mnt/` drvfs) sono tutte **informative e non fatali** — scope, limiti e
+  test in §17.
 - Nessun check `systemctl` live in `doctor`: il daemon deve poter girare anche in un
   container senza sessione utente. Lo stato dell'agent si guarda con
   `systemctl --user status safekeep`.
@@ -862,6 +895,22 @@ della piattaforma giusta la suite gira con il binario reale su Linux — che era
 esattamente l'incompatibilità documentata nella vecchia nota di portabilità di
 `.gitlab-ci.yml` (nota **aggiornata**, non contraddetta). I job `publish` e
 `publish-test` restano invariati.
+
+**Matrix delle versioni di Python (0.3.1)**: entrambi i job `test` girano su **tre
+gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
+
+- `.github/workflows/test.yml`: `strategy.matrix.python-version: ['3.9', '3.12',
+  '3.14']` con `actions/setup-python` sulla gamba corrente; lo step E2E
+  (`tests/e2e_linux.sh`, daemon live + fswatch reale) gira su **tutte** le gambe,
+  floor incluso.
+- `.gitlab-ci.yml`: `parallel: matrix` sulle stesse tre versioni con le immagini
+  `python:3.9-slim` / `python:3.12-slim` / `python:3.14-slim`, e lo step E2E
+  aggiunto al job `test`. Le immagini `-slim` non contengono `procps` (quindi niente
+  `pgrep`, che lo script E2E usa per il figlio del daemon): il job installa
+  `procps` insieme a `fswatch`.
+
+Così i classifier Python di §14.7 (`3.9`, `3.12`, `3.14`) sono coperti **anche dalla
+CI**, non più solo dalla suite locale dell'utente.
 
 ### 14.7 Metadata release (`pyproject.toml`)
 
@@ -909,15 +958,72 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
     classifier OS (`MacOS`, `POSIX`, `POSIX :: Linux`) e Python (`3.9` floor, `3.12` CI,
     `3.14` locale). I metadata su PyPI sono immutabili dopo l'upload: questi cambi si
     vedono da `0.3.0`, mentre `0.2.0` resta con le vecchie.
+- **0.3.1** — `doctor` + CI: due nuovi check **non fatali** (errori di permesso nel
+  log corrente nelle ultime 24h, e linger dell'utente dove c'è la unit systemd —
+  §14.4) e **matrix Python** 3.9 / 3.12 / 3.14 in entrambi i job `test`, con lo step
+  E2E su tutte le gambe (§14.6).
+- **0.4.0** — WSL (Windows Subsystem for Linux) — §17: `is_wsl()`/`wsl_distro()`,
+  tre nuovi righe informative in `doctor` (rilevamento, hint systemd, info
+  `/mnt/` drvfs) e `install.sh` gentile senza systemd. **Non verificato su WSL
+  reale** (nessuna macchina WSL disponibile): test con env/kernel finto.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
 ---
 
-## 17. Roadmap / prossima versione
+## 17. WSL — scope implementato (0.4.0)
 
-**WSL (Windows Subsystem for Linux)**: supporto previsto per **0.4.0**. La base Linux di
-0.3.0 (systemd user unit, `inotify`, fswatch) dovrebbe girarci in gran parte; da valutare:
-`init` (systemd in WSL2 opzionale → fallback senza servizio, `safekeep run` manuale),
-path `/mnt/c` (drvfs: performance e case-sensitivity), fswatch su WSL e assenza di FSEvents.
-Solo design intent, nessun codice in 0.3.0.
+**Cosa c'è**: rilevamento + degradazione graziosa. **Cosa non c'è**: codice
+verificato su WSL reale — **nessuna macchina WSL disponibile, quindi nessun
+test su WSL reale**; tutto quello che segue è coperto da test con env/kernel
+finto e da review del codice. Il runtime che WSL eredita è il Linux di 0.3.0
+(§14), già **E2E-verifyto** su Linux reale (CI Debian + E2E Omarchy/Arch): il
+sync non cambia.
+
+### 17.1 Rilevamento (`safekeep/platform.py`)
+
+| Simbolo | Comportamento |
+|---|---|
+| `is_wsl()` | `True` se l'env `WSL_DISTRO_NAME` è settato **oppure** `platform.release()` contiene `microsoft` (kernel WSL1/WSL2) |
+| `wsl_distro()` | valore di `WSL_DISTRO_NAME`, stringa vuota se assente |
+
+Entrambi si leggono **a chiamata** (come tutto il modulo, §14.1): i test
+patchano l'env e `platform.release()`. `sys.platform` su WSL resta `linux`,
+per questo il rilevamento non può passare da lì.
+
+### 17.2 `doctor` — tre righe, tutte informative e non fatali
+
+1. **rilevamento**: `WSL rilevato: <distro>` (o `sconosciuta` se l'env manca e
+   è il kernel a dirlo).
+2. **systemd user assente** — `/run/systemd/system` non esiste (WSL1, oppure
+   WSL2 con systemd spento): hint non-fatale "abilita systemd in
+   `/etc/wsl.conf`":
+   ```ini
+   [boot]
+   systemd=true
+   ```
+   poi `wsl --shutdown` da Windows — **oppure** esegui `safekeep run` a mano
+   (fallback senza agent).
+3. **source/dest sotto `/mnt/`** → info **drvfs**: I/O lento (traduzione 9p),
+   case-insensitive di default — valuta una dest su ext4 nativa della distro
+   invece di `/mnt/c/...`.
+
+Nessuno dei tre è fatale: `doctor` esce 0 anche su WSL1 senza systemd.
+
+### 17.3 Init e installazione
+
+- **WSL2 con systemd attivo**: la *user unit* di §14.3 si comporta come su
+  Linux (`install.sh` fa render + `systemctl --user daemon-reload`), linger
+  compreso (§14.4).
+- **Senza systemd** (WSL1 / systemd off): `install.sh` **non installa la unit**
+  e termina con **exit 0** dopo aver stampato le istruzioni di avvio manuale
+  (`safekeep run`) — degradazione graziosa, non errore duro.
+- **Path**: dest/source sotto `/mnt/<lettera>/` = drvfs (vedi §17.2.3).
+
+### 17.4 Limiti dichiarati
+
+- **Nessun test su WSL reale** (nessuna macchina WSL disponibile): detection,
+  marker di `doctor` e branch di `install.sh` testati con env/kernel finto; un
+  E2E su WSL no.
+- Eventi su `/mnt/*` (drvfs/9p) e fswatch su WSL: non documentati qui, da
+  verificare quando ci sarà una macchina WSL.

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest import mock
 
 from safekeep import platform as plat
@@ -144,6 +145,151 @@ class AgentTemplateTest(unittest.TestCase):
             text = fh.read()
         for needle in ('RunAtLoad', 'KeepAlive', '__REPO__', '__PYTHON__'):
             self.assertIn(needle, text, needle)
+
+
+class RecentPermissionErrorsTest(unittest.TestCase):
+    """SPEC.md §14.4: errori di permesso recenti nel log, finestra 24h,
+    non fatale; righe senza timestamp sicuro non vengono contate."""
+
+    NOW = datetime(2026, 10, 4, 20, 0, 0)
+
+    def _log(self, text):
+        fd, path = tempfile.mkstemp(suffix='.log')
+        self.addCleanup(os.unlink, path)
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(text)
+        return path
+
+    @staticmethod
+    def _stamp(dt):
+        return dt.strftime('%Y-%m-%d %H:%M:%S,000')   # formato %(asctime)s
+
+    def test_ricente_vecchio_e_normale_nello_stesso_log(self):
+        text = (
+            f'{self._stamp(self.NOW - timedelta(hours=2))} ERROR copia fallita '
+            "a → b: [Errno 1] Operation not permitted: '/x.tmp.1'\n"
+            f'{self._stamp(self.NOW - timedelta(days=3))} ERROR copia fallita '
+            "a → b: [Errno 13] Permission denied: '/y'\n"
+            f'{self._stamp(self.NOW - timedelta(minutes=5))} INFO reconcile: 0 copie\n'
+        )
+        count, last = plat.recent_permission_errors(self._log(text), now=self.NOW)
+        self.assertEqual(count, 1, 'solo la riga nelle ultime 24h')
+        self.assertEqual(last, self.NOW - timedelta(hours=2))
+
+    def test_log_assente(self):
+        self.assertIsNone(
+            plat.recent_permission_errors('/non/esiste/safekeep.log'),
+            'nessun log ⇒ check saltato, non warning')
+
+    def test_timestamp_illeggibile_non_e_contato(self):
+        text = ("senza-data ERROR [Errno 1] Operation not permitted: '/x'\n"
+                + f'{self._stamp(self.NOW - timedelta(hours=1))} ERROR '
+                  "[Errno 1] Operation not permitted: '/y'\n"
+                + f'{self._stamp(self.NOW + timedelta(hours=1))} ERROR '
+                  "[Errno 1] Operation not permitted: '/z'\n")
+        count, _ = plat.recent_permission_errors(self._log(text), now=self.NOW)
+        self.assertEqual(count, 1, 'non sicuri (o clock skew) ⇒ non contiamo')
+
+    def test_copre_eperm_e_eacces(self):
+        for riga in ('[Errno 1] Operation not permitted',
+                     'qualcosa Operation not permitted',
+                     '[Errno 13] Permission denied',
+                     'qualcosa Permission denied'):
+            with self.subTest(riga=riga):
+                self.assertIsNotNone(plat.PERM_ERR_RE.search(riga))
+        self.assertIsNone(plat.PERM_ERR_RE.search('INFO reconcile: 0 copie'))
+
+
+class LingerTest(unittest.TestCase):
+    """SPEC.md §14.4: linger systemd, directory finta al posto di
+    /var/lib/systemd/linger."""
+
+    def _dir(self, *entries):
+        path = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, path, ignore_errors=True)
+        for name in entries:
+            open(os.path.join(path, name), 'w').close()
+        return path
+
+    def test_abilitato_disabilitato_e_dir_assente(self):
+        d = self._dir('utente')
+        self.assertTrue(plat.linger_enabled(user='utente', linger_dir=d))
+        self.assertFalse(plat.linger_enabled(user='altro', linger_dir=d))
+        self.assertIsNone(
+            plat.linger_enabled(user='utente',
+                                linger_dir=os.path.join(os.sep, 'niente', 'qui')),
+            'niente systemd ⇒ non determinabile, check saltato')
+
+    def test_user_default_e_costante(self):
+        self.assertEqual(plat.LINGER_DIR, '/var/lib/systemd/linger')
+        with mock.patch('getpass.getuser', return_value='chi'):
+            self.assertTrue(plat.linger_enabled(linger_dir=self._dir('chi')))
+            self.assertFalse(plat.linger_enabled(linger_dir=self._dir()))
+
+
+class WslTest(unittest.TestCase):
+    """SPEC.md §17.1: rilevamento WSL via env o kernel, letto a chiamata."""
+
+    def test_env_wsl_distro_name(self):
+        with mock.patch.dict(os.environ, {'WSL_DISTRO_NAME': 'Ubuntu'}):
+            self.assertTrue(plat.is_wsl())
+            self.assertEqual(plat.wsl_distro(), 'Ubuntu')
+
+    def test_kernel_microsoft_senza_env(self):
+        for release in ('5.15.167.4-microsoft-standard-WSL2',   # WSL2
+                        '4.4.0-19041-Microsoft'):              # WSL1 (maiuscolo)
+            with self.subTest(release=release), \
+                    mock.patch.dict(os.environ, {'WSL_DISTRO_NAME': ''}), \
+                    mock.patch.object(plat, '_platform') as p:
+                p.release.return_value = release
+                self.assertTrue(plat.is_wsl())
+                self.assertEqual(plat.wsl_distro(), '')
+
+    def test_non_wsl(self):
+        with mock.patch.dict(os.environ, {'WSL_DISTRO_NAME': ''}), \
+                mock.patch.object(plat, '_platform') as p:
+            p.release.return_value = '24.6.0'             # macOS, niente microsoft
+            self.assertFalse(plat.is_wsl())
+            self.assertEqual(plat.wsl_distro(), '')
+
+    def test_systemd_user_available(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(plat.systemd_user_available(path=d))
+        self.assertFalse(
+            plat.systemd_user_available(path='/non/esiste/qui'),
+            '/run/systemd/system assente = WSL1 o systemd spento (SPEC §17.2)')
+
+
+@unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+class InstallShSenzaSystemdTest(unittest.TestCase):
+    """SPEC.md §17.3: `install.sh` su Linux senza systemd → unit NON installata,
+    istruzioni di avvio manuale ed exit 0 (nessun errore duro)."""
+
+    def test_ramo_linux_senza_systemd_esce_0(self):
+        if os.path.isdir('/run/systemd/system'):
+            self.skipTest('questa macchina ha systemd: ramo diverso')
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        home, fake_bin = os.path.join(tmp, 'home'), os.path.join(tmp, 'bin')
+        os.makedirs(home)
+        os.makedirs(fake_bin)
+        uname = os.path.join(fake_bin, 'uname')            # uname finto → Linux
+        with open(uname, 'w') as fh:
+            fh.write('#!/bin/bash\necho Linux\n')
+        os.chmod(uname, 0o755)
+        env = dict(os.environ, HOME=home,
+                   PATH=fake_bin + os.pathsep + os.environ['PATH'])
+        r = subprocess.run(['bash', os.path.join(REPO, 'install.sh')],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('systemd non disponibile', r.stdout)
+        self.assertIn('safekeep.py run', r.stdout)         # avvio manuale
+        self.assertIn('systemd=true', r.stdout)            # hint /etc/wsl.conf
+        self.assertTrue(os.path.exists(os.path.join(home, '.safekeep')),
+                        'la config viene creata comunque')
+        self.assertFalse(os.path.exists(
+            os.path.join(home, '.config/systemd/user/safekeep.service')),
+            'niente unit senza systemd')
 
 
 if __name__ == '__main__':

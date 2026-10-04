@@ -1,6 +1,8 @@
 #!/bin/bash
 # safekeep — installazione idempotente dell'agent (launchd su macOS, systemd
-# su Linux — SPEC.md §14.3). NON avvia il job (bootstrap / enable --now va
+# su Linux — SPEC.md §14.3). Su Linux SENZA systemd (WSL1, WSL2 con systemd
+# spento, container) non installa la unit e esce 0 con le istruzioni di avvio
+# manuale (SPEC.md §17.3). NON avvia il job (bootstrap / enable --now va
 # fatto DOPO aver configurato ~/.safekeep con dest reali).
 set -euo pipefail
 
@@ -58,6 +60,19 @@ case "$OS" in
         echo "→ plist installato: $AGENT"
         ;;
     Linux)
+        # Niente systemd vivo (WSL1, WSL2 con systemd spento, container):
+        # nessuna unit, istruzioni di avvio manuale ed EXIT 0 — degradazione
+        # graziosa, non un errore (SPEC.md §17.3)
+        if [ ! -d /run/systemd/system ]; then
+            echo "⚠ systemd non disponibile: unit systemd NON installata"
+            echo "   → avvio manuale del daemon: $REPO/bin/safekeep.py run"
+            echo "   → config già pronta: $HOME/.safekeep"
+            echo "   → con systemd (WSL2) aggiungi a /etc/wsl.conf:"
+            echo "       [boot]"
+            echo "       systemd=true"
+            echo "     poi riavvia WSL (wsl --shutdown) e rilancia install.sh"
+            exit 0
+        fi
         TPL="$REPO/systemd/safekeep.service"
         AGENT="$HOME/.config/systemd/user/safekeep.service"
         mkdir -p "$HOME/.config/systemd/user"
