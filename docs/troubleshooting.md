@@ -66,8 +66,10 @@ Limits, on purpose: only the current log is read (rotations `.log.1` …
 
 To follow the trend instead of looking at a single run, use
 `safekeep doctor --json`: the same data in structured form
-(`permission_errors.count_24h` and `permission_errors.last`), so a wrapper can
-append one line per run to a CSV and plot it later — see
+(`permission_errors.count_24h` and `permission_errors.last`) — and
+[`bin/safekeep-trend.sh`](/commands#permission-trend-csv-hourly) already
+appends one line per run to `~/.local/state/safekeep/permission-trend.csv`
+(hourly agent included), so the trend is a CSV away — see
 [Commands](/commands#doctor-json).
 
 ## Linux: inotify watch limit

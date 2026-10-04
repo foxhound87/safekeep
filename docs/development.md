@@ -6,8 +6,10 @@
 python3 -m unittest discover -s tests
 ```
 
-Standard-library `unittest`, zero dependencies: 156 tests covering the
-matcher, config, atomic copy, volumes, daemon, auto-discovery and the CLI.
+Standard-library `unittest`, zero dependencies: 206 tests covering the
+matcher, config, atomic copy, volumes, daemon, auto-discovery, the CLI, the
+permission-trend wrapper (`tests/test_trend.py`, SPEC §9.2) and the POSIX
+portability layer.
 `fswatch` is **not** required — `tests/test_cli.py` tolerates its absence and
 the daemon loop uses a fake fswatch (a Python script), not the real binary.
 
@@ -16,12 +18,14 @@ monitor of the current platform (`inotify_monitor` on Linux, `fsevents_monitor`
 on macOS), so the suite runs against the real binary there too.
 
 CI runs that command on GitHub Actions and GitLab CI over a 3.9/3.12/3.14
-matrix: unit suite, then `tests/e2e_linux.sh` (live daemon, real `fswatch`),
-then the WSL step — `WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh
---doctor-only`, gated on the `WSL rilevato: SafekeepCITest` marker **and**
-exit 0. That step is what exercises the WSL branch of `doctor` (SPEC §17) for
-real instead of the env faked by the unit tests; it needs nothing beyond
-`python3`, `bash`, `grep` and `mktemp`.
+matrix — **three legs, not one**: unit suite, then `tests/e2e_linux.sh` (live
+daemon, real `fswatch`), then the WSL step — `WSL_DISTRO_NAME=SafekeepCITest
+bash tests/e2e_linux.sh --doctor-only`, gated on the `WSL rilevato:
+SafekeepCITest` marker **and** exit 0. That step is what exercises the WSL
+branch of `doctor` (SPEC §17) for real instead of the env faked by the unit
+tests; it needs nothing beyond `python3`, `bash`, `grep` and `mktemp`. Both CIs
+declare the same three legs and the same steps (`.github/workflows/test.yml`,
+`.gitlab-ci.yml`).
 
 ## Constraints
 

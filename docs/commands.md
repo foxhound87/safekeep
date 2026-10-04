@@ -95,3 +95,40 @@ text of the corresponding normal line, `checks[].id` a stable slug of it.
 `permission_errors` is the structured form of the "permission errors in the
 last 24h" check: `count_24h` plus the `last` timestamp (`null` when there is
 no log). Full schema in SPEC.md §9.1.
+
+### Permission-trend CSV (hourly)
+
+`bin/safekeep-trend.sh` is the wrapper this flag was built for: it runs
+`doctor --json`, extracts four fields and appends one line to
+`~/.local/state/safekeep/permission-trend.csv` (SPEC.md §9.2).
+
+```bash
+bin/safekeep-trend.sh [--config PATH]     # one row per run
+```
+
+```csv
+timestamp,exit,count_24h,last
+2026-10-04T23:46:12,0,4828,2026-10-04 18:57:30
+```
+
+- the header is written **once** (created only when the file is missing or
+  empty), one row per run — readable with a plain `split(',')`, no quoting;
+- `exit` is `doctor`'s exit code, i.e. **data**: the row is appended even when
+  `doctor` exits `1` (a fatal check is exactly what the trend must capture);
+- the script fails (exit `1`, message on stderr) only when the output is not
+  JSON — it never writes an invented row;
+- overrides: `HOME` (fake HOME in tests), `SAFEKEEP_TREND_CSV`,
+  `SAFEKEEP_PYTHON`, `--config PATH`.
+
+On macOS the hourly agent is installed with:
+
+```bash
+./install.sh --trend          # renders launchd/com.safekeep.trend.plist + bootstrap
+launchctl kickstart gui/$(id -u)/com.safekeep.trend   # first row now, not in an hour
+./uninstall.sh --trend        # removes only the trend job
+```
+
+`StartInterval` 3600 → 24 rows/day (~1 KB), `StandardOut/ErrorPath` both to
+`~/.local/state/safekeep/trend.log`. `install.sh --trend` never touches nor
+reloads the main `com.safekeep.agent` job. On Linux no unit ships yet — run it
+from cron or a systemd timer.
