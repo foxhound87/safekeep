@@ -865,6 +865,9 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
   `/var/lib/systemd/linger/` assente (niente systemd) → check saltato con riga ✔.
   Unit assente o non-Linux → il check **non compare** (stessa regola del resto della
   sezione: i check Linux esistono solo dove ha senso).
+- **WSL (0.4.0)**: le tre righe aggiunte per WSL (rilevamento, hint systemd,
+  info `/mnt/` drvfs) sono tutte **informative e non fatali** — scope, limiti e
+  test in §17.
 - Nessun check `systemctl` live in `doctor`: il daemon deve poter girare anche in un
   container senza sessione utente. Lo stato dell'agent si guarda con
   `systemctl --user status safekeep`.
@@ -959,15 +962,68 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   log corrente nelle ultime 24h, e linger dell'utente dove c'è la unit systemd —
   §14.4) e **matrix Python** 3.9 / 3.12 / 3.14 in entrambi i job `test`, con lo step
   E2E su tutte le gambe (§14.6).
+- **0.4.0** — WSL (Windows Subsystem for Linux) — §17: `is_wsl()`/`wsl_distro()`,
+  tre nuovi righe informative in `doctor` (rilevamento, hint systemd, info
+  `/mnt/` drvfs) e `install.sh` gentile senza systemd. **Non verificato su WSL
+  reale** (nessuna macchina WSL disponibile): test con env/kernel finto.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
 ---
 
-## 17. Roadmap / prossima versione
+## 17. WSL — scope implementato (0.4.0)
 
-**WSL (Windows Subsystem for Linux)**: supporto previsto per **0.4.0**. La base Linux di
-0.3.0 (systemd user unit, `inotify`, fswatch) dovrebbe girarci in gran parte; da valutare:
-`init` (systemd in WSL2 opzionale → fallback senza servizio, `safekeep run` manuale),
-path `/mnt/c` (drvfs: performance e case-sensitivity), fswatch su WSL e assenza di FSEvents.
-Solo design intent, nessun codice in 0.3.0.
+**Cosa c'è**: rilevamento + degradazione graziosa. **Cosa non c'è**: codice
+verificato su WSL reale — **nessuna macchina WSL disponibile, quindi nessun
+test su WSL reale**; tutto quello che segue è coperto da test con env/kernel
+finto e da review del codice. Il runtime che WSL eredita è il Linux di 0.3.0
+(§14), già **E2E-verifyto** su Linux reale (CI Debian + E2E Omarchy/Arch): il
+sync non cambia.
+
+### 17.1 Rilevamento (`safekeep/platform.py`)
+
+| Simbolo | Comportamento |
+|---|---|
+| `is_wsl()` | `True` se l'env `WSL_DISTRO_NAME` è settato **oppure** `platform.release()` contiene `microsoft` (kernel WSL1/WSL2) |
+| `wsl_distro()` | valore di `WSL_DISTRO_NAME`, stringa vuota se assente |
+
+Entrambi si leggono **a chiamata** (come tutto il modulo, §14.1): i test
+patchano l'env e `platform.release()`. `sys.platform` su WSL resta `linux`,
+per questo il rilevamento non può passare da lì.
+
+### 17.2 `doctor` — tre righe, tutte informative e non fatali
+
+1. **rilevamento**: `WSL rilevato: <distro>` (o `sconosciuta` se l'env manca e
+   è il kernel a dirlo).
+2. **systemd user assente** — `/run/systemd/system` non esiste (WSL1, oppure
+   WSL2 con systemd spento): hint non-fatale "abilita systemd in
+   `/etc/wsl.conf`":
+   ```ini
+   [boot]
+   systemd=true
+   ```
+   poi `wsl --shutdown` da Windows — **oppure** esegui `safekeep run` a mano
+   (fallback senza agent).
+3. **source/dest sotto `/mnt/`** → info **drvfs**: I/O lento (traduzione 9p),
+   case-insensitive di default — valuta una dest su ext4 nativa della distro
+   invece di `/mnt/c/...`.
+
+Nessuno dei tre è fatale: `doctor` esce 0 anche su WSL1 senza systemd.
+
+### 17.3 Init e installazione
+
+- **WSL2 con systemd attivo**: la *user unit* di §14.3 si comporta come su
+  Linux (`install.sh` fa render + `systemctl --user daemon-reload`), linger
+  compreso (§14.4).
+- **Senza systemd** (WSL1 / systemd off): `install.sh` **non installa la unit**
+  e termina con **exit 0** dopo aver stampato le istruzioni di avvio manuale
+  (`safekeep run`) — degradazione graziosa, non errore duro.
+- **Path**: dest/source sotto `/mnt/<lettera>/` = drvfs (vedi §17.2.3).
+
+### 17.4 Limiti dichiarati
+
+- **Nessun test su WSL reale** (nessuna macchina WSL disponibile): detection,
+  marker di `doctor` e branch di `install.sh` testati con env/kernel finto; un
+  E2E su WSL no.
+- Eventi su `/mnt/*` (drvfs/9p) e fswatch su WSL: non documentati qui, da
+  verificare quando ci sarà una macchina WSL.
