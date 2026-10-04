@@ -41,7 +41,9 @@ pip install safekeep
 ```
 
 **Requirements**: macOS or Linux (POSIX with systemd), Python >= 3.9 and
-[fswatch](https://github.com/emcrisostomo/fswatch):
+[fswatch](https://github.com/emcrisostomo/fswatch).
+Windows: no native build — run it inside **WSL** (best-effort, see
+[Troubleshooting](https://foxhound87.github.io/safekeep/troubleshooting/#windows-wsl-best-effort)):
 
 ```bash
 brew install fswatch      # macOS
@@ -157,7 +159,7 @@ safekeep <command> [--config PATH] [-v]
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--project PATH] [--prune]` | a single pass: walks the source and copies whatever differs (`--dry-run` only prints what it would copy; `--prune` also removes dest files whose source still exists but is no longer included) |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
-| `doctor` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails |
+| `doctor` | diagnostics: config, fswatch + platform monitor, python, permission errors in the log (last 24h), TCC/launchd plist (macOS), inotify limit, systemd unit and linger (Linux), WSL detection (best-effort) — exits non-zero if a fatal check fails |
 
 ## Tests
 
@@ -165,12 +167,14 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 175 tests covering the matcher,
+Stdlib (`unittest`) suite, zero dependencies: 197 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery, CLI and the POSIX
-portability layer (platform helper, per-OS fswatch monitor, systemd template).
+portability layer (platform helper, per-OS fswatch monitor, systemd template,
+doctor log/linger checks, WSL detection, `install.sh` without systemd).
 `fswatch` is not needed to run the suite — the few `doctor` checks that talk to
-the real binary are skipped when it's missing — but CI installs it so the
-Linux job exercises the real `inotify` monitor.
+the real binary are skipped when it's missing — but CI installs it so every
+matrix leg (3.9 / 3.12 / 3.14) exercises the real `inotify` monitor and the
+live E2E daemon.
 
 ## Documentation
 

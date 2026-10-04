@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| OS | macOS, or Linux with systemd (POSIX) |
+| OS | macOS, or Linux with systemd (POSIX). Windows: run it inside [WSL](/troubleshooting#windows-wsl-best-effort) (best-effort) |
 | Python | >= 3.9 |
 | fswatch | [emcrisostomo/fswatch](https://github.com/emcrisostomo/fswatch) |
 
@@ -47,6 +47,10 @@ bash install.sh
 missing), renders `~/Library/LaunchAgents/com.safekeep.agent.plist` on macOS
 or `~/.config/systemd/user/safekeep.service` on Linux, and runs preflight
 checks. It does **not** start the job — see [Agent](/agent).
+
+On Linux **without** systemd (WSL1, WSL2 with systemd off, containers) it
+installs no unit and exits `0` with manual-start instructions — see
+[Windows: WSL](/troubleshooting#windows-wsl-best-effort).
 
 ## Verify
 
