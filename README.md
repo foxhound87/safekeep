@@ -165,9 +165,10 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 175 tests covering the matcher,
-config, atomic copy, volumes, daemon, auto-discovery, CLI and the POSIX
-portability layer (platform helper, per-OS fswatch monitor, systemd template).
+Stdlib (`unittest`) suite, zero dependencies: 206 tests covering the matcher,
+config, atomic copy, volumes, daemon, auto-discovery, CLI, the permission-trend
+wrapper and the POSIX portability layer (platform helper, per-OS fswatch
+monitor, systemd template).
 `fswatch` is not needed to run the suite — the few `doctor` checks that talk to
 the real binary are skipped when it's missing — but CI installs it so the
 Linux job exercises the real `inotify` monitor.
