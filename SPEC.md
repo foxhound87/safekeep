@@ -564,7 +564,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 | `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
-| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC e lint plist (solo macOS), residui tmp, limite inotify (solo Linux) | 1 se un check **fatale** fallisce |
+| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC e lint plist (solo macOS), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
 
 `sync-once --prune` è l'unica opzione che **cancella**: rimuove dalla dest i file il cui
 sorgente esiste ancora ma che il matcher ora esclude (regole cambiate), solo sotto il
@@ -589,6 +589,9 @@ python3 bin/safekeep.py status --json
 # Diagnostica completa (lanciarla DOPO aver concesso i permessi TCC/FDA)
 python3 bin/safekeep.py doctor
 
+# Stessa diagnostica, machine-readable (per tracciare l'andamento nel tempo)
+python3 bin/safekeep.py doctor --json
+
 # Avvio manuale del daemon (senza launchd) con log verbose
 python3 bin/safekeep.py run -v
 ```
@@ -610,6 +613,54 @@ python3 bin/safekeep.py run -v
 7. residui `.safekeep.tmp.*`;
 8. su **Linux**, informativo e **non fatale**: `fs.inotify.max_user_watches` ≥ 16384
    (§14.4).
+
+### 9.1 `doctor --json` — output strutturato
+
+`safekeep doctor --json` stampa **un solo documento JSON su stdout** ed esce con lo
+**stesso exit code** della modalità normale (0 se nessun check fatale fallisce, 1 se
+almeno uno fallisce). Motivazione: poter tracciare nel tempo l'andamento degli errori
+di permesso — un wrapper appende una riga per run a un CSV/file e il trend si legge
+da lì. **Niente storicizzazione in safekeep**: nessun DB, nessun modulo nuovo, nessuna
+retention — solo il dump strutturato di ciò che la modalità normale già calcola.
+
+Schema del documento:
+
+```json
+{
+  "safekeep": "0.4.0",
+  "timestamp": "2026-10-04T10:20:30",
+  "exit": 0,
+  "checks": [
+    {"id": "config_valida", "status": "ok",
+     "message": "config valida: ~/.safekeep (2 source, 2 dest)"}
+  ],
+  "permission_errors": {"count_24h": 0, "last": null}
+}
+```
+
+| Campo | Tipo | Significato |
+|---|---|---|
+| `safekeep` | stringa | versione (`safekeep.__version__`) |
+| `timestamp` | stringa | `datetime.now()` in ISO 8601 (`YYYY-MM-DDTHH:MM:SS`, orario locale, senza timezone — coerente con i prefissi delle righe di log, §14.4) |
+| `exit` | intero | copia dell'exit code restituito |
+| `checks` | array | **stessa sequenza della modalità normale**: stessi check, stesso ordine, stesso esito, uno per riga — nessun check aggiunto o omesso |
+| `checks[].id` | stringa | slug del messaggio: prefisso fino a `:` o `(`, minuscolo, tutto ciò che non è alfanumerico → `_`; id uguali ripetuti suffissati `_2`, `_3` (dedup, così l'id resta chiave usabile) |
+| `checks[].status` | stringa | `ok` = riga ✔; `warn` = riga ✗ **non fatale**; `fail` = riga ✗ **fatale** (quella che fa uscire con 1) |
+| `checks[].message` | stringa | testo esatto della riga, senza il prefisso `✔`/`✗` |
+| `permission_errors.count_24h` | intero | errori di permesso nelle ultime 24h (§14.4); `0` anche quando il log è assente — in quel caso la riga di check riporta "check saltato" |
+| `permission_errors.last` | stringa o `null` | timestamp dell'ultimo errore (`YYYY-MM-DD HH:MM:SS`), `null` se nessun errore o log assente |
+
+Invariati rispetto alla modalità normale: stessi check, stessa non-fatalità, stessi hint
+dentro `message` (in JSON sono testo, non righe formattate). Il flag vale **solo** per
+`doctor`: gli altri comandi non lo hanno.
+
+**Log e stdout — decisione**: nessuna mescolanza, e non serve deviare né silenziare
+nulla. `doctor` non configura mai il logging (nessuna `setup_logging`: quella riserva
+i log a `run`/`sync-once`, che hanno un `StreamHandler(sys.stderr)` + file rotante, §3)
+e tutti i messaggi d'errore della CLI escono su stderr (§9). Quindi in modalità
+`--json` l'unico contenuto di stdout è il documento JSON, parseabile con `json.load`.
+Regola valida anche per il futuro: se `doctor` dovrà loggare, lo farà su stderr, mai su
+stdout.
 
 ---
 
