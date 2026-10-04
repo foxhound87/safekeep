@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.4.0 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.5.0 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -1083,6 +1083,15 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   tre nuovi righe informative in `doctor` (rilevamento, hint systemd, info
   `/mnt/` drvfs) e `install.sh` gentile senza systemd. **Non verificato su WSL
   reale** (nessuna macchina WSL disponibile): test con env/kernel finto.
+- **0.5.0** — `doctor --json` (§9.1) + wrapper trend (§9.2): la diagnostica
+  esce come **un documento JSON su stdout** (stessi check, stesso exit code,
+  `permission_errors` strutturato) e `bin/safekeep-trend.sh` appende ogni ora
+  `timestamp,exit,count_24h,last` a
+  `~/.local/state/safekeep/permission-trend.csv` (header idempotente; agent
+  launchd `com.safekeep.trend` con `StartInterval` 3600, render+bootstrap di
+  `install.sh --trend` che **non tocca** il daemon principale). CI: step WSL
+  eseguito davvero (§14.6) e `actions/checkout@v7` + `actions/setup-python@v7`
+  (runtime `node24`, niente warning di deprecazione Node 20).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
