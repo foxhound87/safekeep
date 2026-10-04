@@ -64,6 +64,12 @@ Limits, on purpose: only the current log is read (rotations `.log.1` …
 `.log.5` are not), a line whose timestamp cannot be parsed is **not** counted
 (so the number is a minimum), and a missing log skips the check.
 
+To follow the trend instead of looking at a single run, use
+`safekeep doctor --json`: the same data in structured form
+(`permission_errors.count_24h` and `permission_errors.last`), so a wrapper can
+append one line per run to a CSV and plot it later — see
+[Commands](/commands#doctor-json).
+
 ## Linux: inotify watch limit
 
 On Linux `fswatch` watches trees through **inotify** (FSEvents on macOS). One

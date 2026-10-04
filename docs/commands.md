@@ -9,7 +9,7 @@ safekeep <command> [--config PATH] [-v]
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--prune] [--project PATH]` | one pass: walks the source and copies whatever differs, then exits |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
-| `doctor` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails |
+| `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code |
 
 ## `run`
 
@@ -65,3 +65,33 @@ check fails.
 
 Run it **after** granting Full Disk Access — see
 [Troubleshooting](/troubleshooting).
+
+### `doctor --json`
+
+```bash
+safekeep doctor --json
+```
+
+Same checks, same order, same exit code — but the whole report is a single
+JSON document on stdout, nothing else is printed, so `json.load` on stdout
+never fails. Built to track the permission-error trend over time: a wrapper
+appends one line per run to a CSV and the trend reads from there.
+
+```json
+{
+  "safekeep": "0.4.0",
+  "timestamp": "2026-10-04T10:20:30",
+  "exit": 0,
+  "checks": [
+    {"id": "config_valida", "status": "ok", "message": "config valida: …"}
+  ],
+  "permission_errors": {"count_24h": 0, "last": null}
+}
+```
+
+`status` is `ok` (a ✔ line), `warn` (a ✗ non-fatal line) or `fail` (a ✗ fatal
+line — the one that makes the exit code 1); `checks[].message` is exactly the
+text of the corresponding normal line, `checks[].id` a stable slug of it.
+`permission_errors` is the structured form of the "permission errors in the
+last 24h" check: `count_24h` plus the `last` timestamp (`null` when there is
+no log). Full schema in SPEC.md §9.1.

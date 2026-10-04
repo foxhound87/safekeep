@@ -11,10 +11,17 @@ matcher, config, atomic copy, volumes, daemon, auto-discovery and the CLI.
 `fswatch` is **not** required — `tests/test_cli.py` tolerates its absence and
 the daemon loop uses a fake fswatch (a Python script), not the real binary.
 
-Do not install `fswatch` in a Linux CI container to "be complete": `doctor`
-expects the macOS `fsevents_monitor` and the suite would fail.
+`fswatch` **is** installed in the CI images: since 0.3.0 `doctor` expects the
+monitor of the current platform (`inotify_monitor` on Linux, `fsevents_monitor`
+on macOS), so the suite runs against the real binary there too.
 
-CI (GitLab) runs exactly that command on `python:3.12-slim`.
+CI runs that command on GitHub Actions and GitLab CI over a 3.9/3.12/3.14
+matrix: unit suite, then `tests/e2e_linux.sh` (live daemon, real `fswatch`),
+then the WSL step — `WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh
+--doctor-only`, gated on the `WSL rilevato: SafekeepCITest` marker **and**
+exit 0. That step is what exercises the WSL branch of `doctor` (SPEC §17) for
+real instead of the env faked by the unit tests; it needs nothing beyond
+`python3`, `bash`, `grep` and `mktemp`.
 
 ## Constraints
 
