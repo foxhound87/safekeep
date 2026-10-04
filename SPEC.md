@@ -662,6 +662,59 @@ e tutti i messaggi d'errore della CLI escono su stderr (§9). Quindi in modalit�
 Regola valida anche per il futuro: se `doctor` dovrà loggare, lo farà su stderr, mai su
 stdout.
 
+### 9.2 `bin/safekeep-trend.sh` — wrapper trend errori di permesso (orario)
+
+`doctor --json` (§9.1) dà il punto **nello** tempo; per graficare l'andamento serve una
+serie. Stessa regola di §9.1: **niente storicizzazione in safekeep** (nessun DB, nessun
+modulo, nessuna retention) — un wrapper bash esterno esegue `doctor --json` e appende
+una riga a un CSV. Frequenza **oraria**: 24 righe/giorno, ~1 KB/giorno, trascurabile.
+
+**Schema CSV** — header scritto **una sola volta** (idempotente: creato solo se il file
+non esiste o è vuoto), una riga per run:
+
+```csv
+timestamp,exit,count_24h,last
+2026-10-04T10:20:30,0,0,
+```
+
+| Campo | Origine (documento §9.1) |
+|---|---|
+| `timestamp` | `timestamp` |
+| `exit` | `exit` — il codice di `doctor`, **non** quello del wrapper |
+| `count_24h` | `permission_errors.count_24h` |
+| `last` | `permission_errors.last` (`YYYY-MM-DD HH:MM:SS`), **vuoto** se `null` |
+
+Nessuno dei quattro campi contiene virgole (ISO 8601, intero, intero, `HH:MM:SS`):
+la riga si legge con uno `split(',')` senza quoting.
+
+**Esecuzione**: estrazione dei campi con `python3 -c` + `json` — **mai `grep` su
+JSON**. L'exit code di `doctor` è un **dato**, non un errore: il wrapper appende la
+riga anche quando `doctor` esce 1 (un check fatale è esattamente ciò che il trend deve
+catturare). Fallisce (exit 1, messaggio su stderr) solo se l'output non è JSON
+parsabile — **mai** una riga inventata.
+
+**Override** (gli stessi meccanismi che usano i test):
+
+| Env / flag | Default | Cosa |
+|---|---|---|
+| `HOME` | reale | da cui derivano config e path CSV (test: HOME finto) |
+| `SAFEKEEP_TREND_CSV` | `~/.local/state/safekeep/permission-trend.csv` | path del CSV |
+| `SAFEKEEP_PYTHON` | `python3` | interprete che esegue `doctor` ed estrae i campi |
+| `--config PATH` | `~/.safekeep` | config passata a `doctor` |
+
+**Agent (macOS, §8)**: template `launchd/com.safekeep.trend.plist`, reso da
+`install.sh --trend` con lo **stesso** meccanismo di placeholder del plist principale
+(`__REPO__`, `__PYTHON__`, `__HOME__` + `__SCRIPT__` = `bin/safekeep-trend.sh`).
+`StartInterval` 3600 (orario) e **niente** `RunAtLoad`: la prima riga arriva dopo un'ora,
+oppure si forza con `launchctl kickstart gui/$(id -u)/com.safekeep.trend`. Log unico
+di stdout/stderr: `~/.local/state/safekeep/trend.log`. `install.sh --trend` fa
+render + `launchctl bootstrap` **senza toccare né ricaricare la unit dell'agente
+principale** (§8.2); `uninstall.sh --trend` fa `bootout` + rimozione del solo plist
+trend.
+
+**Fuori scope**: retention/rotazione del CSV, grafici, alert, agent su Linux (il
+wrapper lì si lancia a mano o da cron/timer — non c'è ancora richiesta).
+
 ---
 
 ## 10. Riconciliazione e anti-flood
