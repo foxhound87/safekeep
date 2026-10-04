@@ -13,13 +13,28 @@
 ## Events
 
 ```
-fswatch -0 -m fsevents_monitor -r -l 1.0 -e <exclusion regex> -- <watch roots>
+fswatch -0 -m <monitor> -r -l 1.0 -e <exclusion regex> -- <watch roots>
 ```
 
 - `-0` → NUL separator, paths with spaces and newlines are safe
-- `-m fsevents_monitor` → the native FSEvents (File System Events) monitor
+- `-m <monitor>` → the monitor for the platform, never the implicit default
+  (see below)
 - `-l 1.0` → at least 1s of batching, flood control at the source
 - `-e` → a coarse pre-filter; the Python matcher stays the only source of truth
+
+### Monitor per OS
+
+The monitor name is exactly what `fswatch -M` lists, and it comes from
+`safekeep/platform.py` — the only place that reads `sys.platform`:
+
+| OS | Monitor | Watching is | Boot agent |
+|---|---|---|---|
+| macOS | `fsevents_monitor` | FSEvents (File System Events) | launchd (`RunAtLoad` + `KeepAlive`) |
+| Linux | `inotify_monitor` | inotify | systemd user unit (`WantedBy=default.target` + `Restart=always`) |
+
+`doctor` asserts that the expected monitor is present in `fswatch -M`; `doctor`
+also reports the inotify watch limit (`fs.inotify.max_user_watches`) on Linux,
+the equivalent of watching FSEvents capacity on macOS.
 
 Per event:
 

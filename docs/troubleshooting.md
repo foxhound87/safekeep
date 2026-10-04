@@ -6,10 +6,11 @@
 safekeep doctor
 ```
 
-Checks: `fswatch` presence and version, global config and every `.sync`
-syntax, no destination inside a source (copy loop), destination writability,
-launchd plist lint, source access + TCC probe, leftover `.safekeep.tmp.*`
-files. Exit `1` on a fatal failure.
+Checks: `fswatch` presence, version and **the monitor for your OS**
+(`fsevents_monitor` on macOS, `inotify_monitor` on Linux), global config and
+every `.sync` syntax, no destination inside a source (copy loop), python
+version, TCC + launchd plist lint (macOS), inotify watch limit + systemd user
+unit (Linux), leftover `.safekeep.tmp.*` files. Exit `1` on a fatal failure.
 
 ## Full Disk Access (FDA)
 
@@ -36,6 +37,29 @@ launchctl bootout gui/$(id -u)/com.safekeep.agent
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
 ```
 
+## Linux: inotify watch limit
+
+On Linux `fswatch` watches trees through **inotify** (FSEvents on macOS). One
+watch per directory, capped per user:
+
+```bash
+sysctl fs.inotify.max_user_watches
+```
+
+`doctor` warns below 16384 (non-fatal): a home tree of ~25k files runs out, the
+extra watches are silently dropped and **new** events stop arriving — files
+already backed up stay safe, and the 24h reconcile still catches up. Raise it:
+
+```bash
+sudo sysctl -w fs.inotify.max_user_watches=524288            # this boot
+echo 'fs.inotify.max_user_watches=524288' \
+  | sudo tee /etc/sysctl.d/50-safekeep.conf                  # and at every boot
+```
+
+The systemd user unit starts with the login session only: without
+`loginctl enable-linger $USER` it runs after the first login, not at boot
+(see [Agent](/agent)).
+
 ## Nothing is copied
 
 1. Is there a `.sync` in the project root? No `.sync` → not followed.
@@ -52,8 +76,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
 ## Logs
 
 ```bash
-tail -f /tmp/safekeep.out.log
-tail -f /tmp/safekeep.err.log
+tail -f ~/.local/state/safekeep/safekeep.log   # both platforms (rotating, 5 x 5 MB)
+journalctl --user -u safekeep -f               # Linux: what the unit prints
 ```
 
 Raise verbosity with `safekeep run -v` (foreground) or `log_level: debug` in

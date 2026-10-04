@@ -50,5 +50,5 @@ safekeep sync-once --dry-run   # prints what would be copied, copies nothing
 safekeep run                   # daemon: watch + copy (foreground)
 ```
 
-Once `run` looks right, load it at boot with the launchd agent — see
-[Agent (launchd)](/agent-launchd).
+Once `run` looks right, load it at boot with the per-OS agent — see
+[Agent (launchd / systemd)](/agent).

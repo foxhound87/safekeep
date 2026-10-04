@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: safekeep
-  text: Selective always-on backups for macOS
+  text: Selective always-on backups for macOS and Linux
   tagline: Watches your source folders with fswatch and copies only the files you allow-list. It never deletes anything.
   actions:
     - theme: brand
@@ -27,12 +27,13 @@ features:
     details: >
       A file removed or renamed at the source stays in the backup. The backup is
       copy-and-update only — history by construction.
-  - title: fswatch + launchd
+  - title: fswatch + launchd / systemd
     details: >
-      FSEvents-backed watching through fswatch, with a launchd agent (RunAtLoad +
-      KeepAlive) that starts at boot and restarts the daemon if it dies.
+      Native watching through fswatch (FSEvents on macOS, inotify on Linux), with a
+      launchd agent or a systemd user unit that starts at boot and restarts the
+      daemon if it dies.
   - title: Zero dependencies
     details: >
-      Pure Python standard library. The only external pieces are fswatch and
-      launchd, both already part of the macOS story.
+      Pure Python standard library. The only external pieces are fswatch and the
+      OS init system — launchd on macOS, systemd on Linux.
 ---

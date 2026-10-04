@@ -24,15 +24,18 @@ CI (GitLab) runs exactly that command on `python:3.12-slim`.
   fake `$HOME`.
 - macOS specifics (`plutil`, `/var` vs `/private/var`) are detected and
   tolerated at runtime.
+- `safekeep/platform.py` is the **only** module reading `sys.platform`; tests
+  patch it, so both OS branches are covered from either OS.
 
 ## Layout
 
 ```
 safekeep/     Python package (cli, config, matcher, daemon, copy, …)
-bin/          runnable entry point (launchd points here)
+bin/          runnable entry point (launchd / systemd point here)
 tests/        unittest suite
 examples/     safekeep.example, sync.example (commented)
-launchd/      agent plist template
+launchd/      launchd plist template (macOS)
+systemd/      systemd user unit template (Linux)
 docs/         this VitePress site
 ```
 

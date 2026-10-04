@@ -9,7 +9,7 @@ safekeep <command> [--config PATH] [-v]
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--prune] [--project PATH]` | one pass: walks the source and copies whatever differs, then exits |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
-| `doctor` | diagnostics: config, fswatch, TCC, launchd plist — exits non-zero if a fatal check fails |
+| `doctor` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails |
 
 ## `run`
 
@@ -19,8 +19,9 @@ safekeep run -v     # verbose
 ```
 
 Load config, discover projects, run the initial reconcile, then watch.
-`launchd` keeps it alive; `SIGTERM` shuts down cleanly (closes fswatch, drains
-the queue, exits 0). Exits non-zero if the config is invalid or a destination
+The boot agent (`launchd` on macOS, `systemd` on Linux) keeps it alive;
+`SIGTERM` shuts down cleanly (closes fswatch, drains the queue, exits 0).
+Exits non-zero if the config is invalid or a destination
 sits inside a source.
 
 ## `sync-once`
@@ -43,7 +44,6 @@ safekeep sync-once --prune                  # remove dest files no longer includ
 
 ```bash
 safekeep status
-safekeep status --json
 ```
 
 Config path, mode (`source` / `$HOME` auto-discovery), sources, discovered
@@ -56,10 +56,12 @@ projects with their rule count, and per-destination state (`ok`, `absent`,
 safekeep doctor
 ```
 
-Checks at least: `fswatch` presence and version, config and `.sync` syntax,
-that no destination is a subdirectory of a source (copy loop), destination
-writability, launchd plist lint, source access + TCC probe, and leftover
-`.safekeep.tmp.*` files. Exit `1` if a **fatal** check fails.
+Checks at least: `fswatch` presence, version and the monitor for the platform
+(`fsevents_monitor` on macOS, `inotify_monitor` on Linux), config and `.sync`
+syntax, that no destination is a subdirectory of a source (copy loop), python
+version, TCC + launchd plist lint (macOS), inotify watch limit + systemd user
+unit (Linux), and leftover `.safekeep.tmp.*` files. Exit `1` if a **fatal**
+check fails.
 
 Run it **after** granting Full Disk Access — see
 [Troubleshooting](/troubleshooting).

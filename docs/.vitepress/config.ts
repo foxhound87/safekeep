@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   base: '/safekeep/',
   title: 'safekeep',
-  description: 'Event-driven selective file backup for macOS',
+  description: 'Event-driven selective file backup for macOS and Linux',
 
   markdown: {
     lineNumbers: true
@@ -36,7 +36,7 @@ export default defineConfig({
       text: 'Reference',
       items: [
         { text: 'How it works', link: '/how-it-works' },
-        { text: 'Agent (launchd)', link: '/agent-launchd' },
+        { text: 'Agent (launchd / systemd)', link: '/agent' },
         { text: 'Troubleshooting', link: '/troubleshooting' },
         { text: 'Development', link: '/development' }
       ]
