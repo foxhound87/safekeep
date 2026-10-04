@@ -863,6 +863,20 @@ esattamente l'incompatibilità documentata nella vecchia nota di portabilità di
 `.gitlab-ci.yml` (nota **aggiornata**, non contraddetta). I job `publish` e
 `publish-test` restano invariati.
 
+### 14.7 Metadata release (`pyproject.toml`)
+
+Le metadata PyPI di un upload sono **immutabili**: ciò che cambia in `pyproject.toml`
+si vede su pypi.org solo dal prossimo upload, mentre i rilasci già pubblicati (0.2.0)
+restano con le vecchie. Per 0.3.0 quindi, una tantum:
+
+- **`[project.urls]`**: `Repository` = `https://github.com/foxhound87/safekeep`
+  (GitHub è il repo primario e pubblico), `Homepage`/`Documentation` = sito docs su
+  GitHub Pages `https://foxhound87.github.io/safekeep/` — **nessuna voce GitLab**;
+- **keywords**: rinnovate attorno al nuovo scope (backup, macos, linux, fswatch, sync,
+  allow-list, launchd, systemd);
+- **classifiers**: OS `MacOS` + `POSIX` + `POSIX :: Linux`, Python **solo** le versioni
+  effettivamente eseguite dalla suite (3.9 floor + 3.12 CI + 3.14 locale).
+
 ---
 
 ## 15. Decisioni aperte
@@ -888,5 +902,12 @@ esattamente l'incompatibilità documentata nella vecchia nota di portabilità di
   incompatibili solo con bump di MINOR finché non si raggiunge 1.0.0.
 - **0.3.0** — supporto Linux (POSIX con systemd): §14 — helper di piattaforma, monitor
   fswatch per OS, user unit systemd, `doctor` per OS, `fswatch` in CI, docs.
+  - Metadata PyPI rinnovate per la release (`pyproject.toml`): `[project.urls]` con
+    `Repository` = `https://github.com/foxhound87/safekeep` e `Homepage`/`Documentation` =
+    sito docs su GitHub Pages `https://foxhound87.github.io/safekeep/` (niente voci GitLab),
+    keywords aggiornate (backup, macos, linux, fswatch, sync, allow-list, launchd, systemd),
+    classifier OS (`MacOS`, `POSIX`, `POSIX :: Linux`) e Python (`3.9` floor, `3.12` CI,
+    `3.14` locale). I metadata su PyPI sono immutabili dopo l'upload: questi cambi si
+    vedono da `0.3.0`, mentre `0.2.0` resta con le vecchie.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
