@@ -413,7 +413,7 @@ class PlanBatchTest(unittest.TestCase):
 
 
 class FswatchArgvTest(unittest.TestCase):
-    def test_argv_esatto_dallo_spec(self):
+    def _daemon(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         src = os.path.join(tmp, 'src')
@@ -424,14 +424,29 @@ class FswatchArgvTest(unittest.TestCase):
         daemon = Daemon(cfg_path)
         daemon.load_config()
         daemon.load_projects()
+        return daemon, src
+
+    def test_argv_esatto_dallo_spec(self):
+        daemon, src = self._daemon()
         argv = daemon.fswatch_argv()
-        self.assertEqual(argv[:7],
-                         ['fswatch', '-0', '-m', 'fsevents_monitor', '-r', '-l', '1.0'])
+        # posizioni fisse: solo il monitor (-m) è per-piattaforma (SPEC §14.2)
+        self.assertEqual(argv[:3], ['fswatch', '-0', '-m'])
+        self.assertIn(argv[3], ('fsevents_monitor', 'inotify_monitor'))
+        self.assertEqual(argv[4:7], ['-r', '-l', '1.0'])
         regexes = [argv[i + 1] for i, a in enumerate(argv) if a == '-e']
         self.assertTrue(regexes)
         self.assertTrue(any(re.search(rx, '/qualcuno/node_modules/x') for rx in regexes))
         self.assertTrue(any('skipme/' in rx for rx in regexes))
         self.assertEqual(argv[argv.index('--') + 1:], [src])
+
+    def test_monitor_dichiarato_per_piattaforma(self):
+        # SPEC §14.1/§14.2: il monitor è esplicito su entrambi i rami, letto
+        # a chiamata — così entrambi si testano anche girando su macOS
+        daemon, _ = self._daemon()
+        with mock.patch('sys.platform', 'darwin'):
+            self.assertEqual(daemon.fswatch_argv()[3], 'fsevents_monitor')
+        with mock.patch('sys.platform', 'linux'):
+            self.assertEqual(daemon.fswatch_argv()[3], 'inotify_monitor')
 
 
 class WalkDirTest(TmpTestCase):

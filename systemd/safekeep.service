@@ -1,0 +1,44 @@
+# safekeep — user unit systemd (Linux) — TEMPLATE, NON installare così com'è.
+# SPEC.md §14.3: l'equivalente Linux del launchd plist.
+#
+# Placeholders resi da install.sh (stessi del plist, mai path assoluti nel repo):
+#
+#   __REPO__    radice del repo safekeep (la cartella che contiene bin/ e systemd/)
+#   __PYTHON__  interprete Python >= 3.9
+#
+# Installazione manuale:
+#   mkdir -p ~/.config/systemd/user
+#   sed -e "s|__REPO__|/percorso/safekeep|" -e "s|__PYTHON__|/usr/bin/python3|" \
+#       systemd/safekeep.service > ~/.config/systemd/user/safekeep.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now safekeep      # ≈ launchctl bootstrap
+#   # al boot SENZA login serve: loginctl enable-linger $USER
+#
+# Stato:   systemctl --user status safekeep
+# Log:     journalctl --user -u safekeep -f   (il log applicativo resta
+#          ~/.local/state/safekeep/safekeep.log, SPEC.md §3)
+# Scarica: systemctl --user disable --now safekeep   (≈ launchctl bootout)
+
+[Unit]
+Description=safekeep — event-driven backup daemon
+Documentation=https://foxhound87.github.io/safekeep/
+
+# launchd con KeepAlive ci riprova sempre: qui il rate-limit di default di
+# systemd (5 start in 10s -> unit in stato `failed` e nessun riavvio) andrebbe
+# contro lo stesso comportamento. Il pacing resta al daemon (MAX_DEATHS /
+# DEATH_WINDOW di SPEC.md §6).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=__PYTHON__ __REPO__/bin/safekeep.py run
+
+# ≈ KeepAlive: se il processo muore, systemd lo riavvia dopo 2s
+Restart=always
+RestartSec=2
+
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+# ≈ RunAtLoad: avvio all'accesso utente (con linger: al boot)
+WantedBy=default.target

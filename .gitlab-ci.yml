@@ -3,24 +3,27 @@
 #
 # NOTA di portabilità (macOS → Linux), letta dai test prima di scriverla:
 #
-# - fswatch NON viene installato nel job, ed è così che i test vogliono girare.
-#   `tests/test_cli.py` è scritta per tollerarne l'assenza: l'assert sull'exit
-#   code di `doctor` c'è solo dentro `if shutil.which('fswatch')`, e il loop
-#   del daemon usa un fswatch finto (script Python), non il binario reale.
-#   Installare fswatch romperebbe invece la suite: su Linux `fswatch -M` non
-#   riporta `fsevents_monitor` (è il monitor FSEvents di macOS), `doctor` esce
-#   con 1 e `test_doctor_config_assente_warning_con_hint_non_fatale` pretende
-#   exit 0 → 1 fallimento. Verificato eseguendo la suite in python:3.12-slim
-#   con e senza un fswatch finto.
-#   (Se un giorno servisse fswatch nel runner, prima va addolcito il check
-#   `fsevents_monitor` in `safekeep/cli.py`, non basta apt-get install.)
-#   Per inciso il package `fswatch` ESISTE nei repo Debian/Ubuntu, quindi
-#   l'errore non sarebbe "package not found" ma proprio il test che fallisce.
-#
+# - fswatch VIENE installato nel job (0.3.0): `doctor` ora cerca il monitor della
+#   piattaforma (`fsevents_monitor` su Darwin, `inotify_monitor` su Linux, SPEC
+#   §14.2) e i check TCC/plist sono Darwin-only (SPEC §14.4), quindi la suite
+#   gira col binario reale anche su Linux — ed è così che i test vogliono girare
+#   da 0.3.0 in poi.
+#   Storia: fino a 0.2.x il check era fisso su `fsevents_monitor`, che su Linux
+#   `fswatch -M` non riporta (è il monitor FSEvents di macOS) → `doctor` usciva
+#   con 1 e `test_doctor_config_assente_warning_con_hint_non_fatale` pretendeva
+#   exit 0 → 1 fallimento; per questo il job NON installava fswatch. Verificato
+#   all'epoca eseguendo la suite in python:3.12-slim con e senza un fswatch
+#   finto. La nota è aggiornata, non contraddetta: il package `fswatch` ESISTE
+#   nei repo Debian/Ubuntu, era il check a non essere portabile.
+# - il loop del daemon usa comunque un fswatch finto (script Python), non il
+#   binario reale: nessun test dipende dal comportamento di fswatch.
 # - nessun path `/Users/...` reale: i test usano `tempfile.mkdtemp()` e
 #   `$HOME` finto, quindi non toccano la home dell'utente del runner.
-# - `plutil` non esiste su Linux: `doctor` lo rileva e salta il lint del plist
-#   (riga ✔ "plutil assente"), nessun errore.
+# - `plutil` non esiste su Linux e non serve: il lint del plist è un check
+#   Darwin-only; su Linux `doctor` valida invece la unit systemd (SPEC §14.4).
+# - su Linux `doctor` legge `/proc/sys/fs/inotify/max_user_watches`: check
+#   informativo **non fatale**, quindi anche un runner con un limite basso fa
+#   passare la suite.
 # - `/var` vs `/private/var` (symlink di macOS): i test passano da
 #   `os.path.realpath`, e sotto il container Linux non ci sono symlink
 #   macOS-specifici da risolvere.
@@ -31,12 +34,16 @@
 # l'unico job invoca subprocess della CLI con `sys.executable`, quindi serve
 # solo che l'immagine abbia python3 — `python:3.12-slim` lo garantisce.
 # Se il job fallisce con un check `doctor` mancante, controlla prima la
-# presenza dei marker di `tests/test_cli.py` nel suo stdout.
+# presenza dei marker di `tests/test_cli.py` nel suo stdout, poi `fswatch -M`
+# stampato qui sopra (deve elencare `inotify_monitor`).
 
 test:
   image: python:3.12-slim
   script:
     - python3 --version
+    - apt-get update && apt-get install -y --no-install-recommends fswatch
+    - fswatch --version
+    - fswatch -M
     - python3 -m unittest discover -s tests
 
 # Publish to PyPI with Trusted Publishing (OIDC = OpenID Connect, no stored
@@ -79,3 +86,45 @@ publish:
     - python3 -m twine check dist/*
     # no credentials passed: twine performs the OIDC exchange itself
     - python3 -m twine upload dist/*
+
+# Dry-run upload to TestPyPI — dormant until the pending publisher on
+# test.pypi.org exists (see .vault/PUBLISHING.md). Same shape as `publish`, the
+# only real difference is the OIDC audience:
+#
+# - twine discovers the audience itself: it GETs https://test.pypi.org/_/oidc/audience
+#   and gets back {"audience": "testpypi"} (https://docs.pypi.org/trusted-publishers/using-a-publisher/
+#   states it explicitly: "Using audience=pypi is only correct for PyPI. For TestPyPI,
+#   the correct audience is testpypi.").
+# - it then asks the `id` library for that credential; on GitLab CI/CD `id` reads the
+#   environment variable built from the audience as <AUD>_ID_TOKEN, i.e. TESTPYPI_ID_TOKEN —
+#   which is exactly the id_token name declared below (source: di/id, id/_internal/oidc/ambient.py,
+#   detect_gitlab()).
+# - the exchange happens at https://test.pypi.org/_/oidc/mint-token, then the short-lived
+#   API token is used for the upload; no stored secret anywhere.
+# - `environment: release` matches the pending publisher the user has to create on
+#   test.pypi.org (Settings → Publishing), same 5 fields as production.
+#
+# Never runs by itself: `when: manual`. The publisher on test.pypi.org does not exist
+# yet, so this job is expected to fail with `token not valid for this workflow` until
+# that one-time setup is done — that is the signal to register it, not a CI bug.
+publish-test:
+  stage: deploy
+  image: python:3.12-slim
+  needs: [test]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+      when: manual
+  environment:
+    name: release
+    url: https://test.pypi.org/project/safekeep/
+  id_tokens:
+    TESTPYPI_ID_TOKEN:
+      # TestPyPI expects audience "testpypi" ("pypi" on production PyPI)
+      aud: testpypi
+  script:
+    - python3 --version
+    - python3 -m pip install -U build twine
+    - python3 -m build
+    - python3 -m twine check dist/*
+    # no credentials passed: twine performs the OIDC exchange against test.pypi.org
+    - python3 -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*

@@ -1,7 +1,7 @@
 """CLI di safekeep: `run`, `sync-once`, `status` e `doctor` (SPEC.md §9).
 
 Entry point del package (`safekeep.cli:main`): `bin/safekeep.py` è solo lo
-shim che usano launchd e i test.
+shim che usano launchd/systemd e i test.
 """
 import argparse
 import os
@@ -12,13 +12,21 @@ import sys
 from safekeep.config import ConfigError, discover_projects, parse_sync
 from safekeep.copier import TMP_INFIX
 from safekeep.daemon import Daemon, setup_logging
+from safekeep.platform import (
+    INOTIFY_MIN_WATCHES,
+    fswatch_monitor,
+    inotify_limit,
+    install_hint,
+    is_darwin,
+    is_linux,
+)
 from safekeep.volumes import dest_state
 
 # Radice del repo quando si gira da checkout; in un install pip punta altrove
 # (site-packages) e i riferimenti a file del repo degradano (vedi cmd_doctor).
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EXAMPLE = os.path.join(REPO, 'examples', 'safekeep.example')
-REPO_URL = 'https://gitlab.com/foxhound87/safekeep'
+REPO_URL = 'https://github.com/foxhound87/safekeep'
 
 
 def build_parser():
@@ -29,7 +37,7 @@ def build_parser():
 
     parser = argparse.ArgumentParser(
         prog='safekeep',
-        description='safekeep — backup event-driven per macOS (vedi SPEC.md)')
+        description='safekeep — backup event-driven per macOS e Linux (vedi SPEC.md)')
     sub = parser.add_subparsers(dest='comando', required=True)
     sub.add_parser('run', parents=[common],
                    help='daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h')
@@ -45,7 +53,9 @@ def build_parser():
     sub.add_parser('status', parents=[common],
                    help='config, progetti e stato delle dest — sola lettura')
     sub.add_parser('doctor', parents=[common],
-                   help='diagnostica: config, fswatch, TCC, plist — exit ≠ 0 se un check fatale fallisce')
+                   help='diagnostica: config, fswatch + monitor di piattaforma, python, '
+                        'TCC/plist (macOS), inotify/systemd (Linux) — exit ≠ 0 se un check '
+                        'fatale fallisce')
     return parser
 
 
@@ -186,7 +196,7 @@ def cmd_doctor(args):
 
     exe = shutil.which('fswatch')
     if exe is None:
-        out(False, 'fswatch non trovato — installa con: brew install fswatch',
+        out(False, f'fswatch non trovato — installa con: {install_hint()}',
             is_fatal=True)
     else:
         version = None
@@ -200,31 +210,50 @@ def cmd_doctor(args):
         out(version is not None,
             f'fswatch: {version}' if version else 'fswatch --version senza output',
             is_fatal=True)
+        # monitor atteso per piattaforma (SPEC.md §14.2/§14.4)
+        expected = fswatch_monitor()
         try:
             monitors = subprocess.run([exe, '-M'], capture_output=True,
                                       text=True, timeout=15)
-            has_fsevents = 'fsevents_monitor' in monitors.stdout
+            present = expected in monitors.stdout
         except (OSError, subprocess.SubprocessError):
-            has_fsevents = False
-        out(has_fsevents,
-            'fswatch monitor: fsevents_monitor presente' if has_fsevents else
-            'fswatch monitor: fsevents_monitor ASSENTE in `fswatch -M`',
+            present = False
+        out(present,
+            f'fswatch monitor: {expected} presente' if present else
+            f'fswatch monitor: {expected} ASSENTE in `fswatch -M`',
             is_fatal=True)
 
     out(sys.version_info >= (3, 9),
         f'python {sys.version.split()[0]} (≥ 3.9)', is_fatal=True)
 
-    docs = os.path.expanduser('~/Documents')
-    if not os.path.isdir(docs):
-        out(True, 'TCC (Transparency, Consent and Control): ~/Documents assente — probe saltato')
-    else:
-        try:
-            os.listdir(docs)
-        except PermissionError:
-            out(False, 'TCC: PermissionError su ~/Documents — serve FDA '
-                       '(Full Disk Access) per i progetti in cartelle protette')
+    # Linux: il limite di watch di inotify è il rischio #1 sugli alberi grandi
+    # (SPEC.md §14.4) — informativo, NON fatale
+    if is_linux():
+        limit = inotify_limit()
+        if limit is None:
+            out(True, 'inotify: limite di watch non leggibile — check saltato')
+        elif limit < INOTIFY_MIN_WATCHES:
+            out(False, f'inotify: fs.inotify.max_user_watches={limit} '
+                       f'(< {INOTIFY_MIN_WATCHES}) — su alberi grandi (~25k file) i '
+                       'watch finiscono: sudo sysctl -w fs.inotify.max_user_watches=524288 '
+                       '— warning non fatale')
         else:
-            out(True, 'TCC: ~/Documents leggibile')
+            out(True, f'inotify: fs.inotify.max_user_watches={limit} '
+                      f'(≥ {INOTIFY_MIN_WATCHES})')
+
+    # TCC (Transparency, Consent and Control) è un meccanismo di macOS (SPEC.md §11)
+    if is_darwin():
+        docs = os.path.expanduser('~/Documents')
+        if not os.path.isdir(docs):
+            out(True, 'TCC (Transparency, Consent and Control): ~/Documents assente — probe saltato')
+        else:
+            try:
+                os.listdir(docs)
+            except PermissionError:
+                out(False, 'TCC: PermissionError su ~/Documents — serve FDA '
+                           '(Full Disk Access) per i progetti in cartelle protette')
+            else:
+                out(True, 'TCC: ~/Documents leggibile')
 
     if cfg is not None:
         residui = [os.path.join(dirpath, name)
@@ -236,19 +265,37 @@ def cmd_doctor(args):
             'residui *.safekeep.tmp.*: nessuno' if not residui else
             'residui *.safekeep.tmp.*: ' + ', '.join(residui))
 
-    plist = os.path.expanduser('~/Library/LaunchAgents/com.safekeep.agent.plist')
-    if not os.path.exists(plist):
-        out(True, 'plist non installato (nessun agent da validare)')
-    elif shutil.which('plutil') is None:
-        out(True, 'plutil assente — lint del plist saltato')
+    if is_darwin():
+        plist = os.path.expanduser('~/Library/LaunchAgents/com.safekeep.agent.plist')
+        if not os.path.exists(plist):
+            out(True, 'plist non installato (nessun agent da validare)')
+        elif shutil.which('plutil') is None:
+            out(True, 'plutil assente — lint del plist saltato')
+        else:
+            try:
+                lint = subprocess.run(['plutil', '-lint', plist],
+                                      capture_output=True, text=True, timeout=15)
+                detail = (lint.stdout + lint.stderr).strip() or plist
+                out(lint.returncode == 0, f'plist lint: {detail}', is_fatal=True)
+            except (OSError, subprocess.SubprocessError) as e:
+                out(False, f'plist lint non eseguibile: {e}', is_fatal=True)
     else:
-        try:
-            lint = subprocess.run(['plutil', '-lint', plist],
-                                  capture_output=True, text=True, timeout=15)
-            detail = (lint.stdout + lint.stderr).strip() or plist
-            out(lint.returncode == 0, f'plist lint: {detail}', is_fatal=True)
-        except (OSError, subprocess.SubprocessError) as e:
-            out(False, f'plist lint non eseguibile: {e}', is_fatal=True)
+        # Linux: user unit systemd al posto del plist (SPEC.md §14.3)
+        unit = os.path.expanduser('~/.config/systemd/user/safekeep.service')
+        if not os.path.exists(unit):
+            out(True, 'unit systemd non installata (nessun agent da validare)')
+        else:
+            try:
+                with open(unit, encoding='utf-8') as fh:
+                    text = fh.read()
+            except (OSError, UnicodeError) as e:
+                out(False, f'unit systemd illeggibile: {unit}: {e}', is_fatal=True)
+            else:
+                if '__REPO__' in text or '__PYTHON__' in text:
+                    out(False, f'unit systemd: {unit} contiene ancora i placeholder '
+                               'del template — rilancia install.sh', is_fatal=True)
+                else:
+                    out(True, f'unit systemd: {unit}')
 
     return 1 if fatal else 0
 

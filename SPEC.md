@@ -1,15 +1,16 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.2.0 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.3.0 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
-**Piattaforma target:** macOS (FSEvents, launchd)
+**Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
 ---
 
 ## 1. Panoramica e obiettivo
 
-`safekeep` è un motore di backup **event-driven** per macOS: osserva le cartelle sorgente con
-**fswatch** (utility installabile via Homebrew) e copia i file modificati su una o più destinazioni,
+`safekeep` è un motore di backup **event-driven** per **macOS e Linux** (POSIX): osserva le
+cartelle sorgente con **fswatch** (utility installabile via Homebrew su macOS, dai package
+manager delle distro su Linux) e copia i file modificati su una o più destinazioni,
 senza mai cancellare nulla nel backup.
 
 Obiettivi, in ordine di priorità:
@@ -17,7 +18,7 @@ Obiettivi, in ordine di priorità:
 1. **Nessuna perdita di dati nel backup.** La semantica è *solo copia/aggiorna, mai cancellare*:
    un file rimosso o rinominato alla sorgente **resta nel backup** (storicizzazione di fatto).
 2. **Semplicità operativa.** Unico script Python 3 (solo stdlib), zero dipendenze esterne oltre a
-   `fswatch` e al sistema di avvio `launchd` (Launch Daemon/Agent di macOS).
+   `fswatch` e al sistema di avvio (`launchd` su macOS, `systemd` su Linux — §14.3).
 3. **Configurazione minimale e prevedibile.** Un file globale `~/.safekeep` (sorgenti,
    destinazioni, layout, defaults) più, opzionalmente, un file `.sync` per progetto con
    sintassi stile gitignore e **solo regole** di inclusione/esclusione.
@@ -31,14 +32,23 @@ Non-obiettivi (esplicitamente fuori scope di 0.1.0):
 - retention/pruning delle copie storiche;
 - daemon multi-utente o servizio installato come LaunchDaemon di sistema.
 
+**Onestà su cosa è testato.** macOS è la piattaforma primaria ed è testata in locale
+(suite + daemon launchd reale). Per Linux il supporto è reale ma coperto da: **CI su
+Debian/Ubuntu** (suite completa con `fswatch` reale installato) e **E2E su Omarchy/Arch**
+(suite, `doctor`, sync one-shot e propagazione degli eventi su una VM Linux reale).
+Restano fuori copertura: altre distro (Fedora et al. — coperte solo dagli hint di
+installazione), systemd senza sessione di login (linger, §14.3) e architetture non x86_64.
+Dettaglio del design di portabilità: §14.
+
 ---
 
 ## 2. Architettura
 
 ```
                         ┌──────────────────────────────────────────────┐
-                        │              launchd (plist)                 │
-                        │   RunAtLoad + KeepAlive — avvio al boot      │
+                        │   init system (§14.3):                       │
+                        │   launchd (plist) / systemd (user unit)      │
+                        │   RunAtLoad/WantedBy + KeepAlive/Restart     │
                         │   opzionale StartOnMount (vedi §8.3)         │
                         └───────────────────┬──────────────────────────┘
                                             │ avvia / riavvia
@@ -52,7 +62,7 @@ Non-obiettivi (esplicitamente fuori scope di 0.1.0):
    (name, defaults,  ──────────────────────────────┘          │ subprocess
     include/exclude last-match-wins)                          ▼
                                            ┌──────────────────────────────────┐
-                                           │ fswatch -0 -m fsevents_monitor   │
+                                           │ fswatch -0 -m <monitor>          │
                                            │ -r -l 1.0 -e <regex> -- <roots>  │
                                            └───────────────┬──────────────────┘
                                                            │ eventi path\0
@@ -84,8 +94,8 @@ Non-obiettivi (esplicitamente fuori scope di 0.1.0):
 | Reconcile | dentro `run`/`sync-once` | walk di riconciliazione (boot, mount, ogni 24h) |
 | Matcher | modulo nello stesso script | pattern gitignore-like, last-match-wins, dir pruning |
 | Copia atomica | modulo nello stesso script | stability check, tmp + fsync + `os.replace` |
-| launchd plist | `~/Library/LaunchAgents/com.safekeep.agent.plist` | tenere vivo il processo, avvio al boot |
-| CLI diagnostica | `status` / `doctor` | salute, TCC (Transparency, Consent and Control), validazione config |
+| launchd plist / systemd user unit | `~/Library/LaunchAgents/com.safekeep.agent.plist` / `~/.config/systemd/user/safekeep.service` | tenere vivo il processo, avvio al boot (§14.3) |
+| CLI diagnostica | `status` / `doctor` | salute, TCC (Transparency, Consent and Control, solo macOS), validazione config |
 
 ### Vincoli architetturali
 
@@ -331,15 +341,17 @@ ignorare (§4.2).
    statiche) e avvia il subprocess:
 
    ```
-   fswatch -0 -m fsevents_monitor -r -l 1.0 -e <regex esclusioni> -- <radici watch>
+   fswatch -0 -m <monitor> -r -l 1.0 -e <regex esclusioni> -- <radici watch>
    ```
 
    - **radici watch**: le `source` del config (modalità source, deduplicate: una
      radice annidata sotto un'altra già coperta viene saltata — `fswatch -r`
      copre già il sottoalbero), oppure `$HOME` (modalità auto-discovery);
    - `-0`: separatore NUL (path con spazi/newline sicuri);
-   - `-m fsevents_monitor`: monitor nativo FSEvents (File System Events — API di notifica
-     filesystem di macOS);
+   - `-m <monitor>`: monitor nativo **dichiarato esplicitamente per piattaforma**
+     (mai il default implicito di fswatch): `fsevents_monitor` su Darwin
+     (FSEvents = File System Events, API di notifica filesystem di macOS) e
+     `inotify_monitor` su Linux (inotify, subsystem del kernel Linux) — §14.2;
    - `-r`: ricorsivo;
    - `-l 1.0`: batching di almeno 1s (anti-flood a monte);
    - `-e <regex>`: pre-filtro esclusioni lato fswatch (le regex sono un filtro grezzo; la
@@ -451,7 +463,12 @@ fuori dalla dest**, nemmeno via symlink creati da copie precedenti.
 
 ---
 
-## 8. launchd
+## 8. launchd (macOS)
+
+Su **macOS** l'init system (sistema di avvio) è `launchd`: è ciò che descrive questa
+sezione. Su **Linux** è `systemd` con una **user unit** — il confronto completo, il
+template della unit e gli script di installazione sono in **§14.3**; questa sezione
+rimane la fonte per il ramo macOS.
 
 ### 8.1 Plist completo
 
@@ -547,7 +564,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 | `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
-| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor, python ≥ 3.9, probe TCC, residui tmp, lint plist | 1 se un check **fatale** fallisce |
+| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC e lint plist (solo macOS), residui tmp, limite inotify (solo Linux) | 1 se un check **fatale** fallisce |
 
 `sync-once --prune` è l'unica opzione che **cancella**: rimuove dalla dest i file il cui
 sorgente esiste ancora ma che il matcher ora esclude (regole cambiate), solo sotto il
@@ -578,16 +595,21 @@ python3 bin/safekeep.py run -v
 
 `doctor` controlla almeno:
 
-1. presenza e versione di `fswatch` (`fswatch --version`);
+1. presenza e versione di `fswatch` (`fswatch --version`) e **monitor atteso per la
+   piattaforma** presente in `fswatch -M` (`fsevents_monitor` su Darwin,
+   `inotify_monitor` su Linux, §14.4) con hint di installazione per distro;
 2. sintassi config globale e di ogni `.sync` (`.sync` illeggibile o senza regole valide →
    riga ✗ **non fatale**, con il conteggio delle righe scartate);
 3. **che nessuna destinazione sia una sottodirectory di una sorgente** (loop di copia
    infinito): check fatale (exit ≠ 0) anche in `run` e `sync-once`, con base = `source`
    se presenti, altrimenti `$HOME` in modalità auto-discovery (§11);
 4. che le dest siano scrivibili;
-5. che il plist di launchd esista e passi `plutil -lint`;
-6. accesso ai source (test read + probe TCC);
-7. residui `.safekeep.tmp.*`.
+5. che l'agent per l'init system esista e sia valido: plist launchd + `plutil -lint`
+   su **Darwin**, unit systemd su **Linux** (§14.3 e §14.4);
+6. accesso ai source (test read + probe TCC — solo Darwin);
+7. residui `.safekeep.tmp.*`;
+8. su **Linux**, informativo e **non fatale**: `fs.inotify.max_user_watches` ≥ 16384
+   (§14.4).
 
 ---
 
@@ -691,7 +713,7 @@ illimitata della coda in memoria.
 
 ---
 
-## 13. Piano di implementazione (T1..T7)
+## 13. Piano di implementazione (T1..T9)
 
 | Task | Contenuto | Criteri di verifica | Stato |
 |---|---|---|---|
@@ -703,6 +725,7 @@ illimitata della coda in memoria.
 | **T6** | CLI `status`/`doctor` + plist launchd + comandi bootout/bootstrap/kickstart (`launchd/`, `install.sh`, `uninstall.sh`) | `doctor` verde su macchina con permessi; plist passa `plutil -lint`; kill del processo → launchd lo riavvia da solo | ✅ fatto (`tests/test_cli.py`) |
 | **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor`/`run`/`sync-once` escono con ≠ 0 su dest sotto source; `.sync` non attendibile gestito (info → warning + skip, debug → fatale); containment della dest (nessuna scrittura fuori); dedup senza perdita di eventi; errori I/O confinati al file; tabella edge case coperta da casi di test | ✅ fatto (`tests/test_matcher.py`, `tests/test_config.py`, `tests/test_copier.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 | **T8** | Auto-discovery (`source` opzionale): scan di `$HOME` con pruning dedicato, watch root `$HOME` con exclude home, evento su `/.sync` → nuovo progetto, rescan al timer 24h, dedup watch roots (`safekeep/config.py`, `safekeep/daemon.py`) | config senza `source` valida (senza `dest` → errore con hint); `.sync` in `$HOME` scoperto, `Library`/nascoste potato, sotto-progetto annidato scoperto; watch root source invariata (backward compat); evento `.sync` → discover + reconcile; rescan 24h | ✅ fatto (`tests/test_config.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
+| **T9** | Portabilità POSIX/Linux 0.3.0 (§14): helper `safekeep/platform.py` unico lettore di `sys.platform`, `-m <monitor>` per piattaforma in `fswatch_argv`, `systemd/safekeep.service` (template) + ramo `uname -s` in `install.sh`/`uninstall.sh`, `doctor` per OS (hint distro, monitor per OS, TCC/plist solo Darwin, limite inotify non fatale), `fswatch` nei job Linux di CI, docs | suite verde su macOS **e** su Linux (CI Debian + E2E Omarchy/Arch): argv con monitor di piattaforma, `doctor` exit 0 con fswatch reale su Linux, unit renderizzata, `touch` sul sorgente → file sul dest entro 10s | da fare |
 
 Ordinamento: T1→T2 (fondamenta), T3→T4 (nucleo sync), T5 (daemon), T6 (operatività),
 T7 (indurimento). Ogni task è verificabile in isolamento. Test: `python3 -m unittest
@@ -710,7 +733,153 @@ discover -s tests`.
 
 ---
 
-## 14. Decisioni aperte
+## 14. Portabilità POSIX/Linux (0.3.0)
+
+**Scope**: macOS resta la piattaforma primaria; 0.3.0 aggiunge il supporto pieno a
+**Linux (POSIX con systemd)** — daemon, doctor, installazione dell'agent, CI e docs.
+Il design è qui, il codice lo implementa: nessun pezzo qui sotto va scritto *dopo* il
+codice.
+
+**Onestà su cosa è testato**: macOS reale (suite locale + daemon launchd reale); Linux =
+**CI su Debian/Ubuntu** (suite completa con `fswatch` reale installato) + **E2E su
+Omarchy/Arch** (VM Linux reale dell'utente: suite, `doctor`, sync one-shot, propagazione
+degli eventi). Non coperto: altre distro (solo hint di installazione), systemd senza
+sessione di login (linger, §14.3), architetture non x86_64.
+
+### 14.1 Rilevamento piattaforma
+
+Un **solo helper centralizzato**, `safekeep/platform.py`: è l'unico posto che legge
+`sys.platform`. Nessun check sparsi nei moduli.
+
+| Simbolo | Valore |
+|---|---|
+| `is_darwin()` / `is_linux()` | `sys.platform == 'darwin'` / `sys.platform == 'linux'` |
+| `fswatch_monitor()` | `fsevents_monitor` (Darwin) \| `inotify_monitor` (Linux) |
+| `install_hint()` | comando di installazione di `fswatch` per la distro (`brew` / `pacman` / `apt` / `dnf`) |
+| `init_system()` | `launchd` (Darwin) \| `systemd` (Linux) |
+| `INOTIFY_LIMIT_PATH` | `/proc/sys/fs/inotify/max_user_watches` |
+| `INOTIFY_MIN_WATCHES` | `16384` |
+
+Tre funzioni/tre costanti, tutto qui. I valori sono letti **a chiamata** (non
+all'import), così i test patchano `sys.platform` ed esercitano entrambi i rami anche
+girando su macOS. Consumatori: `daemon.fswatch_argv()` (§14.2) e `doctor` (§14.4).
+
+### 14.2 fswatch: monitor dichiarato per piattaforma
+
+```
+fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
+```
+
+| `<monitor>` | Piattaforma | equivale a |
+|---|---|---|
+| `fsevents_monitor` | Darwin | FSEvents (File System Events, API di notifica di macOS) |
+| `inotify_monitor` | Linux | inotify (subsystem del kernel Linux) |
+
+- I due nomi sono **espliciti entrambi**: nessun default implicito di fswatch (fswatch
+  da solo sceglierebbe comunque il monitor giusto, ma l'argv qui è identico e
+  prevedibile su tutte le piattaforme).
+- I nomi sono quelli che `fswatch -M` (`--list-monitors`) stampa sulla piattaforma.
+  Attenzione: su Linux il nome è **`inotify_monitor`**, *non* `inotify` — `-m inotify`
+  non è un alias accettato e fswatch esce con errore.
+- **Invariato**: `-0` (NUL-delimitato), `-e`, `-r`, `-l 1.0`, le regex di esclusione e
+  il resto del flusso di §6.
+
+### 14.3 Init system: launchd (macOS) → systemd (Linux)
+
+| | Darwin | Linux |
+|---|---|---|
+| init system | `launchd` | `systemd` (**user unit**, niente root) |
+| template | `launchd/com.safekeep.agent.plist` | `systemd/safekeep.service` |
+| installato in | `~/Library/LaunchAgents/com.safekeep.agent.plist` | `~/.config/systemd/user/safekeep.service` |
+| avvio al boot | `RunAtLoad` | `WantedBy=default.target` |
+| tenerlo vivo | `KeepAlive` (+ `ThrottleInterval` 30s) | `Restart=always` + `RestartSec=2` + `StartLimitIntervalSec=0` |
+| stdout/stderr | file in `~/.local/state/safekeep/` | journal di systemd (`journalctl --user -u safekeep`) |
+| load / unload | `launchctl bootstrap` / `bootout` | `systemctl --user enable --now` / `disable --now` |
+| validazione | `plutil -lint` | (nessuna: la sintassi la controlla `systemctl` a load) |
+
+- Entrambi i file sono **template** con placeholder `__REPO__` e `__PYTHON__`
+  (come il plist: nessun path assoluto nel repo, così il repo si può spostare),
+  resi da `install.sh`.
+- `Restart=always` + `RestartSec=2` ≈ `KeepAlive`: se il processo muore systemd lo
+  riavvia dopo 2s.
+- `StartLimitIntervalSec=0` disabilita il rate-limit di default di systemd (5 start
+  in 10s → unit in stato `failed` e nessun riavvio più): senza, un daemon che muore
+  ripetutamente finirebbe irrimediabilmente in `failed`, mentre launchd con
+  `KeepAlive` ci riprova sempre. Il pacing resta al daemon stesso (`MAX_DEATHS` in
+  `DEATH_WINDOW`, §6).
+- **`install.sh` / `uninstall.sh` ramificati su `uname -s`**: Darwin = comportamento
+  attuale **invariato** (render del plist, nessun `bootstrap`); Linux = render della
+  unit + `systemctl --user daemon-reload` + istruzioni stampate. Nessuno dei due script
+  **avvia** l'agent: serve prima una `~/.safekeep` con dest reali (stessa regola del
+  plist di macOS). Il plist macOS non viene toccato.
+- **Boot senza login**: una *user unit* parte solo con una sessione utente (o con il
+  linger). Per averla al boot senza nessun login serve
+  `loginctl enable-linger $USER` — **documentato, non automatizzato**: richiederebbe
+  `sudo` e gli script non chiedono mai password.
+
+### 14.4 `doctor`
+
+| Check | Darwin | Linux |
+|---|---|---|
+| hint installazione `fswatch` | `brew install fswatch` | `pacman -S fswatch` (Arch/Omarchy) / `sudo apt install fswatch` (Debian/Ubuntu) / `sudo dnf install fswatch` (Fedora) — rilevato dal package manager presente |
+| monitor atteso in `fswatch -M` | `fsevents_monitor` (fatale) | `inotify_monitor` (fatale) |
+| probe TCC (`~/Documents`) | ✔ | **assente** (TCC è un meccanismo di macOS) |
+| lint plist (`plutil -lint`) | ✔ | **assente** (`plutil` su Linux non esiste: già degradava a "lint saltato") |
+| agent dell'init system | plist (se presente) | unit systemd (se presente), riga informativa |
+| limite inotify | — | `fs.inotify.max_user_watches` letto da `/proc/sys/fs/inotify/max_user_watches` |
+
+- Il check sul limite inotify è **informativo e non fatale**: ✗ + hint
+  `sudo sysctl -w fs.inotify.max_user_watches=524288` se il valore è **< 16384**
+  (`INOTIFY_MIN_WATCHES`). Perché esiste: su alberi grandi (~25k file) il limite di
+  watch di inotify è il rischio #1 — raggiunto, fswatch non registra più watch su
+  quei path e gli eventi smettono di arrivare (le copie riprendono solo al prossimo
+  reconcile, §10.1). File assente o illeggibile → check saltato con riga ✔ (non è
+  Linux, o non è un kernel con inotify).
+- Nessun check `systemctl` live in `doctor`: il daemon deve poter girare anche in un
+  container senza sessione utente. Lo stato dell'agent si guarda con
+  `systemctl --user status safekeep`.
+
+### 14.5 Invariati (lo dichiara questa SPEC)
+
+Con Linux **non cambiano**:
+
+- **matcher / config / copier / volumes**: nessun file di codice dipende dalla
+  piattaforma; `dest_state` resta `os.path.exists` (§8.3, niente parsing di
+  `/proc/mounts`);
+- **auto-discovery** (§4.1): il pruning dedup già esclude tutte le directory
+  **nascoste**, quindi su Linux copre `.config`, `.local`, `.cache`, `snap` senza
+  cambi di codice; le cartelle TCC di §4.1 restano nella lista di esclusione — su
+  Linux non esistono e sono inerti;
+- **layout** dei path dest (§3), **semantica allow-list** e last-match-wins (§4.3),
+  stability check e copia atomica (§7), anti-flood (§10.2), pending/backoff (§8.3);
+- **`~/.safekeep` / `.sync`**: stesso formato, stessa semantica, stessi errori.
+
+### 14.6 CI
+
+I job `test` di `.gitlab-ci.yml` e `.github/workflows/test.yml` installano **fswatch**
+(`apt-get update && apt-get install -y fswatch`): ora che `doctor` cerca il monitor
+della piattaforma giusta la suite gira con il binario reale su Linux — che era
+esattamente l'incompatibilità documentata nella vecchia nota di portabilità di
+`.gitlab-ci.yml` (nota **aggiornata**, non contraddetta). I job `publish` e
+`publish-test` restano invariati.
+
+### 14.7 Metadata release (`pyproject.toml`)
+
+Le metadata PyPI di un upload sono **immutabili**: ciò che cambia in `pyproject.toml`
+si vede su pypi.org solo dal prossimo upload, mentre i rilasci già pubblicati (0.2.0)
+restano con le vecchie. Per 0.3.0 quindi, una tantum:
+
+- **`[project.urls]`**: `Repository` = `https://github.com/foxhound87/safekeep`
+  (GitHub è il repo primario e pubblico), `Homepage`/`Documentation` = sito docs su
+  GitHub Pages `https://foxhound87.github.io/safekeep/` — **nessuna voce GitLab**;
+- **keywords**: rinnovate attorno al nuovo scope (backup, macos, linux, fswatch, sync,
+  allow-list, launchd, systemd);
+- **classifiers**: OS `MacOS` + `POSIX` + `POSIX :: Linux`, Python **solo** le versioni
+  effettivamente eseguite dalla suite (3.9 floor + 3.12 CI + 3.14 locale).
+
+---
+
+## 15. Decisioni aperte
 
 1. **Dove stanno i progetti sorgente reali?** Le `source` globali del config globale vanno
    populate: non è ancora deciso se i progetti vivano sotto `~/Code`, `~/Projects`, o radici
@@ -727,9 +896,28 @@ discover -s tests`.
 
 ---
 
-## 15. Versione
+## 16. Versione
 
 - **0.1.0** — semver: prima versione pre-release/0.x, API di config e CLI soggette a cambi
   incompatibili solo con bump di MINOR finché non si raggiunge 1.0.0.
+- **0.3.0** — supporto Linux (POSIX con systemd): §14 — helper di piattaforma, monitor
+  fswatch per OS, user unit systemd, `doctor` per OS, `fswatch` in CI, docs.
+  - Metadata PyPI rinnovate per la release (`pyproject.toml`): `[project.urls]` con
+    `Repository` = `https://github.com/foxhound87/safekeep` e `Homepage`/`Documentation` =
+    sito docs su GitHub Pages `https://foxhound87.github.io/safekeep/` (niente voci GitLab),
+    keywords aggiornate (backup, macos, linux, fswatch, sync, allow-list, launchd, systemd),
+    classifier OS (`MacOS`, `POSIX`, `POSIX :: Linux`) e Python (`3.9` floor, `3.12` CI,
+    `3.14` locale). I metadata su PyPI sono immutabili dopo l'upload: questi cambi si
+    vedono da `0.3.0`, mentre `0.2.0` resta con le vecchie.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
+
+---
+
+## 17. Roadmap / prossima versione
+
+**WSL (Windows Subsystem for Linux)**: supporto previsto per **0.4.0**. La base Linux di
+0.3.0 (systemd user unit, `inotify`, fswatch) dovrebbe girarci in gran parte; da valutare:
+`init` (systemd in WSL2 opzionale → fallback senza servizio, `safekeep run` manuale),
+path `/mnt/c` (drvfs: performance e case-sensitivity), fswatch su WSL e assenza di FSEvents.
+Solo design intent, nessun codice in 0.3.0.

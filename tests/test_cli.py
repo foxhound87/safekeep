@@ -2,15 +2,28 @@
 
 Ogni run è un subprocess con HOME finto: niente scritture nella home reale.
 """
+import argparse
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
+from safekeep import cli
+from safekeep.platform import fswatch_monitor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(REPO, 'bin', 'safekeep.py')
+
+# Check di `doctor` condivisi da tutte le piattaforme (SPEC.md §9)
+BASE_MARKERS = ('config', 'dest non annidate', 'fswatch', 'python', 'residui')
+# SPEC.md §14.4: TCC e plist sono Darwin-only, inotify e unit systemd Linux-only
+DARWIN_MARKERS = ('TCC', 'plist')
+LINUX_MARKERS = ('inotify', 'unit systemd')
 
 
 def write(path, text=''):
@@ -61,12 +74,53 @@ class DoctorTest(CliTestCase):
     def test_doctor_gira_tutti_i_check(self):
         r = self.cli('doctor', '--config', self.cfg)
         self.assertIn(r.returncode, (0, 1), r.stdout + r.stderr)
-        for marker in ('config', 'dest non annidate', 'fswatch', 'python',
-                       'TCC', 'residui', 'plist'):
+        markers = BASE_MARKERS + (DARWIN_MARKERS if sys.platform == 'darwin'
+                                  else LINUX_MARKERS)
+        for marker in markers:
             self.assertIn(marker, r.stdout, f'check mancante: {marker}')
         for line in r.stdout.splitlines():
             if line.strip():
                 self.assertIn(line[0], ('✔', '✗'), f'riga senza esito: {line!r}')
+
+    def test_doctor_monitor_della_piattaforma(self):
+        # SPEC.md §14.4: il monitor atteso va cercato in `fswatch -M`
+        if shutil.which('fswatch') is None:
+            self.skipTest('fswatch non installato')
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertIn(f'fswatch monitor: {fswatch_monitor()} presente', r.stdout)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'check TCC macOS')
+    def test_doctor_tcc_e_darwin_only(self):
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertIn('TCC', r.stdout)
+
+    @unittest.skipIf(sys.platform == 'darwin', 'check inotify Linux')
+    def test_doctor_inotify_e_linux_only(self):
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertIn('inotify', r.stdout)
+        self.assertNotIn('TCC', r.stdout, 'TCC è un meccanismo di macOS')
+        for line in r.stdout.splitlines():
+            if line.startswith('✗') and 'inotify' in line:
+                self.assertIn('warning non fatale', line)
+
+    @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+    def test_doctor_limite_basso_non_e_fatale(self):
+        """SPEC.md §14.4: su Linux il limite di watch basso è informativo —
+        doctor esce 0, non 1. I rami Linux si esercitano patchando l'helper,
+        senza girare su Linux."""
+        args = argparse.Namespace(config=self.cfg, v=False)
+        buf = io.StringIO()
+        with mock.patch.object(cli, 'is_linux', return_value=True), \
+                mock.patch.object(cli, 'is_darwin', return_value=False), \
+                mock.patch.object(cli, 'inotify_limit', return_value=8192), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_doctor(args)
+        out = buf.getvalue()
+        self.assertIn('max_user_watches=8192', out)
+        self.assertIn('warning non fatale', out)
+        self.assertIn('unit systemd', out)
+        self.assertNotIn('TCC', out, 'TCC è un meccanismo di macOS')
+        self.assertEqual(code, 0, out)
 
     def test_doctor_config_invalido_esce_1(self):
         bad = write(os.path.join(self.tmp, 'bad.cfg'), 'riga nuda invalida\n')
