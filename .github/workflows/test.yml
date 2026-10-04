@@ -19,6 +19,10 @@
 # One job, not two: the suite and the E2E share the checkout, the Python and
 # the `apt-get install fswatch`, and a step-level failure already names the
 # phase that broke (GH = GitHub Actions).
+#
+# Action majors: checkout@v7 + setup-python@v7 — both run on the node24 runtime
+# (`runs.using: node24`, verified against the upstream action.yml in 2026-10);
+# the old v4/v5 ran on node20, which GH now flags as deprecated.
 name: tests
 
 on:
@@ -34,8 +38,8 @@ jobs:
       matrix:
         python-version: ['3.9', '3.12', '3.14']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install fswatch
@@ -53,3 +57,16 @@ jobs:
       # ubuntu-latest, unlike the GitLab -slim images)
       - name: E2E live daemon (Linux)
         run: bash tests/e2e_linux.sh
+      # WSL branch executed for REAL (SPEC.md §14.6/§17.2): WSL_DISTRO_NAME
+      # flips is_wsl() on this stock runner, so `doctor` really walks the WSL
+      # block instead of the unit tests faking the env. `--doctor-only` reuses
+      # the e2e sandbox (tmp source/dest/config — a missing --config is a fatal
+      # check) and skips the daemon. Gate = marker printed AND exit 0: all
+      # three WSL lines are non-fatal, so any fatal check still goes red.
+      # Needs nothing but bash/grep/mktemp + the already installed fswatch.
+      - name: WSL branch in doctor (WSL_DISTRO_NAME)
+        run: |
+          set -o pipefail
+          log="$(mktemp)"
+          WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only | tee "$log"
+          grep -F 'WSL rilevato: SafekeepCITest' "$log"

@@ -18,8 +18,18 @@
 # inside the sandbox — no `~/.safekeep`, no launchd/systemd unit, no real
 # backup destination is ever touched.
 #
-# Usage: bash tests/e2e_linux.sh   (exit 0 = pass)
+# Usage: bash tests/e2e_linux.sh [--doctor-only]   (exit 0 = pass)
+#
+# --doctor-only: si ferma dopo il check `doctor` sul sandbox config e esce —
+# è il gate dello step WSL di CI (SPEC.md §14.6): esercita il ramo WSL di
+# `doctor` (WSL_DISTRO_NAME nell'env) senza avviare il daemon. Il config va
+# SEMPRE creato: `doctor --config <inesistente>` è un check fatale.
 set -euo pipefail
+
+DOCTOR_ONLY=0
+if [[ "${1:-}" == "--doctor-only" ]]; then
+  DOCTOR_ONLY=1
+fi
 
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SANDBOX="$(mktemp -d)"
@@ -67,6 +77,11 @@ printf '*.md\n!draft.md\n' >"$SRC/.sync"
 note "doctor on the sandbox config"
 if ! python3 "$REPO/bin/safekeep.py" doctor --config "$CFG"; then
   fail "doctor exited != 0"
+fi
+
+if [[ "$DOCTOR_ONLY" -eq 1 ]]; then
+  note "doctor-only OK (nessun daemon avviato)"
+  exit "$STATUS"
 fi
 
 note "daemon: python3 bin/safekeep.py run --config $CFG"

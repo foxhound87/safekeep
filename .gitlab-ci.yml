@@ -9,6 +9,11 @@
 #   → aspettano tutte e tre le gambe.
 # - E2E (0.3.1): `tests/e2e_linux.sh` (daemon live + fswatch reale) gira in
 #   ogni gamba, subito dopo la suite.
+# - WSL (SPEC §17.2/§14.6): lo step finale `--doctor-only` esercita il ramo
+#   WSL di `doctor` con `WSL_DISTRO_NAME=SafekeepCITest` sull'env del runner
+#   (niente patch, niente dipendenze nuove: bash, grep, mktemp — già nelle
+#   immagini -slim — e il fswatch installato qui sopra). Gate = marker
+#   "WSL rilevato: SafekeepCITest" stampato + exit 0.
 # - `procps` (0.3.1): le immagini `-slim` non contengono `pgrep`, che lo
 #   script E2E usa per trovare il figlio del daemon → installato insieme a
 #   `fswatch`. Verificato in locale su `python:3.9-slim` (Debian 13/trixie):
@@ -76,6 +81,15 @@ test:
     - python3 -m unittest discover -s tests
     # E2E (0.3.1): daemon live col fswatch reale, stessa gamba della suite
     - bash tests/e2e_linux.sh
+    # WSL (SPEC §17.2/§14.6): il ramo WSL va esercitato DAVVERO, non solo con
+    # l'env finto dei test unitari. Solo python3 + bash/grep/mktemp (immagini
+    # Debian slim): nessuna dipendenza nuova. Gate = marker "WSL rilevato" +
+    # exit 0 (i tre check WSL sono non fatali, un check fatale resta rosso).
+    - |
+      set -o pipefail
+      log="$(mktemp)"
+      WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only | tee "$log"
+      grep -F 'WSL rilevato: SafekeepCITest' "$log"
 
 # Publish to PyPI with Trusted Publishing (OIDC = OpenID Connect, no stored
 # credentials). Doc followed:

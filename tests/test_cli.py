@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import getpass
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -110,7 +111,7 @@ class DoctorTest(CliTestCase):
         """SPEC.md §14.4: su Linux il limite di watch basso è informativo —
         doctor esce 0, non 1. I rami Linux si esercitano patchando l'helper,
         senza girare su Linux."""
-        args = argparse.Namespace(config=self.cfg, v=False)
+        args = argparse.Namespace(config=self.cfg, v=False, json=False)
         buf = io.StringIO()
         with mock.patch.object(cli, 'is_linux', return_value=True), \
                 mock.patch.object(cli, 'is_darwin', return_value=False), \
@@ -329,7 +330,7 @@ class DoctorLingerTest(CliTestCase):
         self.addCleanup(shutil.rmtree, linger_dir, ignore_errors=True)
         for name in linger:
             open(os.path.join(linger_dir, name), 'w').close()
-        args = argparse.Namespace(config=self.cfg, v=False)
+        args = argparse.Namespace(config=self.cfg, v=False, json=False)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {'HOME': self.home}), \
                 mock.patch.object(cli, 'is_linux', return_value=True), \
@@ -368,7 +369,7 @@ class DoctorWslTest(CliTestCase):
 
     def doctor_wsl(self, distro='Ubuntu', systemd=False, dest='/mnt/c/backup'):
         cfg = write(os.path.join(self.tmp, 'wsl.cfg'), f'dest: {dest}\n')
-        args = argparse.Namespace(config=cfg, v=False)
+        args = argparse.Namespace(config=cfg, v=False, json=False)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {'HOME': self.home}), \
                 mock.patch.object(cli, 'is_wsl', return_value=True), \
@@ -424,6 +425,82 @@ class DoctorWslTest(CliTestCase):
                            timeout=60)
         self.assertNotIn('WSL', r.stdout)
         self.assertNotIn('drvfs', r.stdout)
+
+
+class DoctorJsonTest(CliTestCase):
+    """SPEC.md §9.1: `doctor --json` — stessi check, stesso ordine, stesso exit
+    code della modalità normale, tutto in un documento JSON su stdout."""
+
+    def json_doctor(self, *args):
+        r = self.cli('doctor', '--json', *args)
+        # json.loads sul stdout intero: basta una riga di log mista e cade qui
+        return r, json.loads(r.stdout)
+
+    @staticmethod
+    def righe(stdout):
+        """`(status_atteso, message)` di ogni riga della modalità normale."""
+        out = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            status = 'ok' if line.startswith('✔') else 'fail-o-warn'
+            out.append((status, line[2:]))
+        return out
+
+    def test_checks_1a1_con_la_modalita_normale(self):
+        normale = self.cli('doctor', '--config', self.cfg)
+        r, doc = self.json_doctor('--config', self.cfg)
+        attese = self.righe(normale.stdout)
+        self.assertEqual([c['message'] for c in doc['checks']],
+                         [msg for _, msg in attese],
+                         'stessi check, stesso ordine della modalità normale')
+        for (atteso, _), check in zip(attese, doc['checks']):
+            if atteso == 'ok':
+                self.assertEqual(check['status'], 'ok', check)
+            else:                                   # riga ✗: warn o fail
+                self.assertIn(check['status'], ('warn', 'fail'), check)
+        self.assertEqual(len({c['id'] for c in doc['checks']}),
+                         len(doc['checks']), 'id duplicati')
+        self.assertEqual(r.returncode, normale.returncode, 'stesso exit code')
+        self.assertEqual(doc['exit'], r.returncode)
+
+    def test_header_e_campi_decisionali(self):
+        _, doc = self.json_doctor('--config', self.cfg)
+        self.assertEqual(doc['safekeep'], cli.__version__)
+        datetime.fromisoformat(doc['timestamp'])            # ISO 8601 valido
+        self.assertIsInstance(doc['checks'], list)
+        self.assertTrue(doc['checks'])
+        for check in doc['checks']:
+            self.assertEqual(set(check), {'id', 'status', 'message'})
+            self.assertIn(check['status'], ('ok', 'warn', 'fail'))
+        self.assertEqual(set(doc['permission_errors']), {'count_24h', 'last'})
+
+    def test_permission_errors_strutturati_sul_log_recente(self):
+        log = os.path.join(self.home, '.local/state/safekeep/safekeep.log')
+        stamp = (datetime.now() - timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
+        write(log, f'{stamp},000 ERROR copia fallita: [Errno 1] Operation not permitted\n')
+        r, doc = self.json_doctor('--config', self.cfg)
+        perm = doc['permission_errors']
+        self.assertEqual(perm['count_24h'], 1)
+        self.assertEqual(perm['last'], stamp)               # ultimo timestamp
+        check = next(c for c in doc['checks']
+                     if 'errori di permesso' in c['message'])
+        self.assertEqual(check['status'], 'warn')           # warning, NON fatale
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_log_assente_count_zero_last_null(self):
+        _, doc = self.json_doctor('--config', self.cfg)     # HOME finto: niente log
+        self.assertEqual(doc['permission_errors'],
+                         {'count_24h': 0, 'last': None})
+
+    @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
+    def test_check_fatale_esce_1_e_lo_dichiara(self):
+        bad = write(os.path.join(self.tmp, 'bad.cfg'), 'riga nuda invalida\n')
+        r, doc = self.json_doctor('--config', bad)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(doc['exit'], 1)
+        self.assertTrue(any(c['status'] == 'fail' for c in doc['checks']),
+                        'il check fatale deve comparire come fail')
 
 
 if __name__ == '__main__':

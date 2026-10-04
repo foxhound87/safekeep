@@ -159,7 +159,7 @@ safekeep <command> [--config PATH] [-v]
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--project PATH] [--prune]` | a single pass: walks the source and copies whatever differs (`--dry-run` only prints what it would copy; `--prune` also removes dest files whose source still exists but is no longer included) |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
-| `doctor` | diagnostics: config, fswatch + platform monitor, python, permission errors in the log (last 24h), TCC/launchd plist (macOS), inotify limit, systemd unit and linger (Linux), WSL detection (best-effort) — exits non-zero if a fatal check fails |
+| `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, permission errors in the log (last 24h), TCC/launchd plist (macOS), inotify limit, systemd unit and linger (Linux), WSL detection (best-effort) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code, including a structured `permission_errors` count of the last 24h |
 
 ## Tests
 
@@ -167,10 +167,11 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 197 tests covering the matcher,
-config, atomic copy, volumes, daemon, auto-discovery, CLI and the POSIX
-portability layer (platform helper, per-OS fswatch monitor, systemd template,
-doctor log/linger checks, WSL detection, `install.sh` without systemd).
+Stdlib (`unittest`) suite, zero dependencies: 206 tests covering the matcher,
+config, atomic copy, volumes, daemon, auto-discovery, CLI, the permission-trend
+wrapper and the POSIX portability layer (platform helper, per-OS fswatch
+monitor, systemd template, doctor log/linger checks, WSL detection,
+`install.sh` without systemd).
 `fswatch` is not needed to run the suite — the few `doctor` checks that talk to
 the real binary are skipped when it's missing — but CI installs it so every
 matrix leg (3.9 / 3.12 / 3.14) exercises the real `inotify` monitor and the
