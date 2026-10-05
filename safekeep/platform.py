@@ -15,6 +15,7 @@ import os
 import platform as _platform
 import re
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 
@@ -101,6 +102,38 @@ def recent_permission_errors(path=None, now=None, window=86400):
     except OSError:
         return None
     return count, last
+
+
+DAEMON_LABEL = 'com.safekeep.agent'          # label launchd dell'agent (§8.1)
+
+
+def daemon_exe(label=DAEMON_LABEL):
+    """→ eseguibile assoluto del processo launchd `label`, o None se non
+    determinabile (SPEC.md §8.4/§14.4, 0.5.1: job non caricato, processo non
+    trovato, `launchctl`/`ps` assenti o falliti, non-Darwin). Solo lettura.
+
+    Serve al check `doctor` (§14.4): un processo può girare su un eseguibile
+    **cancellato** da un upgrade sotto un daemon vivo (brew upgrade → path
+    Cellar sparito → TCC non identifica il processo → EPERM su ogni copia).
+    """
+    if not is_darwin():
+        return None
+    try:
+        job = subprocess.run(
+            ['launchctl', 'print', f'gui/{os.getuid()}/{label}'],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pid = re.search(r'^\s*pid = (\d+)', job.stdout, re.M)
+    if job.returncode != 0 or pid is None:
+        return None                      # job non caricato o senza processo
+    try:
+        ps = subprocess.run(['ps', '-p', pid.group(1), '-o', 'comm='],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    exe = ps.stdout.strip().splitlines()[0].strip() if ps.stdout.strip() else ''
+    return exe if ps.returncode == 0 and exe else None
 
 
 def linger_enabled(user=None, linger_dir=None):

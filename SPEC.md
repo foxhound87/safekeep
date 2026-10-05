@@ -621,7 +621,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 | `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
-| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC e lint plist (solo macOS), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
+| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC, lint plist ed eseguibile del processo ancora su disco (solo macOS, §14.4), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
 
 `sync-once --prune` è l'unica opzione che **cancella**: rimuove dalla dest i file il cui
 sorgente esiste ancora ma che il matcher ora esclude (regole cambiate), solo sotto il

@@ -19,6 +19,7 @@ from safekeep.daemon import Daemon, setup_logging
 from safekeep.platform import (
     INOTIFY_MIN_WATCHES,
     LOG_PATH,
+    daemon_exe,
     fswatch_monitor,
     inotify_limit,
     install_hint,
@@ -65,8 +66,8 @@ def build_parser():
     doc = sub.add_parser('doctor', parents=[common],
                          help='diagnostica: config, fswatch + monitor di piattaforma, '
                               'python, errori di permesso recenti nel log, TCC/plist '
-                              '(macOS), inotify/systemd/linger (Linux) — exit ≠ 0 se '
-                              'un check fatale fallisce')
+                              'ed exe del daemon (macOS), inotify/systemd/linger (Linux) '
+                              '— exit ≠ 0 se un check fatale fallisce')
     doc.add_argument('--json', action='store_true',
                      help='stessi check, stesso exit code, ma un documento JSON su '
                           'stdout (SPEC.md §9.1)')
@@ -368,6 +369,24 @@ def cmd_doctor(args):
                 out(False, "linger: NON abilitato — l'agent non partirà al boot "
                            'senza login → loginctl enable-linger $USER — '
                            'warning non fatale')
+
+    # exe del daemon ancora su disco (SPEC.md §8.4/§14.4, 0.5.1): un processo
+    # può girare su un eseguibile cancellato da un upgrade sotto un daemon vivo
+    # → TCC (Transparency, Consent and Control) non lo identifica più e ogni
+    # copia fallisce con EPERM. Guarda il PROCESSO, non il plist (funziona
+    # anche col plist renderizzato col vecchio default). Non fatale: sintomo
+    # con rimedio manuale di una riga, e doctor deve girare anche in quello stato.
+    if is_darwin():
+        exe = daemon_exe()
+        if exe is None:
+            out(True, 'exe del daemon: processo non determinabile — check saltato')
+        elif os.path.exists(exe):
+            out(True, f'exe del daemon: {exe} presente su disco')
+        else:
+            out(False, f'exe del daemon: {exe} NON esiste su disco — il processo '
+                       'gira su un eseguibile cancellato (upgrade sotto un daemon '
+                       'vivo, SPEC §8.4) → launchctl kickstart -k '
+                       'gui/$(id -u)/com.safekeep.agent — warning non fatale')
 
     code = 1 if fatal else 0
     if args.json:

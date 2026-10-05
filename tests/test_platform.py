@@ -215,6 +215,56 @@ class RecentPermissionErrorsTest(unittest.TestCase):
         self.assertIsNone(plat.PERM_ERR_RE.search('INFO reconcile: 0 copie'))
 
 
+class DaemonExeTest(unittest.TestCase):
+    """SPEC.md §14.4 (0.5.1): exe del processo launchd, None se non
+    determinabile — Darwin-only, solo lettura, casi finti."""
+
+    LAUNCHCTL_OK = subprocess.CompletedProcess(
+        [], 0, stdout='\tstate = running\n\tpid = 4242\n', stderr='')
+    PS_OK = subprocess.CompletedProcess(
+        [], 0, stdout='/opt/shim/python3\n', stderr='')
+
+    def run_mock(self, results):
+        with mock.patch('sys.platform', 'darwin'), \
+                mock.patch.object(plat.subprocess, 'run',
+                                  side_effect=results) as run:
+            return plat.daemon_exe(), run
+
+    def test_non_darwin_ritorna_none_senza_lanciare_niente(self):
+        with mock.patch('sys.platform', 'linux'), \
+                mock.patch.object(plat.subprocess, 'run') as run:
+            self.assertIsNone(plat.daemon_exe())
+            run.assert_not_called()
+
+    def test_job_non_caricato_o_senza_pid(self):
+        for result in (subprocess.CompletedProcess([], 1, stdout='slot absent', stderr=''),
+                       subprocess.CompletedProcess([], 0, stdout='state = not running\n',
+                                                   stderr='')):
+            with self.subTest(result=result.stdout):
+                exe, run = self.run_mock([result])
+                self.assertIsNone(exe)
+        # job ok ma `ps` fallito → non determinabile
+        exe, _ = self.run_mock([self.LAUNCHCTL_OK,
+                                subprocess.CompletedProcess([], 1, stdout='', stderr='x')])
+        self.assertIsNone(exe)
+
+    def test_launchctl_o_ps_assenti(self):
+        exe, run = self.run_mock([OSError('launchctl mancante')])
+        self.assertIsNone(exe)
+
+    def test_eseguibile_letto_da_ps(self):
+        exe, run = self.run_mock([self.LAUNCHCTL_OK, self.PS_OK])
+        self.assertEqual(exe, '/opt/shim/python3')
+        self.assertEqual(run.call_args_list[1].args[0][:4],
+                         ['ps', '-p', '4242', '-o'])
+
+    def test_ps_senza_output(self):
+        exe, _ = self.run_mock([self.LAUNCHCTL_OK,
+                                subprocess.CompletedProcess([], 0, stdout='\n',
+                                                            stderr='')])
+        self.assertIsNone(exe)
+
+
 class LingerTest(unittest.TestCase):
     """SPEC.md §14.4: linger systemd, directory finta al posto di
     /var/lib/systemd/linger."""

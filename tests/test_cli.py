@@ -147,6 +147,42 @@ class DoctorTest(CliTestCase):
             self.assertEqual(r.returncode, 0, r.stdout)
 
 
+class DoctorExeDaemonTest(CliTestCase):
+    """SPEC.md §8.4/§14.4 (0.5.1): exe del processo launchd su disco —
+    esistente ✔, cancellato ✗ **non fatale**, non determinabile → saltato."""
+
+    def doctor_darwin(self, exe):
+        args = argparse.Namespace(config=self.cfg, v=False, json=False)
+        buf = io.StringIO()
+        with mock.patch.object(cli, 'is_darwin', return_value=True), \
+                mock.patch.object(cli, 'daemon_exe', return_value=exe), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_doctor(args)
+        line = next((l for l in buf.getvalue().splitlines()
+                     if 'exe del daemon' in l), '')
+        return code, buf.getvalue(), line
+
+    def test_exe_esistente_verde(self):
+        code, _, line = self.doctor_darwin(sys.executable)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('presente su disco', line)
+        self.assertEqual(code, 0)
+
+    def test_exe_cancellato_warning_non_fatale(self):
+        exe = os.path.join(self.tmp, 'Cellar', 'python@3.14', '3.14.6', 'Python')
+        code, _, line = self.doctor_darwin(exe)          # non creato: inesistente
+        self.assertTrue(line.startswith('✗'), line)
+        for needle in ('NON esiste su disco', 'kickstart', 'warning non fatale'):
+            self.assertIn(needle, line)
+        self.assertEqual(code, 0, 'sintomo con rimedio manuale: NON fatale')
+
+    def test_non_determinabile_check_saltato(self):
+        code, _, line = self.doctor_darwin(None)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('check saltato', line)
+        self.assertEqual(code, 0)
+
+
 class AutoDiscoveryCliTest(CliTestCase):
     """Config SENZA `source:` → modalità auto-discovery (SPEC.md §6)."""
 
