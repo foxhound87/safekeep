@@ -27,6 +27,9 @@ SYSTEMD_RUN_PATH = '/run/systemd/system'            # assente su WSL1/systemd of
 # EPERM (Errno 1) / EACCES (Errno 13) come li scrive il logger: codice errno
 # + testo del kernel (SPEC.md §14.4)
 PERM_ERR_RE = re.compile(r'\[Errno (?:1|13)\]|Operation not permitted|Permission denied')
+# suffisso del throttle (SPEC.md §10.1, 0.5.1): la riga rappresenta se stessa
+# + i N fallimenti compressi → count_24h la conta come N+1, non 1 (onesto)
+REPEAT_RE = re.compile(r'ripetuto (\d+) volte')
 
 
 def is_darwin():
@@ -76,7 +79,10 @@ def recent_permission_errors(path=None, now=None, window=86400):
     (SPEC.md §14.4: check non fatale, finestra 24h — segue l'incidente EPERM).
 
     Il timestamp è il prefisso `%(asctime)s` della riga (`YYYY-MM-DD HH:MM:SS`,
-    prime 19 posizioni). **Limite dichiarato**: una riga senza timestamp
+    prime 19 posizioni). Le righe col suffisso del throttle `— ripetuto N volte`
+    (§10.1) valgono **N + 1**: la riga stessa + i N fallimenti compressi, così
+    il conteggio resta il numero vero di errori anche con le righe throttolate.
+    **Limite dichiarato**: una riga senza timestamp
     parsificabile o fuori dalla finestra (clock skew incluso) non viene contata —
     non essendo sicuri che sia recente, non la contiamo: il conteggio è un minimo."""
     if path is None:
@@ -96,7 +102,8 @@ def recent_permission_errors(path=None, now=None, window=86400):
                 age = (now - ts).total_seconds()
                 if not 0 <= age <= window:
                     continue        # troppo vecchio (o nel futuro: clock skew)
-                count += 1
+                rep = REPEAT_RE.search(line)
+                count += 1 + (int(rep.group(1)) if rep else 0)
                 if last is None or ts > last:
                     last = ts
     except OSError:

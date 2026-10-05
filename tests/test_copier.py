@@ -296,6 +296,27 @@ class ErroriPerFileTest(CopierTestCase):
         self.assertFalse(os.path.exists(self.dst_root),
                          'il walk si ferma: niente scritture a metà')
 
+    def test_reconcile_ripetuti_stessi_errori_pochissime_righe(self):
+        """SPEC.md §10.1 (0.5.1): 5 reconcile con gli stessi 3 file negati
+        (EPERM) → 3 righe di log (una per (path, errno)), non 15. I conteggi
+        in memoria restano intatti: 3 errori per passata."""
+        copier._copy_errors.clear()
+        self.addCleanup(copier._copy_errors.clear)
+
+        def boom(*args, **kwargs):
+            raise OSError(1, 'Operation not permitted')
+
+        with mock.patch.object(copier, 'copy_one', new=boom), \
+                mock.patch.object(copier.log, 'error') as errlog:
+            for _ in range(5):
+                stats = {}
+                reconcile_project(stats=stats, **self.kwargs)
+                self.assertEqual(stats['errati'], 3,
+                                 'il conteggio non passa dal log')
+        self.assertEqual(errlog.call_count, 3,
+                         'una riga per (path, errno), le 4 passate successive '
+                         'rientrano nell\'intervallo di throttle')
+
 
 class PruneTest(CopierTestCase):
     """`sync-once --prune`: cancellazione solo certa e solo sotto il prefisso."""
@@ -330,6 +351,52 @@ class PruneTest(CopierTestCase):
     def test_dry_run_conta_senza_rimuovere(self):
         self.assertEqual(prune_project(dry_run=True, **self.kwargs), 1)
         self.assertTrue(os.path.exists(os.path.join(self.dst_root, 'proj/old.txt')))
+
+
+class ThrottleLogTest(CopierTestCase):
+    """SPEC.md §10.1 (0.5.1): stessa (path, errno) → ≤1 riga ogni
+    THROTTLE_INTERVAL con `— ripetuto N volte`, non una riga a fallimento."""
+
+    def setUp(self):
+        super().setUp()
+        copier._copy_errors.clear()
+        self.addCleanup(copier._copy_errors.clear)
+
+    @staticmethod
+    def err(no=1):
+        return OSError(no, 'Operation not permitted')
+
+    def test_50_failimenti_stesso_path_una_sola_riga(self):
+        with self.assertLogs(LOGGER, 'ERROR') as cm:
+            for _ in range(50):
+                copier.log_copy_error('/s/a', '/d/a', self.err(), now=1000.0)
+        self.assertEqual(len(cm.output), 1, cm.output)
+        self.assertNotIn('ripetuto', cm.output[0], 'nessun suffisso sulla 1ª riga')
+
+    def test_dopo_intervallo_una_riga_con_il_conteggio(self):
+        now = 1000.0
+        copier.log_copy_error('/s/a', '/d/a', self.err(), now=now)
+        with mock.patch.object(copier.log, 'error') as errlog:   # 9 dentro la finestra
+            for _ in range(9):
+                copier.log_copy_error('/s/a', '/d/a', self.err(), now=now)
+            errlog.assert_not_called()
+        with self.assertLogs(LOGGER, 'ERROR') as cm:             # finestra scaduta
+            copier.log_copy_error('/s/a', '/d/a', self.err(),
+                                  now=now + copier.THROTTLE_INTERVAL + 1)
+            for _ in range(5):                                   # poi di nuovo silenzio
+                copier.log_copy_error('/s/a', '/d/a', self.err(),
+                                      now=now + copier.THROTTLE_INTERVAL + 1)
+        self.assertEqual(len(cm.output), 1, cm.output)
+        self.assertIn('ripetuto 9 volte', cm.output[0])
+
+    def test_chiavi_distinte_indipendenti(self):
+        now = 1000.0
+        with self.assertLogs(LOGGER, 'ERROR') as cm:
+            copier.log_copy_error('/s/a', '/d/a', self.err(1), now=now)
+            copier.log_copy_error('/s/a', '/d/a', self.err(1), now=now)
+            copier.log_copy_error('/s/b', '/d/b', self.err(1), now=now)
+            copier.log_copy_error('/s/a', '/d/a', self.err(13), now=now)
+        self.assertEqual(len(cm.output), 3, cm.output)      # (a,1) una + b + (a,13)
 
 
 if __name__ == '__main__':

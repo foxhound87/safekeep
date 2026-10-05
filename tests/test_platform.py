@@ -214,6 +214,28 @@ class RecentPermissionErrorsTest(unittest.TestCase):
                 self.assertIsNotNone(plat.PERM_ERR_RE.search(riga))
         self.assertIsNone(plat.PERM_ERR_RE.search('INFO reconcile: 0 copie'))
 
+    def test_suffisso_ripetuto_del_throttle_contato_come_N_piu_1(self):
+        """SPEC.md §10.1/§14.4 (0.5.1): una riga `— ripetuto N volte`
+        rappresenta se stessa + i N fallimenti compressi → count_24h resta il
+        numero VERO di errori anche con le righe throttolate."""
+        text = (
+            f'{self._stamp(self.NOW - timedelta(hours=2))} ERROR copia fallita '
+            "a → b: [Errno 1] Operation not permitted: '/x.tmp.1'\n"
+            f'{self._stamp(self.NOW - timedelta(hours=1))} ERROR copia fallita '
+            "a → b: [Errno 1] Operation not permitted: '/x.tmp.1' — ripetuto 49 volte\n"
+        )
+        count, last = plat.recent_permission_errors(self._log(text), now=self.NOW)
+        self.assertEqual(count, 1 + 1 + 49, 'riga base + (riga suffisso + 49)')
+        self.assertEqual(last, self.NOW - timedelta(hours=1))
+
+    def test_riga_senza_suffisso_restano_una_ciascuna(self):
+        text = (f'{self._stamp(self.NOW - timedelta(hours=2))} ERROR copia fallita '
+                "a → b: [Errno 1] Operation not permitted: '/x'\n"
+                f'{self._stamp(self.NOW - timedelta(hours=1))} ERROR copia fallita '
+                "a → b: [Errno 1] Operation not permitted: '/y'\n")
+        count, _ = plat.recent_permission_errors(self._log(text), now=self.NOW)
+        self.assertEqual(count, 2)
+
 
 class DaemonExeTest(unittest.TestCase):
     """SPEC.md §14.4 (0.5.1): exe del processo launchd, None se non

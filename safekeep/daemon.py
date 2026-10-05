@@ -25,7 +25,14 @@ from .config import (
     source_root_for,
     validate_dests,
 )
-from .copier import MOUNT_ERRNOS, copy_one, needs_copy, prune_project, reconcile_project
+from .copier import (
+    MOUNT_ERRNOS,
+    copy_one,
+    log_copy_error,
+    needs_copy,
+    prune_project,
+    reconcile_project,
+)
 from .matcher import BUILTIN_RULES, Matcher, _glob, parse_rule
 from .platform import LOG_PATH, fswatch_monitor, init_system
 from .volumes import backoff_schedule, dest_state, partition_dests
@@ -629,7 +636,7 @@ class Daemon:
                                 src, dst, e)
                     self.mark_pending(project, dest)
                 else:
-                    log.error('copia fallita %s → %s: %s', src, dst, e)
+                    log_copy_error(src, dst, e)
 
     def walk_dir(self, dirpath, project):
         """Mini-walk: i figli di una directory appena creata potrebbero non

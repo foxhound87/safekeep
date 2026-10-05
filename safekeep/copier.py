@@ -20,6 +20,36 @@ MTIME_TOLERANCE = 1.0      # secondi: tolleranza mtime per volumi a risoluzione 
 TMP_INFIX = '.safekeep.tmp.'
 # errori che dicono "questa dest non è usabile adesso" → pending + backoff (§8.3)
 MOUNT_ERRNOS = (errno.ENODEV, errno.EBUSY, errno.ENOSPC)
+# throttle delle copie fallite (SPEC.md §10.1, 0.5.1): stessa (path, errno) →
+# una riga + `— ripetuto N volte` ogni THROTTLE_INTERVAL, non una riga a fallimento
+THROTTLE_INTERVAL = 300.0       # secondi
+_copy_errors = {}               # (src, errno) → [ultimo log monotonic, non loggati]
+
+
+def log_copy_error(src, dst, e, now=None):
+    """`copia fallita src → dst: e` con dedup per **(path, errno)** (SPEC.md §10.1).
+
+    Prima occorrenza: riga storica invariata. Poi al massimo una riga ogni
+    `THROTTLE_INTERVAL` per chiave, col suffisso `— ripetuto N volte` (N =
+    fallimenti non loggati da quell'ultima riga). `recent_permission_errors`
+    (§14.4) somma N+1 su queste righe: `count_24h` resta il conteggio vero,
+    sono solo le righe sul file a essere di meno. I conteggi in memoria
+    (`stats['errati']`, `sync-once`) non leggono da qui.
+    """
+    if now is None:
+        now = time.monotonic()
+    key = (src, e.errno)
+    entry = _copy_errors.get(key)
+    if entry is None or now - entry[0] >= THROTTLE_INTERVAL:
+        pending = 0 if entry is None else entry[1]
+        if pending:
+            log.error('copia fallita %s → %s: %s — ripetuto %d volte',
+                      src, dst, e, pending)
+        else:
+            log.error('copia fallita %s → %s: %s', src, dst, e)
+        _copy_errors[key] = [now, 0]
+    else:
+        entry[1] += 1
 
 
 def _tmp_path(dst):
@@ -215,7 +245,7 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
             log.error('errore di mount su %s → %s: %s: la dest va in pending',
                       src, dst, e)
             return True
-        log.error('copia fallita %s → %s: %s', src, dst, e)
+        log_copy_error(src, dst, e)
         return False
 
     for dirpath, dirnames, filenames in os.walk(root):
