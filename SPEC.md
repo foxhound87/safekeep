@@ -564,7 +564,7 @@ Destinazioni su volumi esterni/reti:
 | ore dopo | **TCC** (Transparency, Consent and Control, sistema permessi di macOS) non riesce più a identificare il processo (`proc_pidpath_audittoken() failed`) e nega i volumi rimovibili → `EPERM` (Operation not permitted) su **ogni** copia per ~45h: 5.251 righe `ERROR copia fallita …` identiche nel log, 4.829 in un giorno |
 | recovery | ri-grant manuale dei permessi + `launchctl kickstart -k` (riparte sul nuovo exe → torna a funzionare) |
 
-Sintomo e log ribollente erano conseguenze, non causa: la causa era l'exe cancellato sotto
+Sintomo e log ribollente erano conseguenze, non la causa: la causa era l'exe cancellato sotto
 un processo vivo. Il check `doctor` "errori di permesso recenti" (§14.4) vedeva il sintomo
 ma non poteva vedere la causa — per questo 0.5.1 aggiunge anche il check exe (§14.4).
 
@@ -795,7 +795,7 @@ si ferma, `stats['dest_pendente']` segnala al caller di mettere quella dest in `
 (§8.3) — le altre dest proseguono. Al retry la dest rifallisce → il backoff **riprende da
 dove era** (mai ripartire da 1s: niente loop a 1Hz).
 
-**Throttle delle righe di errore (0.5.1).** La stessa copia fallita può ripeterse senza
+**Throttle delle righe di errore (0.5.1).** La stessa copia fallita può ripetersi senza
 fine (un volume negato produce un errore per evento e per reconcile: 5.251 righe identiche
 nell'incidente di §8.4). `log_copy_error()` in `safekeep/copier.py` deduplica per
 **(path, errno)**: la prima occorrenza scrive la riga storica `copia fallita src → dst: …`
