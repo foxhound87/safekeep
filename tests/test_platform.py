@@ -146,6 +146,21 @@ class AgentTemplateTest(unittest.TestCase):
         for needle in ('RunAtLoad', 'KeepAlive', '__REPO__', '__PYTHON__'):
             self.assertIn(needle, text, needle)
 
+    def test_install_sh_interprete_stabile(self):
+        """SPEC.md §8.4 (0.5.1): il default renderizzato è lo shim di sistema
+        /usr/bin/python3, MAI un path Cellar di Homebrew — un `brew upgrade`
+        cancella il Cellar sotto il processo vivo e TCC non lo identifica più."""
+        with open(os.path.join(REPO, 'install.sh'), encoding='utf-8') as fh:
+            text = fh.read()
+        self.assertIn('SAFEKEEP_PYTHON:-/usr/bin/python3', text)
+        self.assertNotIn('/opt/homebrew/bin/python3', text,
+                         'il default non deve più puntare al Cellar di brew')
+        self.assertIn('py_ok', text, "validazione ≥ 3.9 dell'interprete")
+        for name in ('com.safekeep.agent.plist', 'com.safekeep.trend.plist'):
+            with open(os.path.join(REPO, 'launchd', name), encoding='utf-8') as fh:
+                tpl = fh.read()
+            self.assertIn('default: /usr/bin/python3', tpl, name)
+
 
 class RecentPermissionErrorsTest(unittest.TestCase):
     """SPEC.md §14.4: errori di permesso recenti nel log, finestra 24h,

@@ -8,7 +8,8 @@
   può essere spostato/rinominato senza rompere l'agent):
 
     __REPO__    radice del repo safekeep (la cartella che contiene bin/ e launchd/)
-    __PYTHON__  interprete Python ≥ 3.9 (default: /opt/homebrew/bin/python3)
+    __PYTHON__  interprete Python ≥ 3.9 (default: /usr/bin/python3 — shim di
+                sistema stabile, NON un path Cellar di Homebrew: SPEC.md §8.4)
     __HOME__    $HOME dell'utente — launchd NON espande `~` negli StandardOut/ErrorPath
 
   Installazione manuale: sostituisci i tre placeholder e copia in

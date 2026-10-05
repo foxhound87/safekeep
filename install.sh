@@ -7,8 +7,19 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-PY="${SAFEKEEP_PYTHON:-/opt/homebrew/bin/python3}"
+# Interprete renderizzato nel plist (SPEC.md §8.4): lo shim di sistema
+# /usr/bin/python3 non viene mai cancellato da un `brew upgrade` — un path
+# Cellar sparisce sotto il processo vivo e TCC non lo identifica più (EPERM).
+PY="${SAFEKEEP_PYTHON:-/usr/bin/python3}"
 OS="$(uname -s)"
+
+# ≥ 3.9 e realmente eseguibile: senza CLT (Command Line Tools) lo shim di
+# sistema non risponde → cade su python3 nel PATH (comportamento pre-0.5.1)
+py_ok() {
+    [ -n "${1:-}" ] && [ -x "$1" ] &&
+        "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
+            >/dev/null 2>&1
+}
 
 # --trend (SPEC.md §9.2): render + bootstrap SOLO dell'agent orario del trend.
 # Non tocca, non ricarica la unit dell'agente principale.
@@ -42,11 +53,11 @@ if ! command -v fswatch >/dev/null 2>&1; then
     echo "✗ fswatch mancante — installalo: $HINT" >&2
     exit 1
 fi
-if [ ! -x "$PY" ]; then
+if ! py_ok "$PY"; then
     PY="$(command -v python3 || true)"
 fi
-if [ -z "$PY" ] || [ ! -x "$PY" ]; then
-    echo "✗ python3 non trovato (servono Python ≥ 3.9)" >&2
+if ! py_ok "$PY"; then
+    echo "✗ python3 ≥ 3.9 non trovato (override: SAFEKEEP_PYTHON=/percorso/python3)" >&2
     exit 1
 fi
 
