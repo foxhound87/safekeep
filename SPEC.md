@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.5.0 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.5.1 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 

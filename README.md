@@ -165,7 +165,7 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 206 tests covering the matcher,
+Stdlib (`unittest`) suite, zero dependencies: 221 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery, CLI, the permission-trend
 wrapper and the POSIX portability layer (platform helper, per-OS fswatch
 monitor, systemd template).
