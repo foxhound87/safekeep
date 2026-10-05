@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | OS | macOS, or Linux with systemd (POSIX). Windows: run it inside [WSL](/troubleshooting#windows-wsl-best-effort) (best-effort) |
-| Python | >= 3.9 |
+| Python | >= 3.9 (on macOS the launchd agent runs on the system `/usr/bin/python3`, validated by `install.sh` since 0.5.1) |
 | fswatch | [emcrisostomo/fswatch](https://github.com/emcrisostomo/fswatch) |
 
 ```bash

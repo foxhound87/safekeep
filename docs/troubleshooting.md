@@ -10,7 +10,8 @@ Checks: `fswatch` presence, version and **the monitor for your OS**
 (`fsevents_monitor` on macOS, `inotify_monitor` on Linux), global config and
 every `.sync` syntax, no destination inside a source (copy loop), python
 version, permission errors in the log from the last 24h (0.3.1), TCC + launchd
-plist lint (macOS), inotify watch limit + systemd user unit + linger (Linux),
+plist lint (macOS), the running daemon's executable still on disk (0.5.1,
+macOS), inotify watch limit + systemd user unit + linger (Linux),
 WSL detection (0.4.0, best-effort), leftover `.safekeep.tmp.*` files. Exit `1`
 on a fatal failure; every check described below is non-fatal.
 
@@ -39,6 +40,55 @@ launchctl bootout gui/$(id -u)/com.safekeep.agent
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
 ```
 
+## Daemon runs from a deleted executable (Homebrew upgrade)
+
+**Root cause of the ~45h EPERM incident (03/10/2026), fixed in 0.5.1.** Until
+0.5.0 `install.sh` rendered the agent's Python as `/opt/homebrew/bin/python3`,
+which Homebrew resolves into its versioned **Cellar** folder:
+
+```text
+03/10 18:54   launchd starts the daemon (exe = Cellar/python@3.14/3.14.6/…)
+03/10 21:20   brew upgrade: python 3.14.6 → 3.14.8 DELETES the old Cellar
+              folder → the executable under the live process is gone
+hours later   TCC can no longer identify the process
+              (proc_pidpath_audittoken() failed) → removable volumes denied
+              → EPERM on EVERY copy, 5.251 identical ERROR log lines
+recovery      re-grant permissions + launchctl kickstart -k
+```
+
+Symptoms: `doctor`'s "recent permission errors" exploding, every copy failing
+with `Operation not permitted` while the permissions themselves look fine,
+`fswatch` still delivering events normally.
+
+**Detection (0.5.1):** `doctor` reads the *live process*
+(`launchctl print` + `ps -o comm=`) and warns when that executable is gone —
+it works even with an old, fragile plist still installed:
+
+```text
+✗ exe del daemon: /opt/homebrew/…/Python NON esiste su disco — il processo
+  gira su un eseguibile cancellato … → launchctl kickstart -k
+  gui/$(id -u)/com.safekeep.agent — warning non fatale
+```
+
+**Fix:** re-run the installer (idempotent) and reload the job. Since 0.5.1 it
+renders `/usr/bin/python3` — the Apple-managed system shim no Homebrew upgrade
+can delete — for **both** agents:
+
+```bash
+./install.sh            # re-render with the stable interpreter
+launchctl bootout gui/$(id -u)/com.safekeep.agent 2>/dev/null
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
+./install.sh --trend    # same treatment for the hourly trend agent
+```
+
+Verify: `ps -p <pid> -o comm=` must print `/usr/bin/python3`. launchd does
+**not** re-read a plist on its own: without `bootout`+`bootstrap` (or a reboot)
+the old rendering keeps running. If Full Disk Access was granted to a Homebrew
+python, grant it to `/usr/bin/python3` too — a one-time step, that path never
+changes again. A shell wrapper that re-resolves `python3` at every start was
+considered and rejected: it would only resolve at start, recreating the same
+incident on the next upgrade while the daemon keeps running (SPEC §8.4).
+
 ## Recent permission errors in the log
 
 Since 0.3.1 `doctor` counts permission errors in the **current** log
@@ -57,8 +107,17 @@ exits `0`): it is a recent symptom, not a system state. What to do:
 
 1. what is still waiting: `safekeep sync-once --dry-run`;
 2. re-grant the permissions — the destination **volume** on macOS, or
-   [FDA](#full-disk-access-fda) for protected folders;
+   [FDA](#full-disk-access-fda) for protected folders, or the stable
+   interpreter if the [daemon runs from a deleted
+   executable](#daemon-runs-from-a-deleted-executable-homebrew-upgrade);
 3. the log path is printed with the warning.
+
+Since 0.5.1 repeated failures for the **same (path, errno)** are throttled:
+one line per 300-second window, later lines suffixed `— ripetuto N volte`,
+instead of one line per failure (the incident wrote 5.251 identical lines in
+two days). The count stays honest — `doctor` adds `N + 1` for every suffixed
+line, so `count_24h` is still the true number of failures, just with far fewer
+lines on disk.
 
 Limits, on purpose: only the current log is read (rotations `.log.1` …
 `.log.5` are not), a line whose timestamp cannot be parsed is **not** counted

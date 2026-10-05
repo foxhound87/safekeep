@@ -9,7 +9,7 @@ safekeep <command> [--config PATH] [-v]
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--prune] [--project PATH]` | one pass: walks the source and copies whatever differs, then exits |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
-| `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code |
+| `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist and daemon executable (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code |
 
 ## `run`
 
@@ -59,7 +59,8 @@ safekeep doctor
 Checks at least: `fswatch` presence, version and the monitor for the platform
 (`fsevents_monitor` on macOS, `inotify_monitor` on Linux), config and `.sync`
 syntax, that no destination is a subdirectory of a source (copy loop), python
-version, TCC + launchd plist lint (macOS), inotify watch limit + systemd user
+version, TCC + launchd plist lint and the live daemon's executable still on
+disk (macOS, 0.5.1), inotify watch limit + systemd user
 unit (Linux), and leftover `.safekeep.tmp.*` files. Exit `1` if a **fatal**
 check fails.
 

@@ -73,6 +73,7 @@ loop), `PYTHONUNBUFFERED=1`.
 |---|---|
 | Template | `launchd/com.safekeep.agent.plist` |
 | Rendered to | `~/Library/LaunchAgents/com.safekeep.agent.plist` |
+| Interpreter | `__PYTHON__` → `/usr/bin/python3` (stable system shim, since 0.5.1: a `brew upgrade` can never delete it — see [Troubleshooting](/troubleshooting#daemon-runs-from-a-deleted-executable-homebrew-upgrade)) |
 | stdout | `/tmp/safekeep.out.log` |
 | stderr | `/tmp/safekeep.err.log` |
 
