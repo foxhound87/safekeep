@@ -551,6 +551,63 @@ Destinazioni su volumi esterni/reti:
    invece (o in aggiunta) al backoff applicativo. Nel 0.1.0 è documentato e lasciato commentato
    nel plist: l'event driver fallback è il backoff.
 
+### 8.4 Interprete dell'agent: path stabile (incidente 03/10/2026, fix 0.5.1)
+
+**Incidente reale (timeline).** Fino a 0.5.0 `install.sh` rendeva `__PYTHON__` con default
+`/opt/homebrew/bin/python3`, che Homebrew (package manager di macOS) risolve nel path
+**Cellar** della versione installata:
+
+| Quando | Cosa |
+|---|---|
+| 03/10 18:54 | launchd avvia il daemon: exe = `Cellar/python@3.14/3.14.6/...` |
+| 03/10 21:20 | `brew upgrade` porta Python 3.14.6 → 3.14.8 e **cancella** la vecchia cartella Cellar: l'eseguibile su cui gira il processo sparita da disco |
+| ore dopo | **TCC** (Transparency, Consent and Control, sistema permessi di macOS) non riesce più a identificare il processo (`proc_pidpath_audittoken() failed`) e nega i volumi rimovibili → `EPERM` (Operation not permitted) su **ogni** copia per ~45h: 5.251 righe `ERROR copia fallita …` identiche nel log, 4.829 in un giorno |
+| recovery | ri-grant manuale dei permessi + `launchctl kickstart -k` (riparte sul nuovo exe → torna a funzionare) |
+
+Sintomo e log ribollente erano conseguenze, non causa: la causa era l'exe cancellato sotto
+un processo vivo. Il check `doctor` "errori di permesso recenti" (§14.4) vedeva il sintomo
+ma non poteva vedere la causa — per questo 0.5.1 aggiunge anche il check exe (§14.4).
+
+**Fix (0.5.1): `__PYTHON__` = `/usr/bin/python3`.** `install.sh` rende ora di default lo
+**shim di sistema** `/usr/bin/python3` (Apple-gestito, non toccato dagli upgrade Homebrew,
+già l'interprete che §11 raccomanda per il consenso FDA), validato **≥ 3.9** eseguendolo
+(`py_ok`); shim assente o troppo vecchio → fallback a `python3` nel `PATH`
+(`SAFEKEEP_PYTHON` resta l'override esplicito, come prima). Lo stesso `__PYTHON__`
+alimenta `SAFEKEEP_PYTHON` del plist trend (§9.2), quindi **entrambi** gli agent sono
+coperti dalla stessa scelta.
+
+Soluzioni valutate:
+
+- **(a) shim di sistema** — **scelta**. L'exe su cui gira il daemon non può essere
+  cancellato da `brew upgrade`, quindi la classe "exe vivo sparito → TCC non identifica il
+  processo" sparisce; il plist resta dichiarativo (launchd vede un `ProgramArguments`
+  stabile, identificabile da TCC a ogni riavvio).
+- **(b) wrapper shell** che risolve `python3` a ogni avvio — **scelta rifiutata**: la
+  risoluzione avviene solo all'avvio, mentre il processo in esercizio resta sull'exe già
+  risolto → un upgrade Homebrew con il daemon vivo ricreerebbe **esattamente** lo stesso
+  incidente; in più il plist dichiarerebbe `/bin/bash` come programma, non l'interprete.
+
+**Rischio CLT (Command Line Tools) dichiarato:** su macOS `/usr/bin/python3` è uno shim che
+richiede i CLT: senza, l'esecuzione mostra il prompt d'installazione. Mitigazione doppia:
+`install.sh` validerebbe comunque l'interprete eseguendolo (shim che non risponde →
+fallback `command -v python3`, comportamento pre-0.5.1) e Homebrew presente implica quasi
+certamente CLT (verificato in locale: `xcode-select -p` → Xcode.app; `/usr/bin/python3` →
+3.9.6; la suite è verde anche girata con quell'interprete).
+
+**Plist live già installati:** launchd **non rilegge** il file fino a `bootout`+`bootstrap`
+(o reboot): i plist renderizzati col vecchio default restano fragili finché non vengono
+re-renderizzati. `install.sh` è idempotente; re-render + ricarica:
+
+```bash
+./install.sh            # re-render del plist principale (idempotente, non riparte da solo)
+launchctl bootout gui/$(id -u)/com.safekeep.agent 2>/dev/null
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
+./install.sh --trend    # stesso trattamento per l'agent trend (fa da solo bootout+bootstrap)
+```
+
+Verifica: `ps -p <pid> -o comm=` deve mostrare `/usr/bin/python3` (exe esistente su disco)
+e `launchctl print gui/$(id -u)/com.safekeep.agent | grep -E 'state|program'`.
+
 ---
 
 ## 9. Comandi CLI
@@ -608,7 +665,9 @@ python3 bin/safekeep.py run -v
    se presenti, altrimenti `$HOME` in modalità auto-discovery (§11);
 4. che le dest siano scrivibili;
 5. che l'agent per l'init system esista e sia valido: plist launchd + `plutil -lint`
-   su **Darwin**, unit systemd su **Linux** (§14.3 e §14.4);
+   su **Darwin**, unit systemd su **Linux** (§14.3 e §14.4); su Darwin, se il job è
+   caricato, anche che il processo gira su un **eseguibile ancora presente su disco**
+   (0.5.1, §8.4 e §14.4 — warning non fatale se no);
 6. accesso ai source (test read + probe TCC — solo Darwin);
 7. residui `.safekeep.tmp.*`;
 8. su **Linux**, informativo e **non fatale**: `fs.inotify.max_user_watches` ≥ 16384
@@ -735,6 +794,23 @@ processato comunque; i file già aggiornati contano in `stats['skippati']`. Un e
 si ferma, `stats['dest_pendente']` segnala al caller di mettere quella dest in `pending`
 (§8.3) — le altre dest proseguono. Al retry la dest rifallisce → il backoff **riprende da
 dove era** (mai ripartire da 1s: niente loop a 1Hz).
+
+**Throttle delle righe di errore (0.5.1).** La stessa copia fallita può ripeterse senza
+fine (un volume negato produce un errore per evento e per reconcile: 5.251 righe identiche
+nell'incidente di §8.4). `log_copy_error()` in `safekeep/copier.py` deduplica per
+**(path, errno)**: la prima occorrenza scrive la riga storica `copia fallita src → dst: …`
+invariata; poi, per ogni chiave, al massimo **una riga ogni 300s** (`THROTTLE_INTERVAL`)
+con il suffisso `— ripetuto N volte` (N = fallimenti compresi fra due righe loggate,
+escluso quello che scrive la riga). I due call site storici (`reconcile_project` in §10.1
+e `_copy` del daemon) passano da lì, quindi event-driven e reconcile sono coperti insieme.
+Le fallite con errno di **mount** (`ENODEV`/`EBUSY`/`ENOSPC`) non sono throttlate: ce n'è
+al massimo una per walk (il walk si ferma) e la loro riga (`errore di mount …`) non è
+cambiata. I conteggi **non leggono mai dal log**: `stats['errati']` e le righe di sintesi
+di `sync-once` restano identici. L'unico consumatore del log è `recent_permission_errors`
+(§14.4), adattato a restare onesto (vedi là). Limite dichiarato: il dizionario in memoria
+cresce con i path distinti falliti e non viene mai ripulito — una voce per (path, errno) di
+un albero di dimensioni normali, da valutare solo se una dest negata produce milioni di
+path distinti.
 
 **Quando gira:**
 
@@ -932,6 +1008,7 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
 | agent dell'init system | plist (se presente) | unit systemd (se presente), riga informativa |
 | limite inotify | — | `fs.inotify.max_user_watches` letto da `/proc/sys/fs/inotify/max_user_watches` |
 | errori di permesso recenti nel log | ✔/✗ | ✔/✗ |
+| exe del daemon ancora su disco (0.5.1) | ✔/✗/saltato | — |
 | linger (solo con unit installata) | — | ✔/✗ |
 
 - Il check sul limite inotify è **informativo e non fatale**: ✗ + hint
@@ -959,7 +1036,28 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
   vederli era leggere il file a mano. Hint stampati col warning: `safekeep sync-once
   --dry-run` per vedere i pending, riconcedere i permessi al volume / FDA (Full Disk
   Access), path del log. Finestra e non-fatalità volute: è un sintomo recente, non
-  uno stato del sistema.
+  uno stato del sistema. **Throttle (0.5.1)**: le copie fallite ripetute per lo stesso
+  (path, errno) non scrivono più una riga ciascuna (§10.1) — prima riga come sempre,
+  poi al massimo una ogni 300s col suffisso `— ripetuto N volte`. Per non ingannare il
+  conteggio, `recent_permission_errors` somma **N + 1** per ogni riga con il suffisso
+  (la riga stessa + i N fallimenti compressi): `count_24h` resta il numero **vero** di
+  fallimenti nella finestra, sono solo le righe scritte sul file a essere di meno.
+  Riga senza suffisso → 1, come prima.
+- **exe del daemon ancora su disco (0.5.1, Darwin-only)**: se il job
+  `com.safekeep.agent` è caricato, `daemon_exe()` legge il `pid` da
+  `launchctl print gui/$UID/com.safekeep.agent` e l'eseguibile assoluto da
+  `ps -p <pid> -o comm=`; se quel path **non esiste più** su disco → warning **forte ma
+  non fatale** con hint `launchctl kickstart -k gui/$(id -u)/com.safekeep.agent`
+  (caso dell'incidente §8.4: upgrade Homebrew sotto un daemon vivo). Perché non fatale:
+  è un sintomo con rimedio manuale di una riga, e `doctor` deve restare eseguibile
+  proprio mentre diagnostica quello stato (diagnostica, non monitor: stessa
+  non-fatalità del check errori di permesso, che è il lato sintomo della stessa
+  medaglia). Lettura **solo** (`launchctl print` + `ps`): nessuna sessione utente
+  richiesta, niente scritture — coerente con "nessun check systemctl live" qui sotto.
+  Job non caricato, processo non trovato, `launchctl`/`ps` assenti o falliti,
+  non-Darwin → check **saltato** con riga ✔ (non determinabile ⇒ nessun allarme).
+  Funziona anche con un plist live renderizzato col vecchio default: guarda il
+  **processo**, non il file.
 - **linger (0.3.1, solo Linux con unit installata)**: se
   `~/.config/systemd/user/safekeep.service` esiste, `doctor` verifica che l'utente sia
   in `/var/lib/systemd/linger/` (fonte di verità di systemd, leggibile senza root —
@@ -1092,6 +1190,18 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   `install.sh --trend` che **non tocca** il daemon principale). CI: step WSL
   eseguito davvero (§14.6) e `actions/checkout@v7` + `actions/setup-python@v7`
   (runtime `node24`, niente warning di deprecazione Node 20).
+- **0.5.1** — fix (PATCH) tre problemi reali dell'incidente EPERM (§8.4):
+  1. `install.sh` rende `__PYTHON__` = `/usr/bin/python3` (shim di sistema
+     stabile, validato ≥ 3.9 con fallback nel `PATH`) invece del path Cellar di
+     Homebrew — plist agent e trend non rompono più a ogni `brew upgrade`
+     (§8.4; (b) wrapper shell rifiutata, motivazione in §8.4);
+  2. nuovo check `doctor` **non fatale** (Darwin, se il job è caricato): il
+     processo deve girare su un eseguibile **ancora presente su disco** —
+     warning forte con hint `launchctl kickstart -k` se l'exe è stato
+     cancellato sotto un processo vivo (§14.4);
+  3. throttle delle righe `copia fallita` ripetute per (path, errno): una riga
+     + `— ripetuto N volte` ogni 300s, e `recent_permission_errors` somma N+1
+     così `count_24h` resta il conteggio vero (§10.1 e §14.4).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
