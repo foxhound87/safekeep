@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.5.1 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.5.2 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -1212,6 +1212,15 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   3. throttle delle righe `copia fallita` ripetute per (path, errno): una riga
      + `— ripetuto N volte` ogni 300s, e `recent_permission_errors` somma N+1
      così `count_24h` resta il conteggio vero (§10.1 e §14.4).
+- **0.5.2** — fix (PATCH) fswatch `-E` (§6.4): le `-e` venivano lette come **BRE
+  (Basic Regular Expressions)**, dove `(`/`|` sono letterali, e di conseguenza
+  **nessuna esclusione filtrava**: con un `.sync` in `$HOME` gli eventi
+  `Library/...`/`.local/...` arrivavano al matcher, `classify` rispondeva
+  `walk_dir` e il daemon saturava senza processare mai il reload della config
+  (5,5 minuti di reconcile per tornare vivo). L'argv di fswatch passa ora `-E`
+  (**ERE**, Extended Regular Expressions) con test di regressione, e §6.4/§14.2
+  documentano il requisito — le regex servono a descrivere gruppi/alternanze su
+  path reali, spazi compresi (`VAULT CLA/`).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
