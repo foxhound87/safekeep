@@ -433,6 +433,10 @@ class FswatchArgvTest(unittest.TestCase):
         self.assertEqual(argv[:3], ['fswatch', '-0', '-m'])
         self.assertIn(argv[3], ('fsevents_monitor', 'inotify_monitor'))
         self.assertEqual(argv[4:7], ['-r', '-l', '1.0'])
+        # `-E` obbligatorio: fswatch legge le `-e` come BRE (gruppi/alternanze
+        # letterali) e le esclusioni non filtrerebbero più nulla
+        self.assertIn('-E', argv)
+        self.assertLess(argv.index('-E'), argv.index('-e') if '-e' in argv else len(argv))
         regexes = [argv[i + 1] for i, a in enumerate(argv) if a == '-e']
         self.assertTrue(regexes)
         self.assertTrue(any(re.search(rx, '/qualcuno/node_modules/x') for rx in regexes))

@@ -418,9 +418,13 @@ class Daemon:
     # --- fswatch ---------------------------------------------------------
 
     def fswatch_argv(self):
-        """`fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>` (§6.4, §14.2):
-        il monitor è dichiarato per piattaforma, mai il default implicito."""
-        argv = ['fswatch', '-0', '-m', fswatch_monitor(), '-r', '-l', '1.0']
+        """`fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>` (§6.4, §14.2):
+        il monitor è dichiarato per piattaforma, mai il default implicito;
+        `-E` = regex ERE (Extended Regular Expressions): senza, fswatch legge le
+        `-e` come BRE (Basic Regular Expressions) dove `(`/`|` sono letterali e
+        NESSUNA esclusione filtra (con un `.sync` in `$HOME` i path di `Library`
+        entrano nel matcher e il daemon satura in `walk_dir`)."""
+        argv = ['fswatch', '-0', '-m', fswatch_monitor(), '-r', '-l', '1.0', '-E']
         for regex in self.exclude_regexes():
             argv += ['-e', regex]
         return argv + ['--'] + self.discovery_roots()[0]

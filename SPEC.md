@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.5.1 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.5.2 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -341,7 +341,7 @@ ignorare (§4.2).
    statiche) e avvia il subprocess:
 
    ```
-   fswatch -0 -m <monitor> -r -l 1.0 -e <regex esclusioni> -- <radici watch>
+   fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex esclusioni> -- <radici watch>
    ```
 
    - **radici watch**: le `source` del config (modalità source, deduplicate: una
@@ -354,6 +354,15 @@ ignorare (§4.2).
      `inotify_monitor` su Linux (inotify, subsystem del kernel Linux) — §14.2;
    - `-r`: ricorsivo;
    - `-l 1.0`: batching di almeno 1s (anti-flood a monte);
+   - `-E` (**requisito, §6.4**): le `-e` vanno lette come **ERE (Extended Regular
+     Expressions)**, non come BRE (Basic Regular Expressions) che è il default di
+     fswatch. Senza `-E` i costrutti estesi — gruppi `(...)`, alternanze `|` —
+     sono letterali e **nessuna esclusione filtra più nulla**: con un `.sync` in
+     `$HOME` ogni evento `Library/...`/`.local/...` arriva al matcher, `classify`
+     risponde `walk_dir` e il daemon satura senza processare mai l'evento di
+     reload della config. Le regex servono proprio a descrivere path reali —
+     espressioni con gruppi/alternanze e path con spazi (es. `VAULT CLA/`, già
+     reso sicuro dal separatore NUL di `-0`) — costrutti che esistono solo in ERE;
    - `-e <regex>`: pre-filtro esclusioni lato fswatch (le regex sono un filtro grezzo; la
      decisione finale resta al matcher Python, che è l'unica fonte di verità). In
      **modalità auto-discovery** le regex includono in più le exclude dedicate della
@@ -901,7 +910,7 @@ illimitata della coda in memoria.
 | **T2** | Parser config globale `~/.safekeep` + parser `.sync` senza dest (`safekeep/config.py`): sezioni, regole, errori fail-fast, esempi in `examples/` | parse di `examples/safekeep.example` e `examples/sync.example` produce la struttura attesa; riga invalida → errore con numero di riga; `dest:` in `.sync` → warning con info / errore con debug | ✅ fatto (`tests/test_config.py`) |
 | **T3** | Copia atomica + stability check + symlink + walk/reconcile idempotente (`safekeep/copier.py`) | test su tmpdir: contenuto + mtime preservati; src instabile/sparito → `False` senza residui tmp; symlink (anche rotti e di directory) ricreati come symlink; seconda run = 0 copie | ✅ fatto (`tests/test_copier.py`) |
 | **T4** | Destinazioni non montate (`safekeep/volumes.py`): `dest_state`, `backoff_schedule()` (1→2→…→60 cap), `partition_dests` | `dest_state` su path esistente/assente; backoff con cap a 60s; split (ready, absent) | ✅ fatto (`tests/test_volumes.py`) |
-| **T5** | `run`: subprocess fswatch (`-0 -m fsevents_monitor -r -l 1.0 -e …`), dispatcher eventi, debounce, timer 24h, pending/backoff mount, anti-flood (>5000 → collapse a reconcile) | modificare un file sorgente → compare sul dest entro ~2s; dest smontata → pending, remount → catch-up; flood simulato triggera il collapse | da fare |
+| **T5** | `run`: subprocess fswatch (`-0 -m fsevents_monitor -r -l 1.0 -E -e …`), dispatcher eventi, debounce, timer 24h, pending/backoff mount, anti-flood (>5000 → collapse a reconcile) | modificare un file sorgente → compare sul dest entro ~2s; dest smontata → pending, remount → catch-up; flood simulato triggera il collapse | da fare |
 | **T6** | CLI `status`/`doctor` + plist launchd + comandi bootout/bootstrap/kickstart (`launchd/`, `install.sh`, `uninstall.sh`) | `doctor` verde su macchina con permessi; plist passa `plutil -lint`; kill del processo → launchd lo riavvia da solo | ✅ fatto (`tests/test_cli.py`) |
 | **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor`/`run`/`sync-once` escono con ≠ 0 su dest sotto source; `.sync` non attendibile gestito (info → warning + skip, debug → fatale); containment della dest (nessuna scrittura fuori); dedup senza perdita di eventi; errori I/O confinati al file; tabella edge case coperta da casi di test | ✅ fatto (`tests/test_matcher.py`, `tests/test_config.py`, `tests/test_copier.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 | **T8** | Auto-discovery (`source` opzionale): scan di `$HOME` con pruning dedicato, watch root `$HOME` con exclude home, evento su `/.sync` → nuovo progetto, rescan al timer 24h, dedup watch roots (`safekeep/config.py`, `safekeep/daemon.py`) | config senza `source` valida (senza `dest` → errore con hint); `.sync` in `$HOME` scoperto, `Library`/nascoste potato, sotto-progetto annidato scoperto; watch root source invariata (backward compat); evento `.sync` → discover + reconcile; rescan 24h | ✅ fatto (`tests/test_config.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
@@ -947,7 +956,7 @@ girando su macOS. Consumatori: `daemon.fswatch_argv()` (§14.2) e `doctor` (§14
 ### 14.2 fswatch: monitor dichiarato per piattaforma
 
 ```
-fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
+fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>
 ```
 
 | `<monitor>` | Piattaforma | equivale a |
@@ -961,7 +970,8 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
 - I nomi sono quelli che `fswatch -M` (`--list-monitors`) stampa sulla piattaforma.
   Attenzione: su Linux il nome è **`inotify_monitor`**, *non* `inotify` — `-m inotify`
   non è un alias accettato e fswatch esce con errore.
-- **Invariato**: `-0` (NUL-delimitato), `-e`, `-r`, `-l 1.0`, le regex di esclusione e
+- **Invariato**: `-0` (NUL-delimitato), `-E` (ERE, §6.4 — requisito perché le `-e`
+  filtrino davvero), `-e`, `-r`, `-l 1.0`, le regex di esclusione e
   il resto del flusso di §6.
 
 ### 14.3 Init system: launchd (macOS) → systemd (Linux)
@@ -1202,6 +1212,15 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   3. throttle delle righe `copia fallita` ripetute per (path, errno): una riga
      + `— ripetuto N volte` ogni 300s, e `recent_permission_errors` somma N+1
      così `count_24h` resta il conteggio vero (§10.1 e §14.4).
+- **0.5.2** — fix (PATCH) fswatch `-E` (§6.4): le `-e` venivano lette come **BRE
+  (Basic Regular Expressions)**, dove `(`/`|` sono letterali, e di conseguenza
+  **nessuna esclusione filtrava**: con un `.sync` in `$HOME` gli eventi
+  `Library/...`/`.local/...` arrivavano al matcher, `classify` rispondeva
+  `walk_dir` e il daemon saturava senza processare mai il reload della config
+  (5,5 minuti di reconcile per tornare vivo). L'argv di fswatch passa ora `-E`
+  (**ERE**, Extended Regular Expressions) con test di regressione, e §6.4/§14.2
+  documentano il requisito — le regex servono a descrivere gruppi/alternanze su
+  path reali, spazi compresi (`VAULT CLA/`).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
