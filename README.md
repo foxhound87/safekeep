@@ -160,8 +160,11 @@ destinations. The client is [botocore](https://botocore.amazonaws.com/),
 installed via the optional extra — the core package stays stdlib-only:
 
 ```bash
-pipx install "safekeep[s3]"
+pipx install "safekeep[s3]"      # or: pip install "safekeep[s3]"
 ```
+
+Without the extra the config still parses, but any `s3_*` key fails fast with
+an install hint (`doctor` reports it as a **non-fatal** warning).
 
 `~/.safekeep` (the `s3_*` keys are valid **only** in this file — a `.sync`
 can't add them; keep the file at `chmod 600`):
@@ -178,6 +181,10 @@ s3_addressing: path                       # path (default) | virtual
 s3_tls_check: true                        # false = self-signed certificates
 ```
 
+With `s3_secret_key_env:` the variable must be in the **agent's** environment
+(launchd `EnvironmentVariables`, systemd `Environment=`) — a shell `export`
+alone doesn't reach a daemon started at boot.
+
 Semantics (see [SPEC.md](SPEC.md) §18): upload-only with `needs_copy` based on
 object metadata (`x-amz-meta-mtime` in nanoseconds, `x-amz-meta-mode`,
 symlinks = zero-byte objects with `x-amz-meta-symlink`), same 1s mtime
@@ -188,14 +195,18 @@ that's an accepted v1 limitation.
 
 Compatible services:
 
-| Service | Example `s3_endpoint` | `s3_addressing` | Notes |
-|---|---|---|---|
-| MinIO (self-hosted) | `https://minio.example.com:9000` | `path` | SigV4 (Signature Version 4), any region |
-| Silo | `https://s3.example.com:443` | `path` | fork of MinIO — same settings |
-| Ceph RGW | `https://rgw.example.com` | `path` | S3-compatible API |
-| Wasabi | `https://s3.wasabisys.com` | `path` | region required, must match the bucket |
-| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | `virtual` | use an Application Key as access/secret |
-| AWS S3 | *(omit `s3_endpoint`)* | `virtual` | default endpoint, region must match |
+| Service | Example `s3_endpoint` | `s3_addressing` | `s3_region` | TLS |
+|---|---|---|---|---|
+| MinIO (self-hosted) | `https://minio.example.com:9000` | `path` | any (`us-east-1` default) | `https` + `s3_tls_check: false` if self-signed |
+| Silo (fork of MinIO) | `https://s3.example.com:443` | `path` | any (`us-east-1` default) | as the endpoint's own certificate |
+| Ceph RGW | `https://rgw.example.com` | `path` | any, must match the RGW zone (`us-east-1` default) | as configured on the RGW |
+| Wasabi | `https://s3.wasabisys.com` | `path` | **required**, must match the bucket (`us-east-1` on that endpoint) | `https` |
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | `virtual` or `path` | **required**, must match the bucket region | `https` only — cleartext rejected |
+| AWS S3 | *(omit `s3_endpoint`)* | `virtual` | must match the bucket (`us-east-1` default) | `https` |
+
+All of them speak SigV4 (Signature Version 4) with the same client — no
+service-specific code path. B2 wants an **Application Key** (not the Master
+Key) as `s3_access_key`/`s3_secret_key`.
 
 `safekeep status` shows the bucket as `[ok]`/`[offline]` (cached HeadBucket),
 and `safekeep doctor` reports credentials, file permissions and bucket
@@ -220,13 +231,27 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 221 tests covering the matcher,
+Stdlib (`unittest`) suite, zero dependencies: 287 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery, CLI, the permission-trend
 wrapper and the POSIX portability layer (platform helper, per-OS fswatch
 monitor, systemd template).
 `fswatch` is not needed to run the suite — the few `doctor` checks that talk to
 the real binary are skipped when it's missing — but CI installs it so the
 Linux job exercises the real `inotify` monitor.
+
+The S3 integration test talks to a real bucket and is **skipped** unless every
+`SAFEKEEP_S3_TEST_*` variable is set (no credential is hard-coded; it uploads
+under a throwaway timestamped prefix and performs **no** DeleteObject):
+
+```bash
+export SAFEKEEP_S3_TEST_ENDPOINT=https://s3.example.com:443 \
+       SAFEKEEP_S3_TEST_BUCKET=my-backup-bucket \
+       SAFEKEEP_S3_TEST_ACCESS_KEY=REPLACEME_ACCESS_KEY \
+       SAFEKEEP_S3_TEST_SECRET_KEY=REPLACEME_SECRET_KEY \
+       SAFEKEEP_S3_TEST_REGION=us-east-1        # optional, default us-east-1
+       # SAFEKEEP_S3_TEST_PREFIX=safekeep       # optional, default safekeep-itest
+python3 -m unittest tests.test_s3_itest -v
+```
 
 ## Documentation
 
