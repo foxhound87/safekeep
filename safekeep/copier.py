@@ -206,7 +206,8 @@ def needs_copy(src: str, dst: str) -> bool:
 
 
 def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
-                      stats=None, dry_run=False, dest_base=None) -> int:
+                      stats=None, dry_run=False, dest_base=None,
+                      copy_fn=None, needs_copy_fn=None) -> int:
     """Walk della sorgente con pruning delle dir con verdict escluso; copia ogni
     file con verdict incluso che differisce (un file non matchato da nessuna
     regola NON viene copiato: allow-list, SPEC.md §4.3). Ritorna il numero di copie.
@@ -223,12 +224,22 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
     fermato la passata: il caller metta quella dest in pending (CR-05).
     `dry_run`: conta ed elenca senza copiare.
 
+    Seam destinazioni (SPEC.md §18.2): `copy_fn(src, dst)` e
+    `needs_copy_fn(src, dst)` — default invariati (`copier.copy_one` con
+    containment + `copier.needs_copy`); una dest S3 passa i propri. Gli
+    errori di rete S3 arrivano come `OSError(ENODEV)` e cadono nel percorso
+    pending già esistente.
+
     Nessun errore I/O di un singolo file abortisce il walk: viene loggato e
     contato, e gli altri file vengono processati comunque.
     """
     root = os.path.abspath(os.path.expanduser(source_root))
     base_root = os.path.abspath(os.path.expanduser(dest_base)) if dest_base else root
     prefix = os.path.relpath(root, base_root)   # radice del walk rispetto a base_root
+    # default invariati: le dest fs continuano a usare copy_one/needs_copy
+    do_copy = copy_fn if copy_fn is not None else (
+        lambda src, dst: copy_one(src, dst, dest_root))
+    do_need = needs_copy_fn if needs_copy_fn is not None else needs_copy
     copied = 0
     excluded = 0
     skipped = 0
@@ -266,7 +277,7 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
                     dst = dest_path_fn(dest_root, base_root,
                                        os.path.join(prefix, r), layout)
                     try:
-                        if dry_run or copy_one(full, dst, dest_root):
+                        if dry_run or do_copy(full, dst):
                             copied += 1
                             if plan is not None:
                                 plan.append((full, dst))
@@ -288,8 +299,8 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
             dst = dest_path_fn(dest_root, base_root,
                                os.path.join(prefix, r), layout)
             try:
-                if needs_copy(src, dst):
-                    if dry_run or copy_one(src, dst, dest_root):
+                if do_need(src, dst):
+                    if dry_run or do_copy(src, dst):
                         copied += 1
                         if plan is not None:
                             plan.append((src, dst))

@@ -10,6 +10,7 @@ Una riga a forma di chiave non nota (`dest:`, `-dest:`, …) resta invalida: con
 import logging
 import os
 import re
+from dataclasses import dataclass
 
 from .matcher import BUILTIN_RULES, Matcher, parse_rule, strip_comment
 
@@ -20,10 +21,29 @@ class ConfigError(ValueError):
     """Errore di config: il messaggio contiene sempre l'origine e la riga."""
 
 
+@dataclass
+class S3Config:
+    """Blocco `s3_*` del config globale (SPEC.md §18.1). Solo una dest S3.
+
+    `secret_key` è già **risolto** a parse-time: da `s3_secret_key` oppure
+    dalla variabile `s3_secret_key_env` (assente → ConfigError fail-fast).
+    """
+    endpoint: str = None            # None → endpoint AWS default
+    bucket: str = None
+    prefix: str = ''                # normalizzato: niente / iniziale/finali
+    region: str = 'us-east-1'
+    access_key: str = None
+    secret_key: str = None
+    secret_env: str = None          # nome var se il secret viene da env
+    addressing: str = 'path'        # path (default) | virtual
+    tls_check: bool = True
+
+
 class GlobalConfig:
     def __init__(self):
         self.sources = []             # radici osservate (ripetibili, opzionali)
         self.dests = []               # destinazioni globali (ripetibili) — le UNICHE
+        self.s3 = None                # S3Config | None (una sola dest S3, §18)
         self.layout = 'relative'      # relative | full
         self.defaults = []            # regole a bassa priorità (list[Rule])
         self.log_level = 'info'       # debug | info | warn | error
@@ -38,9 +58,18 @@ class SyncConfig:
 
 
 _SYNC_KEY = re.compile(r'(name|defaults|include|exclude)\s*:\s*(.*)')
-_CONF_KEY = re.compile(r'([A-Za-z_]+)\s*:\s*(.*)')
+# Chiave globale: inizia con lettera/_, poi [A-Za-z0-9_] (serve a `s3_endpoint`,
+# cifra inclusa); una riga che non matcha resta "riga non valida" (fail-fast).
+_CONF_KEY = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)')
 # Riga a forma di chiave (`dest:`, `-dest:`, `foo:`): NON è una riga nuda.
 _KEY_SHAPE = re.compile(r'[A-Za-z_-][A-Za-z0-9_-]*\s*:')
+
+# Chiavi del blocco S3 (SPEC.md §18.1): `s3_*` fuori da questo insieme è
+# errore fail-fast, come ogni altra chiave ignota del config globale.
+_S3_KEYS = frozenset({
+    's3_endpoint', 's3_bucket', 's3_prefix', 's3_region', 's3_access_key',
+    's3_secret_key', 's3_secret_key_env', 's3_addressing', 's3_tls_check',
+})
 
 
 def bare_rule(line):
@@ -114,9 +143,10 @@ def parse_config(text, origin='config'):
     """Parse del config globale → GlobalConfig. Errori fatali sempre (fail-fast).
 
     `source` è opzionale (nessuna riga → modalità auto-discovery da `$HOME`,
-    SPEC.md §6); `dest` è obbligatoria: è l'unico posto dove vivono le
-    destinazioni (SPEC.md §3)."""
+    SPEC.md §6); serve almeno una `dest:` **oppure** `s3_bucket` (dest
+    S3-compatible, SPEC.md §18 — backward compat: senza `s3_*` nulla cambia)."""
     cfg = GlobalConfig()
+    s3raw = {}                      # chiave → (valore, riga) del blocco s3_*
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = strip_comment(raw).strip()
         if not line:
@@ -137,6 +167,10 @@ def parse_config(text, origin='config'):
             if not val:
                 raise ConfigError(f'{origin}:{lineno}: dest vuota')
             cfg.dests.append(os.path.expanduser(val))
+        elif key.startswith('s3_'):
+            if key not in _S3_KEYS:
+                raise ConfigError(f'{origin}:{lineno}: chiave s3 sconosciuta: {key}')
+            s3raw[key] = (val, lineno)   # ultima occorrenza vince (come layout)
         elif key == 'layout':
             if val not in ('relative', 'full'):
                 raise ConfigError(f'{origin}:{lineno}: layout non valido: {val!r} (relative|full)')
@@ -155,10 +189,86 @@ def parse_config(text, origin='config'):
             cfg.log_level = val
         else:
             raise ConfigError(f'{origin}:{lineno}: chiave sconosciuta: {key}')
-    if not cfg.dests:
+    cfg.s3 = _build_s3(s3raw, origin)
+    if not cfg.dests and (cfg.s3 is None or not cfg.s3.bucket):
         raise ConfigError(f'{origin}: nessuna dest: serve almeno una riga '
-                          f'`dest: <path>` (esempio: examples/safekeep.example)')
+                          f'`dest: <path>` oppure `s3_bucket: <nome>` '
+                          f'(esempio: examples/safekeep.example)')
     return cfg
+
+
+def _build_s3(raw, origin):
+    """Validazione fail-fast del blocco `s3_*` → S3Config (SPEC.md §18.1).
+
+    `raw` = {chiave: (valore, riga)}: ogni errore riporta origine e riga.
+    Ritorna None se nessuna chiave `s3_*` presente (config solo-fs invariata).
+    """
+    if not raw:
+        return None
+
+    def err(key, detail):
+        # riga del campo mancante, altrimenti quella di s3_bucket (l'inizio
+        # del blocco incompleto), altrimenti la prima riga s3_* presente
+        entry = raw.get(key) or raw.get('s3_bucket') or next(iter(raw.values()))
+        raise ConfigError(f'{origin}:{entry[1]}: {detail}')
+
+    def get(key, default=''):
+        return raw[key][0] if key in raw else default
+
+    bucket = get('s3_bucket').strip()
+    if not bucket:
+        err('s3_bucket',
+            's3_bucket vuota o assente: serve `s3_bucket: <nome>` '
+            '(SPEC.md §18.1, almeno una dest: oppure s3_bucket)')
+    access = get('s3_access_key').strip()
+    if not access:
+        err('s3_access_key',
+            f's3_bucket senza s3_access_key: serve `s3_access_key: <chiave>` '
+            f'(bucket {bucket!r})')
+    secret, env = get('s3_secret_key'), get('s3_secret_key_env').strip()
+    if secret and env:
+        err('s3_secret_key',
+            's3_secret_key e s3_secret_key_env insieme: ne va scelta una sola '
+            '(SPEC.md §18.4)')
+    if not secret and not env:
+        err('s3_secret_key',
+            's3_bucket senza credenziali: serve `s3_secret_key: <secret>` '
+            '(chmod 600 il config) oppure `s3_secret_key_env: <NOME_VAR>`')
+    if env:
+        secret = os.environ.get(env)
+        if secret is None:
+            err('s3_secret_key_env',
+                f's3_secret_key_env: variabile d\'ambiente {env!r} assente')
+    prefix = get('s3_prefix').strip().strip('/')
+    if '..' in prefix.split('/'):
+        err('s3_prefix', f's3_prefix con "..": {get("s3_prefix")!r} non è ammesso')
+    addressing = get('s3_addressing', 'path').strip()
+    if addressing not in ('path', 'virtual'):
+        err('s3_addressing',
+            f's3_addressing non valido: {addressing!r} (path|virtual)')
+    tls = get('s3_tls_check', 'true').strip()
+    if tls not in ('true', 'false'):
+        err('s3_tls_check', f's3_tls_check non valido: {tls!r} (true|false)')
+    endpoint = get('s3_endpoint').strip()
+    if endpoint and not endpoint.startswith(('http://', 'https://')):
+        err('s3_endpoint',
+            f's3_endpoint senza scheme http(s): {endpoint!r} '
+            f'(esempio: https://s3.example.com:443)')
+    if endpoint.startswith('http://'):
+        log.warning('%s:%d: s3_endpoint cleartext %s: il secret e i dati '
+                    'viaggiano in chiaro — usa https:// (SPEC.md §18.1)',
+                    origin, raw['s3_endpoint'][1], endpoint)
+    return S3Config(
+        endpoint=endpoint or None,
+        bucket=bucket,
+        prefix=prefix,
+        region=get('s3_region').strip() or 'us-east-1',
+        access_key=access,
+        secret_key=secret,
+        secret_env=env or None,
+        addressing=addressing,
+        tls_check=(tls == 'true'),
+    )
 
 
 def source_root_for(sources, path):

@@ -35,6 +35,7 @@ from .copier import (
 )
 from .matcher import BUILTIN_RULES, Matcher, _glob, parse_rule
 from .platform import LOG_PATH, fswatch_monitor, init_system
+from .s3dest import S3Destination, secret_perms_insecure
 from .volumes import backoff_schedule, dest_state, partition_dests
 
 log = logging.getLogger('safekeep')
@@ -301,6 +302,9 @@ class Daemon:
         self.argv = argv                 # override per i test (fswatch finto)
         self.clock = clock
         self.cfg = None
+        self.s3 = None                  # S3Destination | None (SPEC.md §18)
+        self.s3_secret_perms_bad = False    # secret inline con perms > 0600
+        self._s3_perms_warned = False       # warning una-tantum già emesso
         self.projects = []
         self.proc = None
         self.buf = b''                   # residuo del parser a metà path
@@ -325,7 +329,26 @@ class Daemon:
             # il config globale è comunque un file letto da disco: fallisce pulito (CR-03)
             raise ConfigError(f'{self.config_path}: non è UTF-8 valido: {e}') from None
         self.cfg = parse_config(text, origin=self.config_path)
+        # dest S3 (SPEC §18): S3ExtraMissing(ConfigError) se manca l'extra,
+        # e controllo chmod 600 del secret inline (§18.4 — il warning
+        # runtime va emesso DOPO setup_logging, vedi log_s3_secret_perms)
+        self.s3 = S3Destination(self.cfg.s3) if self.cfg.s3 else None
+        self.s3_secret_perms_bad = (
+            self.s3 is not None
+            and secret_perms_insecure(self.config_path, self.cfg.s3))
         return self.cfg
+
+    def log_s3_secret_perms(self):
+        """Warning una-tantum se `s3_secret_key` inline è leggibile da altri
+        utenti (permessi del config > 0600, SPEC.md §18.4).
+
+        Va chiamato DOPO `setup_logging`: prima dell'init degli handler il
+        logger ha solo il NullHandler del package e il warning sparirebbe."""
+        if self.s3_secret_perms_bad and not self._s3_perms_warned:
+            self._s3_perms_warned = True
+            log.warning('s3_secret_key in %s con permessi > 0600: il secret '
+                        'è leggibile da altri utenti — rimedio: chmod 600 %s',
+                        self.config_path, self.config_path)
 
     def validate_dests(self):
         """CR-02: dest dentro la sorgente → ConfigError, subito (SPEC.md §11/§12).
@@ -359,7 +382,8 @@ class Daemon:
 
     def reconcile(self, project):
         """Walk + copie su ogni dest pronta (§10.1); dest assente o con errore
-        di mount → pending con backoff (§8.3, CR-05)."""
+        di mount → pending con backoff (§8.3, CR-05). La dest S3 (§18) segue
+        lo stesso percorso: HeadBucket offline o errore di rete → pending."""
         ready, absent = partition_dests(self.cfg.dests)
         for dest in absent:
             self.mark_pending(project, dest)
@@ -379,12 +403,33 @@ class Daemon:
                 # ENODEV/EBUSY/ENOSPC: questa dest va in pending, le altre
                 # proseguono (il detail è già stato loggato dal copier)
                 self.mark_pending(project, dest)
+        if self.s3 is not None:
+            if self.s3.state() != 'ok':
+                self.mark_pending(project, self.s3.root)   # offline → §8.3
+            else:
+                stats = {}
+                try:
+                    copied += reconcile_project(
+                        project.root, self.s3.root, project.matcher,
+                        self.cfg.layout, self.s3.dest_path, stats=stats,
+                        dest_base=project.source_root,
+                        copy_fn=self.s3.copy, needs_copy_fn=self.s3.needs_copy)
+                except OSError as e:
+                    # errore di rete nato a metà walk (ENODEV → pending) oppure
+                    # auth/richiesta (EACCES → solo log): mai crash del daemon
+                    log.warning('reconcile %s → %s fallito: %s',
+                                project.name, self.s3.root, e)
+                    self.mark_pending(project, self.s3.root)
+                else:
+                    if stats.get('dest_pendente'):
+                        self.mark_pending(project, self.s3.root)
         return copied
 
     def sync_once(self, dry_run=False, only=None, prune=False):
         """Passaggio singolo per la CLI: [(project, stats, dest_assenti)].
         `prune=True` rimuove dalla dest i file non più inclusi con sorgente
-        ancora presente (`--prune`, SPEC.md §9)."""
+        ancora presente (`--prune`, SPEC.md §9): **solo sulle dest fs** —
+        la dest S3 non viene mai toccata (§18.2, nessuna cancellazione)."""
         only_abs = os.path.realpath(os.path.expanduser(only)) if only else None
         rows = []
         for project in self.projects:
@@ -404,6 +449,18 @@ class Daemon:
                     stats['rimossi'] = stats.get('rimossi', 0) + prune_project(
                         project.root, dest, project.matcher, self.cfg.layout,
                         dest_path, dest_base=project.source_root, dry_run=dry_run)
+            if self.s3 is not None:
+                try:
+                    reconcile_project(
+                        project.root, self.s3.root, project.matcher,
+                        self.cfg.layout, self.s3.dest_path,
+                        stats=stats, dry_run=dry_run,
+                        dest_base=project.source_root,
+                        copy_fn=self.s3.copy, needs_copy_fn=self.s3.needs_copy)
+                except OSError as e:
+                    log.warning('reconcile %s → %s fallito: %s',
+                                project.name, self.s3.root, e)
+                # nessun prune su S3 (SPEC §18.2): `--prune` tocca solo le dest fs
             rows.append((project, stats, len(absent)))
         return rows
 
@@ -414,6 +471,13 @@ class Daemon:
             entry = {'next': self.clock() + next(sched), 'sched': sched, 'projects': set()}
             self.pending[dest] = entry
         entry['projects'].add(project)
+
+    def dest_ready(self, dest) -> bool:
+        """Stato di una dest ai fini del retry pending (SPEC.md §8.3/§18.3):
+        fs → stat del mountpoint (`dest_state`), S3 → HeadBucket con cache 30s."""
+        if self.s3 is not None and dest == self.s3.root:
+            return self.s3.state() == 'ok'
+        return dest_state(dest) == 'ok'
 
     # --- fswatch ---------------------------------------------------------
 
@@ -525,10 +589,10 @@ class Daemon:
             self.reconcile_all()
         for dest in [d for d, e in self.pending.items() if now >= e['next']]:
             entry = self.pending[dest]
-            if dest_state(dest) != 'ok':
+            if not self.dest_ready(dest):
                 entry['next'] = now + next(entry['sched'])
                 continue
-            log.info('dest %s di nuovo montata: reconcile di %d progetto/i',
+            log.info('dest %s di nuovo pronta: reconcile di %d progetto/i',
                      dest, len(entry['projects']))
             del self.pending[dest]
             for project in entry['projects']:
@@ -641,6 +705,26 @@ class Daemon:
                     self.mark_pending(project, dest)
                 else:
                     log_copy_error(src, dst, e)
+        if self.s3 is not None:
+            # HeadBucket con cache 30s: offline → pending senza toccare la rete
+            # a ogni evento (SPEC §18.3)
+            if self.s3.state() != 'ok':
+                self.mark_pending(project, self.s3.root)
+                return
+            dst = self.s3.dest_path(self.s3.root, project.source_root, rel,
+                                    self.cfg.layout)
+            try:
+                if is_link_dir:
+                    self.s3.copy(src, dst)      # symlink: object zero-byte
+                elif self.s3.needs_copy(src, dst) and self.s3.copy(src, dst):
+                    log.debug('copiato %s → %s', src, dst)
+            except OSError as e:
+                if e.errno in MOUNT_ERRNOS:
+                    log.warning('errore di rete %s → %s: %s: dest S3 in pending',
+                                src, dst, e)
+                    self.mark_pending(project, self.s3.root)
+                else:
+                    log_copy_error(src, dst, e)
 
     def walk_dir(self, dirpath, project):
         """Mini-walk: i figli di una directory appena creata potrebbero non
@@ -684,6 +768,7 @@ class Daemon:
         try:
             self.load_config()
             setup_logging('debug' if verbose else self.cfg.log_level)
+            self.log_s3_secret_perms()    # §18.4: warning una-tantum, dopo gli handler
             self.validate_dests()         # CR-02: dest dentro source/$HOME → blocca
             roots, auto = self.discovery_roots()
             if auto:

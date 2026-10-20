@@ -31,13 +31,19 @@ Documentation: https://foxhound87.github.io/safekeep/
   `.sync` file can neither add nor remove destinations (a `dest:` line is an
   invalid line), so a repo cloned from a third party can't redirect the backup
   somewhere else.
+- **S3-compatible destination** (optional `safekeep[s3]` extra): one
+  S3-compatible bucket alongside the filesystem destinations — same
+  size/mtime idempotency, metadata-based, and **never deletes anything**
+  (`--prune` only touches filesystem destinations).
 
 ## Installation
 
 ```bash
-pipx install safekeep     # recommended for a CLI
+pipx install safekeep        # recommended for a CLI
+pipx install "safekeep[s3]"  # + S3-compatible destination (botocore)
 # or
 pip install safekeep
+pip install "safekeep[s3]"
 ```
 
 **Requirements**: macOS or Linux (POSIX with systemd), Python >= 3.9 and
@@ -145,6 +151,55 @@ Dry run first, then start the daemon:
 safekeep sync-once --dry-run   # prints what would be copied, copies nothing
 safekeep run                   # daemon: watch + copy (foreground)
 ```
+
+## S3-compatible destinations
+
+safekeep can push every project to **one S3-compatible bucket**
+(S3 = Simple Storage Service) in addition to (or instead of) the filesystem
+destinations. The client is [botocore](https://botocore.amazonaws.com/),
+installed via the optional extra — the core package stays stdlib-only:
+
+```bash
+pipx install "safekeep[s3]"
+```
+
+`~/.safekeep` (the `s3_*` keys are valid **only** in this file — a `.sync`
+can't add them; keep the file at `chmod 600`):
+
+```ini
+s3_endpoint: https://s3.example.com:443   # http:// → cleartext warning
+s3_bucket: my-backup-bucket               # at least one dest: OR s3_bucket:
+s3_prefix: safekeep                       # optional, no '..'
+s3_region: us-east-1                      # default
+s3_access_key: REPLACEME_ACCESS_KEY       # required when s3_bucket is set
+s3_secret_key: REPLACEME_SECRET_KEY       # chmod 600 — or use s3_secret_key_env:
+# s3_secret_key_env: SAFEKEEP_S3_SECRET   # secret from env, never in the file
+s3_addressing: path                       # path (default) | virtual
+s3_tls_check: true                        # false = self-signed certificates
+```
+
+Semantics (see [SPEC.md](SPEC.md) §18): upload-only with `needs_copy` based on
+object metadata (`x-amz-meta-mtime` in nanoseconds, `x-amz-meta-mode`,
+symlinks = zero-byte objects with `x-amz-meta-symlink`), same 1s mtime
+tolerance as filesystem destinations, network errors → `pending` with
+backoff, and **no deletions ever** — `--prune` never touches S3. A slow PUT
+blocks the single-process daemon until it times out (connect 10s / read 60s);
+that's an accepted v1 limitation.
+
+Compatible services:
+
+| Service | Example `s3_endpoint` | `s3_addressing` | Notes |
+|---|---|---|---|
+| MinIO (self-hosted) | `https://minio.example.com:9000` | `path` | SigV4 (Signature Version 4), any region |
+| Silo | `https://s3.example.com:443` | `path` | fork of MinIO — same settings |
+| Ceph RGW | `https://rgw.example.com` | `path` | S3-compatible API |
+| Wasabi | `https://s3.wasabisys.com` | `path` | region required, must match the bucket |
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | `virtual` | use an Application Key as access/secret |
+| AWS S3 | *(omit `s3_endpoint`)* | `virtual` | default endpoint, region must match |
+
+`safekeep status` shows the bucket as `[ok]`/`[offline]` (cached HeadBucket),
+and `safekeep doctor` reports credentials, file permissions and bucket
+reachability — all as **non-fatal** warnings.
 
 ## CLI commands
 

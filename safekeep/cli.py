@@ -31,6 +31,7 @@ from safekeep.platform import (
     systemd_user_available,
     wsl_distro,
 )
+from safekeep.s3dest import S3ExtraMissing, secret_perms_insecure
 from safekeep.volumes import dest_state
 
 # Radice del repo quando si gira da checkout; in un install pip punta altrove
@@ -60,7 +61,8 @@ def build_parser():
                       help='stampa cosa copierebbe, senza copiare')
     once.add_argument('--prune', action='store_true',
                       help='rimuove dalla dest i file il cui sorgente esiste ancora ma '
-                           'non è più incluso dal matcher (default: mai cancellare)')
+                           'non è più incluso dal matcher (default: mai cancellare; '
+                           'solo dest fs — la dest S3 non viene toccata, SPEC §18.2)')
     sub.add_parser('status', parents=[common],
                    help='config, progetti e stato delle dest — sola lettura')
     doc = sub.add_parser('doctor', parents=[common],
@@ -78,6 +80,7 @@ def cmd_sync_once(args):
     daemon = Daemon(args.config)
     daemon.load_config()
     setup_logging('debug' if args.v else daemon.cfg.log_level)
+    daemon.log_s3_secret_perms()          # §18.4: warning una-tantum, dopo gli handler
     daemon.validate_dests()               # CR-02: dest dentro source/$HOME → exit ≠ 0
     daemon.load_projects()
     rows = daemon.sync_once(dry_run=args.dry_run, only=args.project,
@@ -123,6 +126,11 @@ def cmd_status(args):
         print('progetto  nessuno (.sync non trovato)')
     for dest in daemon.cfg.dests:
         print(f'dest      {dest} [{dest_state(dest)}]')
+    if daemon.s3 is not None:
+        # HeadBucket con cache 30s (§18.3): ok/offline, senza toccare la
+        # config — `status` resta sola lettura
+        print(f's3        {daemon.s3.root} [{daemon.s3.state()}] '
+              f'— {daemon.s3.endpoint_label} (region {daemon.s3.cfg.region})')
     return 0
 
 
@@ -180,6 +188,7 @@ def cmd_doctor(args):
     cfg_path = os.path.expanduser(args.config or '~/.safekeep')
     cfg = None
     daemon = None
+    s3_missing = None
     if not os.path.exists(cfg_path):
         if os.path.exists(EXAMPLE):
             hint = f'creala: cp {EXAMPLE} {cfg_path}'
@@ -193,14 +202,23 @@ def cmd_doctor(args):
         try:
             daemon = Daemon(cfg_path)
             cfg = daemon.load_config()
+        except S3ExtraMissing as e:
+            # extra `safekeep[s3]` mancante: riga NON fatale con hint (§18).
+            # `load_config` ha già validato il resto → daemon/cfg restano
+            # utilizzabili per tutti gli altri check, solo senza dest S3.
+            cfg = daemon.cfg
+            s3_missing = e
         except ConfigError as e:
             daemon = None
             out(False, f'config non valida: {e}', is_fatal=True)
-        else:
-            # nessuna `source` → auto-discovery da $HOME: info, non warning (SPEC §6)
-            mode = (f'{len(cfg.sources)} source' if cfg.sources
-                    else f'auto-discovery da {os.path.expanduser("~")}')
-            out(True, f'config valida: {cfg_path} ({mode}, {len(cfg.dests)} dest)')
+
+    if cfg is not None:
+        # nessuna `source` → auto-discovery da $HOME: info, non warning (SPEC §6)
+        mode = (f'{len(cfg.sources)} source' if cfg.sources
+                else f'auto-discovery da {os.path.expanduser("~")}')
+        out(True, f'config valida: {cfg_path} ({mode}, {len(cfg.dests)} dest)')
+        if s3_missing is not None:
+            out(False, f'{s3_missing} — warning non fatale', is_fatal=False)
 
     if daemon is not None:
         # base = source, oppure $HOME in auto-mode: copre anche "dest dentro $HOME"
@@ -210,6 +228,37 @@ def cmd_doctor(args):
             out(False, str(e), is_fatal=True)
         else:
             out(True, 'dest non annidate nelle source/$HOME (nessun loop di copia)')
+
+    # --- dest S3 (SPEC.md §18): tutti check NON fatali ---------------------
+    if cfg is not None and cfg.s3 is not None:
+        s3 = cfg.s3
+        orig = (f'variabile d\'ambiente {s3.secret_env!r}' if s3.secret_env
+                else 'file di config')
+        out(True, f's3 credenziali risolte da {orig} (bucket {s3.bucket})')
+        if s3.secret_env:
+            out(True, f's3 secret non nel file (da {s3.secret_env}): '
+                      'chmod 600 non pertinente')
+        elif secret_perms_insecure(cfg_path, s3):
+            out(False, f's3_secret_key in {cfg_path} con permessi > 0600 — '
+                       f'remedio: chmod 600 {cfg_path} — warning non fatale')
+        else:
+            out(True, f's3_secret_key: permessi del config ≤ 0600')
+        if s3.endpoint and s3.endpoint.startswith('http://'):
+            out(False, f's3 endpoint cleartext {s3.endpoint}: il secret e i '
+                       'dati viaggiano in chiaro — usa https:// — '
+                       'warning non fatale')
+        else:
+            out(True, f's3 endpoint: {s3.endpoint or "AWS default"} '
+                      f'(region {s3.region}, addressing {s3.addressing})')
+    if daemon is not None and daemon.s3 is not None:
+        # extra installato: HeadBucket con cache 30s (§18.3)
+        state = daemon.s3.state()
+        if state == 'ok':
+            out(True, f's3 HeadBucket {daemon.s3.root}: ok')
+        else:
+            out(False, f's3 HeadBucket {daemon.s3.root}: offline — endpoint '
+                       f'{daemon.s3.endpoint_label} non raggiungibile — '
+                       'warning non fatale')
 
     if daemon is not None:
         total, broken, discarded = check_sync_files(daemon)

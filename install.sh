@@ -67,6 +67,9 @@ if [ ! -f "$HOME/.safekeep" ]; then
     cp "$REPO/examples/safekeep.example" "$HOME/.safekeep"
     echo "→ creata $HOME/.safekeep (da examples/safekeep.example)"
 fi
+# il config può contenere `s3_secret_key`: permessi stretti sempre (SPEC §18.4,
+# lo stesso controllo di `doctor` e il warning runtime a runtime)
+chmod 600 "$HOME/.safekeep"
 
 # --- agent trend (SPEC §9.2): render + bootstrap, daemon principale intatto ---
 if [ "$TREND" = 1 ]; then
