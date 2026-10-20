@@ -118,7 +118,7 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 | Chiave | Tipo | Default | Descrizione |
 |---|---|---|---|
 | `source` | path (ripetibile) | **opzionale** | radici da osservare; ogni radice è una "sorgente"; assente → **modalità auto-discovery** da `$HOME` (vedi §6); dir senza `.sync` = **non seguita** (vedi §4.1) |
-| `dest` | path (ripetibile) | **obbligatoria** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11) |
+| `dest` | path (ripetibile) | **obbligatoria\*** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11); \* serve **almeno una `dest:` oppure `s3_bucket:`** (dest S3-compatible, §18) |
 | `layout` | `relative` \| `full` | `relative` | layout dei path di destinazione (vedi nota sotto) |
 | `defaults` | lista regole | builtin | regole di default a **bassa priorità** (sotto le regole globali e sotto `.sync`) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | livello di log su stderr + file di log |
@@ -132,8 +132,10 @@ Note:
   - **auto-discovery** (nessuna riga `source:`): watch root = `$HOME`, scan di
     discovery alla ricerca dei `.sync`, `.sync` creato dopo l'avvio agganciato
     da solo (vedi §6). Una config senza `source` **non** è un errore.
-- **`dest` è obbligatoria**: nessuna riga `dest:` → `ConfigError` con hint
-  (le destinazioni vivono solo qui, §4.2). Nessuna `source` invece non è un errore.
+- **`dest` è obbligatoria** (a meno che non sia configurata una dest S3:
+  `s3_bucket`, §18): nessuna riga `dest:` e nessun `s3_bucket` → `ConfigError`
+  con hint (le destinazioni vivono solo qui, §4.2). Nessuna `source` invece
+  non è un errore.
 - `defaults` accetta regole nella stessa sintassi di `include:`/`exclude:` di `.sync`,
   una per riga, oppure come righe multiple con la stessa chiave.
 - Questo file è **fail-fast**: chiave ignota o riga invalida → `ConfigError` con numero di
@@ -1221,6 +1223,15 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   (**ERE**, Extended Regular Expressions) con test di regressione, e §6.4/§14.2
   documentano il requisito — le regex servono a descrivere gruppi/alternanze su
   path reali, spazi compresi (`VAULT CLA/`).
+- **0.6.0** — destinazione **S3-compatible** (Simple Storage Service) — §18:
+  chiavi `s3_*` in `~/.safekeep` (almeno una `dest:` **oppure** `s3_bucket`),
+  client **botocore** via extra `safekeep[s3]` con import lazy (runtime
+  stdlib-only invariato), upload + `needs_copy` via metadata
+  (`x-amz-meta-mtime` ns, `x-amz-meta-mode`, symlink = object zero-byte con
+  `x-amz-meta-symlink`), errori di rete → pending/backoff §8.3, `status` e
+  `doctor` con righe dedicate (tutte non fatali), secret con enforcement
+  `chmod 600` + fallback `s3_secret_key_env`. **NO prune/cancellazioni su
+  S3, NO versioning**; `--prune` tocca solo le dest fs.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
@@ -1282,3 +1293,107 @@ Nessuno dei tre è fatale: `doctor` esce 0 anche su WSL1 senza systemd.
   E2E su WSL no.
 - Eventi su `/mnt/*` (drvfs/9p) e fswatch su WSL: non documentati qui, da
   verificare quando ci sarà una macchina WSL.
+
+---
+
+## 18. Destinazione S3-compatible (0.6.0)
+
+Una **sola** destinazione S3-compatible (S3 = Simple Storage Service),
+affiancata alle dest filesystem: le `dest:` restano come sono, le chiavi
+`s3_*` vivono **solo** in `~/.safekeep` (un `.sync` non può aggiungerle:
+`_KEY_SHAPE` le classifica righe invalide, §4.2/§11).
+
+### 18.1 Schema chiavi (`~/.safekeep`)
+
+| Chiave | Tipo | Default | Descrizione |
+|---|---|---|---|
+| `s3_endpoint` | URL `http(s)://host[:porta]` | endpoint AWS | endpoint del servizio; **obbligatorio di fatto** per servizi self-hosted |
+| `s3_bucket` | nome bucket | — | con `s3_bucket` presente serve **almeno una `dest:` oppure** `s3_bucket` (backward compat) |
+| `s3_prefix` | path piatto | vuoto | prefisso dentro il bucket, normalizzato (niente `/` iniziale/finali); **`..` → errore** |
+| `s3_region` | stringa | `us-east-1` | regione (MinIO/Silo: libera) |
+| `s3_access_key` | stringa | — | **obbligatorio** quando `s3_bucket` presente |
+| `s3_secret_key` | stringa | — | XOR con `s3_secret_key_env`; il file deve essere `chmod 600` (§18.4) |
+| `s3_secret_key_env` | nome variabile d'env | — | secret letto da una variabile d'ambiente; **assente → errore a parse-time** |
+| `s3_addressing` | `path` \| `virtual` | `path` | stile di indirizzamento; `path` per endpoint custom |
+| `s3_tls_check` | `true` \| `false` | `true` | `false` = accetta certificati self-signed (off topic: disabilita solo la verifica, `http://` resta cleartext) |
+
+Client: **botocore** (non boto3) tramite l'extra
+`pipx install "safekeep[s3]"` (`[project.optional-dependencies] s3 =
+["botocore>=1.31,<2"]`), import **lazy** in `safekeep/s3dest.py`: senza
+extra, una config `s3_*` produce `ConfigError` fail-fast con hint
+(`run`/`sync-once`/`status` escono ≠ 0; in `doctor` è una riga **non
+fatale**, §9.2). Il runtime senza `s3_*` resta stdlib-only.
+
+Validazioni fail-fast in `parse_config` (con numero di riga): bucket senza
+`s3_access_key`; `s3_secret_key` **e** `s3_secret_key_env` insieme; entrambi
+assenti; env richiamata ma inesistente; chiave `s3_*` ignota; `s3_prefix`
+con `..`; enum invalidi. Endpoint `http://` → **warning cleartext** (non
+fatale). In assenza di `s3_bucket` il requisito storico "almeno una `dest:`"
+resta invariato.
+
+### 18.2 Mapping semantica
+
+- **Key** = `s3_prefix` normalizzato + path dest calcolato col `layout`
+  globale (`relative`/`full`, §3) con separatori `/` — stesso identico
+  calcolo delle dest fs (`dest_path`), così un oggetto e il suo omologo su
+  disco stanno nello stesso "luogo" logico.
+- **`needs_copy`** = `HeadObject`: oggetto assente → copia; altrimenti
+  (size, mtime) — mtime salvato come `x-amz-meta-mtime` in **nanosecondi**,
+  tolleranza 1s (`MTIME_TOLERANCE`, §7.1) → stessa semantica idempotente
+  delle dest fs. Metadata `x-amz-meta-mode` = `oct(st_mode)`.
+- **Symlink** = object a **zero byte** con `x-amz-meta-symlink` = target
+  (mai seguito, §7.3): `needs_copy` confronta il target.
+- **Upload** = `put_object` con `Body` = file aperto in streaming e i
+  metadata; nessuna writer di destinazione: niente tmp, niente replace —
+  un PUT object è di per sé atomico (lo scritto parziale non diventa mai
+  l'oggetto "giusto" con metadata validi, e al prossimo reconcile
+  size/mtime divergenti rilanciano la copia).
+- **Stability check** invariato (§7.1): due stat prima dell'upload.
+- **Mai cancellare**: **nessuna DeleteObject**, nessuna list-then-prune:
+  `--prune` tocca **solo** le dest fs (§9). **Nessun versioning** del
+  bucket richiesto né gestito.
+
+### 18.3 Errori di rete → pending
+
+`safekeep/s3dest.py` rilancia gli errori botocore come `OSError`:
+
+| Eccezione botocore | errno | Effetto |
+|---|---|---|
+| timeout connessione/lettura, DNS (Domain Name System), endpoint irraggiungibile, 5xx, throttling/`SlowDown` | `ENODEV` | **pending + backoff** §8.3 (stesso percorso di un mount sparito) |
+| 403/400 (credenziali errate, richiesta malformata) | `EACCES` | solo log (throttled §10.1), **non** pending: al prossimo reconcile ritenta |
+
+`state()` = `HeadBucket` con **cache 30s** (`ok`/`offline`): `status` lo
+mostra, `doctor` lo usa come check non fatale, il retry dei pending lo usa
+come "il mount è tornato?".
+
+### 18.4 Sicurezza credenziali
+
+- `s3_secret_key` inline nel file: `Daemon.load_config()` controlla i
+  permessi; se > 0600 → **warning runtime una-tantum** (emesso dopo
+  l'init del logging) + riga `doctor` **non fatale** con remediation
+  `chmod 600 ~/.safekeep`.
+- Alternativa senza secret nel file: `s3_secret_key_env: NOME_VAR`
+  (la variabile va nell'ambiente dell'agent: `launchd`/`systemd`).
+- I log contengono solo endpoint/bucket/key mai la secret (§11).
+
+### 18.5 Vincoli dichiarati
+
+- **Single-process**: nessun thread propri — un PUT lento (o un HeadObject
+  lento) blocca il loop del daemon per la durata del transfer, con il timeout
+  botocore come tetto (connect 10s / read 60s, retry limitati). Accettabile
+  in v1; se non lo fosse, il rimedio è un processo dedicato (decisione
+  aperta, §15).
+- **Upload senza multipart**: un singolo `put_object` in streaming (botocore
+  legge il file a chunk, niente caricamento in RAM). Il multipart del
+  `TransferManager` **non** esiste in botocore puro (vive in `s3transfer`):
+  per non aggiungere dipendenze oltre a botocore l'extra resta
+  `safekeep[s3] = botocore` e il tetto dichiarato è il limite di un singolo
+  PUT (~5 GB su MinIO/Silo, 5 GB su AWS S3) — oltre, `EntityTooLarge` → log
+  non fatale. Se serviranno file più grossi: extra `s3transfer` col
+  TransferManager (i suoi thread vivono solo durante l'upload).
+- Una sola dest S3 per config.
+- **Silo** (endpoint self-hosted, hostname privato — mai in repo) è un
+  **fork di MinIO**: SigV4
+  (Signature Version 4), path-style, regione libera → nessun fallback o
+  workaround proprietario è necessario; lo stesso client copre anche MinIO
+  self-hosted, Ceph RGW, Wasabi, Backblaze B2 (compat S3) e AWS S3.

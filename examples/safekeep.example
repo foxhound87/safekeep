@@ -3,7 +3,8 @@
 # Percorso: ~/.safekeep   (file singolo nella home, niente ~/.config/…)
 # Sintassi: chiave: valore (una per riga), commenti con #, righe vuote ignorate.
 # Le chiavi `source` e `dest` sono RIPETIBILI: più righe = più valori.
-# `dest` è OBBLIGATORIA, `source` è opzionale (vedi sopra le due modalità).
+# `dest` è OBBLIGATORIA a meno che non sia configurato `s3_bucket` (dest
+# S3-compatible, SPEC.md §18), `source` è opzionale (vedi sopra le modalità).
 # I .sync dei progetti NON possono aggiungere o rimuovere destinazioni (SPEC.md §11).
 
 # --- Sorgenti (radici da osservare) — OPZIONALE ------------------------
@@ -26,6 +27,31 @@
 # backoff sullo stat del mountpoint, poi sync al remount.
 dest: /Volumes/BackupUSB/backup
 dest: /Volumes/NAS/generale
+
+# --- Destinazione S3-compatible (OPZIONALE, SPEC.md §18) ----------------
+# UNA sola dest S3, affiancata alle `dest:` sopra — oppure AL POSTO di esse
+# (senza nessuna `dest:`, serve almeno `s3_bucket:`). I .sync NON possono
+# aggiungere chiavi s3_*: vivono solo in QUESTO file.
+# Client: botocore via extra —  pipx install "safekeep[s3]"
+# (senza extra, una config s3_* esce con errore e hint: fail-fast)
+# Le CHIAVI E IL SECRET VANNO SOSTITUITI: placeholder, mai valori reali
+# (il file va tenuto con permessi stretti: chmod 600 ~/.safekeep).
+#
+# s3_endpoint: https://s3.example.com:443     # http:// → warning cleartext
+# s3_bucket: my-backup-bucket                 # obbligatorio
+# s3_prefix: safekeep                         # opzionale, no '..'
+# s3_region: us-east-1                        # default us-east-1
+# s3_access_key: REPLACEME_ACCESS_KEY         # obbligatorio
+# s3_secret_key: REPLACEME_SECRET_KEY         # XOR s3_secret_key_env (chmod 600!)
+# # alternativa senza secret nel file (serve la variabile nell'ambiente
+# # dell'agent launchd/systemd):
+# # s3_secret_key_env: SAFEKEEP_S3_SECRET
+# s3_addressing: path                         # path (default) | virtual
+# s3_tls_check: true                          # false = certificati self-signed
+#
+# Semantica: upload + needs_copy via metadata (mtime ns, mode, symlink),
+# MAI cancellazioni — `--prune` tocca solo le dest filesystem.
+# Silo/MinIO/Ceph/Wasabi/B2/AWS: path-style + SIGV4, vedi README e SPEC §18.
 
 # --- Layout dei path in destinazione --------------------------------
 # relative (default): <dest>/<path relativo alla radice sorgente>
@@ -51,9 +77,12 @@ defaults: exclude: *.log
 defaults: exclude: .cache/
 
 # --- Sicurezza ------------------------------------------------------
-# Non esiste nessuna chiave di sicurezza legata alle destinazioni: i file
-# `.sync` dei progetti contengono SOLO regole include/exclude — una riga
-# `dest:` (o `-dest:`) in un `.sync` è una riga invalida e viene rifiutata.
+# L'unica chiave di sicurezza di destinazione è `s3_secret_key` (solo se
+# usi la dest S3) e sta SOLO in QUESTO file: va tenuto con chmod 600 —
+# meglio ancora `s3_secret_key_env` (variabile d'ambiente, niente secret
+# nel file). I file `.sync` dei progetti contengono SOLO regole
+# include/exclude — una riga `dest:` (o `s3_*`) in un `.sync` è una riga
+# invalida e viene rifiutata (SPEC.md §11/§18).
 # Chiave ignota in QUESTO file → errore fatale con numero di riga (fail-fast).
 
 # --- Logging --------------------------------------------------------

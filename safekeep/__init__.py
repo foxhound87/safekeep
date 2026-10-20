@@ -3,4 +3,4 @@ import logging
 
 logging.getLogger('safekeep').addHandler(logging.NullHandler())
 
-__version__ = '0.5.2'
+__version__ = '0.6.0'
