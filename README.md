@@ -127,7 +127,8 @@ exactly those entries, as always. Without it safekeep switches to
 **auto-discovery**: it scans `$HOME` for `.sync` files (skipping hidden
 directories, `Library`, `.Trash`, `.cache`, `node_modules`, `.git`, `.venv`,
 `__pycache__`, `venv`), watches `$HOME`, and picks up any `.sync` created after
-startup. `dest:` stays mandatory in both modes.
+startup. `dest:` stays mandatory in both modes — unless `s3_bucket:` is set
+(at least one of the two must be present).
 
 `~/Code/myapp/.sync` (rules only, no destinations):
 
