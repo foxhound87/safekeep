@@ -11,6 +11,8 @@
 Flusso: config temp col blocco `s3_*` → reconcile di un mini-progetto →
 HeadObject verifica key + metadata (mtime ns, mode, symlink) → secondo
 reconcile → 0 copie → file toccato → 1 copia.
+Secondo caso: file ~8 MB (os.urandom) → upload, HeadObject con
+ContentLength ≥ 8 MiB + metadata mtime → secondo reconcile → 0 copie.
 
 **NESSUNA DeleteObject**: il prefix è monouso (timestamp + pid), gli oggetti
 creati dal test restano nel bucket.
@@ -128,6 +130,27 @@ class S3IntegrazioneTest(unittest.TestCase):
         size, md = self.head('a.md')
         self.assertEqual(size, os.stat(src).st_size)
         self.assertEqual(int(md['mtime']), os.stat(src).st_mtime_ns)
+
+    def test_file_8mb_streaming_e_idempotenza(self):
+        # ~8 MB scritti al volo (binari, match `include: *.md`) → upload →
+        # HeadObject: ContentLength ≥ 8 MiB + metadata mtime → 0 copie
+        big = os.path.join(self.src, 'proj', 'big.md')
+        with open(big, 'wb') as f:
+            f.write(os.urandom(8 * 1024 * 1024))
+        st = os.stat(big)
+        self.assertGreaterEqual(st.st_size, 8 * 1024 * 1024)
+
+        stats = self.sync()
+        self.assertEqual(stats.get('copiati', 0), 4, stats)   # + big.md
+
+        size, md = self.head('big.md')
+        self.assertGreaterEqual(size, 8 * 1024 * 1024, 'ContentLength ≥ 8 MiB')
+        self.assertEqual(int(md['mtime']), st.st_mtime_ns)
+
+        # secondo reconcile: idempotenza anche sul file grande
+        stats = self.sync()
+        self.assertEqual(stats.get('copiati', 0), 0, stats)
+        self.assertEqual(stats.get('skippati', 0), 4, stats)
 
 
 if __name__ == '__main__':
