@@ -2,20 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  TEMPLATE safekeep — NON installare così com'è.
+  TEMPLATE safekeep (package data) — NON installare così com'è.
 
-  Placeholders resi da install.sh (mai path assoluti nel repo, così il repo
-  può essere spostato/rinominato senza rompere l'agent):
+  Renderizzato da `safekeep daemon install` (sorgente unica: safekeep/data/;
+  install.sh è solo un wrapper deprecato):
 
-    __REPO__    radice del repo safekeep (la cartella che contiene bin/ e launchd/)
-    __PYTHON__  interprete Python ≥ 3.9 (default: /usr/bin/python3 — shim di
-                sistema stabile, NON un path Cellar di Homebrew: SPEC.md §8.4)
-    __HOME__    $HOME dell'utente — launchd NON espande `~` negli StandardOut/ErrorPath
+    __EXEC__   shim assoluto `safekeep` sul PATH (shutil.which) → ExecStart
+               = `<shim> run`: nessun interprete nel template, lo shim
+               sopravvive a `pipx reinstall` (una sola sorgente di verità)
+    __HOME__   $HOME dell'utente — launchd NON espande `~` negli StandardOut/ErrorPath
+    __PATH__   dir dove risiede fswatch + path di sistema — launchd non eredita
+               il PATH di login, senza questo fswatch non viene trovato
 
-  Installazione manuale: sostituisci i tre placeholder e copia in
-  ~/Library/LaunchAgents/com.safekeep.agent.plist
   Validazione: plutil -lint <file>
-  Caricamento:  launchctl bootstrap gui/$(id -u) <file>
+  Caricamento: safekeep daemon start   (≡ launchctl bootstrap gui/$(id -u) <file>)
 -->
 <plist version="1.0">
 <dict>
@@ -24,8 +24,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>__PYTHON__</string>
-        <string>__REPO__/bin/safekeep.py</string>
+        <string>__EXEC__</string>
         <string>run</string>
     </array>
 
@@ -49,9 +48,6 @@
     <key>LowPriorityIO</key>
     <true/>
 
-    <!-- Opzionale: (ri)avvio quando un volume viene montato (SPEC.md §8.3) -->
-    <!-- <key>StartOnMount</key><true/> -->
-
     <!-- Log del daemon: ~/.local/state/safekeep/ (SPEC.md §8) -->
     <key>StandardOutPath</key>
     <string>__HOME__/.local/state/safekeep/out.log</string>
@@ -62,9 +58,14 @@
     <dict>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
-        <!-- fswatch (Homebrew) deve trovarsi nel PATH del processo -->
+        <!-- fswatch deve trovarsi nel PATH del processo -->
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>__PATH__</string>
+        <!-- s3_secret_key_env (SPEC §18): esponi la variabile d'ambiente
+             all'agent decommentando e sostituendo nome e valore:
+        <key>SAFEKEEP_S3_SECRET</key>
+        <string>REPLACEME</string>
+        -->
     </dict>
 </dict>
 </plist>

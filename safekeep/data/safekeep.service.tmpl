@@ -1,0 +1,47 @@
+# safekeep — user unit systemd (Linux/WSL2) — TEMPLATE (package data),
+# NON installare così com'è. Renderizzato da `safekeep daemon install`
+# (sorgente unica: safekeep/data/; install.sh è solo un wrapper deprecato).
+#
+#   __EXEC__   shim assoluto `safekeep` sul PATH (shutil.which) → ExecStart
+#              = `<shim> run`: nessun interprete nel template, lo shim
+#              sopravvive a `pipx reinstall`
+#   __PATH__   dir dove riside fswatch + path di sistema — l'unità non eredita
+#              il PATH di login, senza questo fswatch non viene trovato
+#
+# Installazione:   safekeep daemon install     (render + scrittura, idempotente)
+# Avvio:           safekeep daemon start       (≡ systemctl --user enable --now)
+# Stato:           safekeep daemon status      (o: systemctl --user status safekeep)
+# Log:             journalctl --user -u safekeep -f
+#                  (il log applicativo resta ~/.local/state/safekeep/, SPEC §3)
+# Scarica:         safekeep daemon uninstall   (≡ systemctl --user disable --now)
+# Boot SENZA login: loginctl enable-linger $USER
+#                  (o: safekeep daemon install --enable-linger)
+#
+# s3_secret_key_env (SPEC §18): per esporre la variabile d'ambiente
+# all'agent, decommenta e sostituisci nome e valore:
+#   Environment=SAFEKEEP_S3_SECRET=REPLACEME
+
+[Unit]
+Description=safekeep — event-driven backup daemon
+Documentation=https://foxhound87.github.io/safekeep/
+
+# launchd con KeepAlive ci riprova sempre: qui il rate-limit di default di
+# systemd (5 start in 10s -> unit in stato `failed` e nessun riavvio) andrebbe
+# contro lo stesso comportamento. Il pacing resta al daemon (MAX_DEATHS /
+# DEATH_WINDOW di SPEC.md §6).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=__EXEC__ run
+
+# ≈ KeepAlive: se il processo muore, systemd lo riavvia dopo 2s
+Restart=always
+RestartSec=2
+
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=__PATH__
+
+[Install]
+# ≈ RunAtLoad: avvio all'accesso utente (con linger: al boot)
+WantedBy=default.target
