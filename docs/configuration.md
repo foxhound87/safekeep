@@ -11,9 +11,10 @@ A single file in `$HOME` — no `~/.config/safekeep/…`. Syntax is
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `source` | path, repeatable | optional | roots to watch; a directory without a `.sync` is not followed |
-| `dest` | path, repeatable | **required** | destinations for every project |
+| `dest` | path, repeatable | **required**\* | destinations for every project (\*unless `s3_bucket:` is set — at least one `dest:` **or** `s3_bucket:`) |
 | `layout` | `relative` \| `full` | `relative` | destination path layout |
 | `defaults` | rule, repeatable | builtin | low-priority default rules |
+| `s3_*` | see [S3 destination](/s3) | absent | one optional S3-compatible bucket (needs the `safekeep[s3]` extra) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | log verbosity |
 
 This file is **fail-fast**: an unknown key or an invalid line is a
@@ -30,7 +31,8 @@ This file is **fail-fast**: an unknown key or an invalid line is a
   folders (`Desktop`, `Documents`, `Downloads`, `Movies`, `Music`, `Pictures`,
   `Public`). A `.sync` created after startup is picked up automatically.
 
-`dest:` is mandatory in both modes.
+`dest:` is mandatory in both modes — unless `s3_bucket:` is set (at least one
+`dest:` **or** `s3_bucket:` must be present, see [S3 destination](/s3)).
 
 ### Layout
 

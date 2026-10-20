@@ -16,6 +16,7 @@ export default defineConfig({
         { text: 'Install', link: '/install' },
         { text: 'Quickstart', link: '/quickstart' },
         { text: 'Configuration', link: '/configuration' },
+        { text: 'S3 destination', link: '/s3' },
         { text: 'Commands', link: '/commands' }
       ]
     },
@@ -29,6 +30,7 @@ export default defineConfig({
         { text: 'Install', link: '/install' },
         { text: 'Quickstart', link: '/quickstart' },
         { text: 'Configuration', link: '/configuration' },
+        { text: 'S3 destination', link: '/s3' },
         { text: 'Commands', link: '/commands' }
       ]
     },

@@ -23,7 +23,7 @@ log_level: info
 
 `source:` is optional; without it safekeep switches to
 [auto-discovery](/configuration#source-mode-vs-auto-discovery). `dest:` is
-mandatory.
+mandatory — unless `s3_bucket:` is set ([S3 destination](/s3)).
 
 ## 2. `<project>/.sync`
 

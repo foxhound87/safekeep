@@ -217,7 +217,8 @@ exits `0` with manual-start instructions instead of failing.
    ```
 
 3. Is a parent directory excluded? An excluded directory prunes its subtree.
-4. Is `dest:` set in `~/.safekeep`? It is mandatory.
+4. Is `dest:` set in `~/.safekeep`? At least one `dest:` **or** `s3_bucket:`
+   is mandatory.
 
 ## Logs
 

@@ -34,6 +34,11 @@ features:
       daemon if it dies.
   - title: Zero dependencies
     details: >
-      Pure Python standard library. The only external pieces are fswatch and the
-      OS init system — launchd on macOS, systemd on Linux.
+      The core is pure Python standard library — the only external pieces are fswatch
+      and the OS init system, launchd on macOS, systemd on Linux.
+  - title: S3-compatible destination
+    details: >
+      One S3-compatible bucket (MinIO, Silo, Ceph, Wasabi, Backblaze B2, AWS) alongside
+      the filesystem destinations, via an optional extra. Upload only, metadata-based
+      idempotency, and it never deletes anything.
 ---

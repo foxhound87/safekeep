@@ -31,6 +31,18 @@ pipx install safekeep
 pip install safekeep
 ```
 
+### Optional: S3-compatible destination
+
+The S3 client ([botocore](https://botocore.amazonaws.com/)) ships in an extra —
+the core package stays pure standard library:
+
+```bash
+pipx install "safekeep[s3]"     # or: pip install "safekeep[s3]"
+```
+
+Without it a config with `s3_*` keys fails fast with the install hint.
+Full reference: [S3 destination](/s3).
+
 ## Agent (launchd / systemd)
 
 The agent that runs the daemon at boot is installed from a checkout of the

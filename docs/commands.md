@@ -47,8 +47,10 @@ safekeep status
 ```
 
 Config path, mode (`source` / `$HOME` auto-discovery), sources, discovered
-projects with their rule count, and per-destination state (`ok`, `absent`,
-`pending`). Read-only, safe to run any time.
+projects with their rule count, per-destination state (`ok`, `absent`,
+`pending`) and, when configured, the S3 bucket
+(`s3://bucket/prefix [ok]` / `[offline]` — a cached HeadBucket, 30s).
+Read-only, safe to run any time.
 
 ## `doctor`
 
@@ -61,8 +63,10 @@ Checks at least: `fswatch` presence, version and the monitor for the platform
 syntax, that no destination is a subdirectory of a source (copy loop), python
 version, TCC + launchd plist lint and the live daemon's executable still on
 disk (macOS, 0.5.1), inotify watch limit + systemd user
-unit (Linux), and leftover `.safekeep.tmp.*` files. Exit `1` if a **fatal**
-check fails.
+unit (Linux), and leftover `.safekeep.tmp.*` files. With an S3 destination
+configured it also reports the credentials' origin, the config file
+permissions, cleartext endpoints and bucket reachability — all as
+**non-fatal** warnings. Exit `1` if a **fatal** check fails.
 
 Run it **after** granting Full Disk Access — see
 [Troubleshooting](/troubleshooting).
