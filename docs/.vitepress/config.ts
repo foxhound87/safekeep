@@ -1,9 +1,24 @@
 import { defineConfig } from 'vitepress'
 
+// Trailing slash required: the sitemap builder resolves each page's relative
+// URL against this hostname, and canonical URLs are derived from it too.
+const SITE_URL = 'https://foxhound87.github.io/safekeep/'
+
 export default defineConfig({
   base: '/safekeep/',
   title: 'safekeep',
   description: 'Event-driven selective file backup for macOS and Linux',
+
+  sitemap: { hostname: SITE_URL },
+
+  transformHead: ({ page, title, description }) => {
+    const url = SITE_URL + page.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '.html')
+    return [
+      ['link', { rel: 'canonical', href: url }],
+      ['meta', { property: 'og:title', content: title }],
+      ['meta', { property: 'og:description', content: description }]
+    ]
+  },
 
   markdown: {
     lineNumbers: true
