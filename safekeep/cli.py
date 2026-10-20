@@ -1,4 +1,4 @@
-"""CLI di safekeep: `run`, `sync-once`, `status` e `doctor` (SPEC.md §9).
+"""CLI di safekeep: `run`, `sync-once`, `status`, `doctor` e `daemon` (SPEC.md §9).
 
 Entry point del package (`safekeep.cli:main`): `bin/safekeep.py` è solo lo
 shim che usano launchd/systemd e i test.
@@ -13,6 +13,7 @@ import sys
 from datetime import datetime
 
 from safekeep import __version__
+from safekeep import daemonctl
 from safekeep.config import ConfigError, discover_projects, parse_sync
 from safekeep.copier import TMP_INFIX
 from safekeep.daemon import Daemon, setup_logging
@@ -34,10 +35,8 @@ from safekeep.platform import (
 from safekeep.s3dest import S3ExtraMissing, secret_perms_insecure
 from safekeep.volumes import dest_state
 
-# Radice del repo quando si gira da checkout; in un install pip punta altrove
-# (site-packages) e i riferimenti a file del repo degradano (vedi cmd_doctor).
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-EXAMPLE = os.path.join(REPO, 'examples', 'safekeep.example')
+# Repo upstream: solo nell'hint degradato di `cmd_doctor` quando l'esempio
+# embedded non fosse leggibile (install pip rotto — package data mancante).
 REPO_URL = 'https://github.com/foxhound87/safekeep'
 
 
@@ -73,6 +72,38 @@ def build_parser():
     doc.add_argument('--json', action='store_true',
                      help='stessi check, stesso exit code, ma un documento JSON su '
                           'stdout (SPEC.md §9.1)')
+    daem = sub.add_parser(
+        'daemon',
+        description="installa e gestisce l'agent di boot (launchd su macOS, "
+                    'systemd user su Linux/WSL2 con systemd-on) — ExecStart = '
+                    'shim `safekeep` sul PATH → `safekeep run`',
+        help="installa e gestisce l'agent di boot (launchd su macOS, systemd "
+             "user su Linux/WSL2) — ExecStart: safekeep run")
+    dsub = daem.add_subparsers(dest='daemon_cmd', required=True)
+    dinst = dsub.add_parser(
+        'install',
+        help='preflight (fswatch/shim/python/WSL-systemd) + render della unit da '
+             'template embedded + scrittura — idempotente, NON avvia')
+    dinst.add_argument('--enable-linger', action='store_true',
+                       help='Linux: esegue `loginctl enable-linger $USER` '
+                            '(default: solo hint — linger = unit user attive '
+                            'anche senza login)')
+    dinst.add_argument('--dry-run', action='store_true',
+                       help='mostra cosa installerebbe, senza scrivere nulla')
+    dsub.add_parser('start',
+                    help="carica e avvia l'agent (launchctl bootstrap / "
+                         'systemctl --user enable --now)')
+    dsub.add_parser('stop',
+                    help="ferma l'agent (launchctl bootout / "
+                         'systemctl --user disable --now)')
+    dsub.add_parser('status',
+                    help="stato dell'agent — sola lettura, exit 0 se in "
+                         'esecuzione, 1 altrimenti')
+    dun = dsub.add_parser('uninstall',
+                          help='rimuove la unit — ~/.safekeep e i log restano '
+                               'intatti')
+    dun.add_argument('--purge', action='store_true',
+                     help='rimuove anche ~/.safekeep e ~/.local/state/safekeep/')
     return parser
 
 
@@ -190,10 +221,13 @@ def cmd_doctor(args):
     daemon = None
     s3_missing = None
     if not os.path.exists(cfg_path):
-        if os.path.exists(EXAMPLE):
-            hint = f'creala: cp {EXAMPLE} {cfg_path}'
+        # Hint dall'example EMBEDDED (package data, task 4): un install pip non
+        # ha il repo → niente più "clone the repo"
+        embedded = daemonctl.example_path()
+        if os.path.exists(embedded):
+            hint = f'creala: cp {embedded} {cfg_path}'
         else:
-            # install pip: niente repo, niente esempi → hint degradato
+            # install rotto (niente package data): fallback minimo
             hint = (f'clone {REPO_URL} and copy examples/safekeep.example to '
                     f'{cfg_path}')
         out(False, f'config assente: {cfg_path} ({hint})',
@@ -377,7 +411,7 @@ def cmd_doctor(args):
             'residui *.safekeep.tmp.*: ' + ', '.join(residui))
 
     if is_darwin():
-        plist = os.path.expanduser('~/Library/LaunchAgents/com.safekeep.agent.plist')
+        plist = os.path.expanduser(daemonctl.PLIST_PATH)
         if not os.path.exists(plist):
             out(True, 'plist non installato (nessun agent da validare)')
         elif shutil.which('plutil') is None:
@@ -391,8 +425,9 @@ def cmd_doctor(args):
             except (OSError, subprocess.SubprocessError) as e:
                 out(False, f'plist lint non eseguibile: {e}', is_fatal=True)
     else:
-        # Linux: user unit systemd al posto del plist (SPEC.md §14.3)
-        unit = os.path.expanduser('~/.config/systemd/user/safekeep.service')
+        # Linux: user unit systemd al posto del plist (SPEC.md §14.3) — stesso
+        # path scritto da daemonctl (costanti condivise, task 4)
+        unit = os.path.expanduser(daemonctl.UNIT_PATH)
         if not os.path.exists(unit):
             out(True, 'unit systemd non installata (nessun agent da validare)')
         else:
@@ -402,9 +437,12 @@ def cmd_doctor(args):
             except (OSError, UnicodeError) as e:
                 out(False, f'unit systemd illeggibile: {unit}: {e}', is_fatal=True)
             else:
-                if '__REPO__' in text or '__PYTHON__' in text:
-                    out(False, f'unit systemd: {unit} contiene ancora i placeholder '
-                               'del template — rilancia install.sh', is_fatal=True)
+                residui = [p for p in daemonctl.PLACEHOLDERS if p in text]
+                if residui:
+                    out(False, f'unit systemd: {unit} contiene ancora i '
+                               f'placeholder del template '
+                               f'({", ".join(residui)}) — rilancia '
+                               f'safekeep daemon install', is_fatal=True)
                 else:
                     out(True, f'unit systemd: {unit}')
             # linger: solo dove la unit è installata (SPEC.md §14.4) — non fatale
@@ -453,9 +491,25 @@ def cmd_doctor(args):
     return code
 
 
+def cmd_daemon(args):
+    """Dispatch dei sottocomandi `safekeep daemon` (daemonctl, SPEC §14.3)."""
+    if args.daemon_cmd == 'install':
+        return daemonctl.install(enable_linger=args.enable_linger,
+                                 dry_run=args.dry_run)
+    if args.daemon_cmd == 'uninstall':
+        return daemonctl.uninstall(purge=args.purge)
+    if args.daemon_cmd == 'start':
+        return daemonctl.start()
+    if args.daemon_cmd == 'stop':
+        return daemonctl.stop()
+    return daemonctl.status()
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
+        if args.comando == 'daemon':
+            return cmd_daemon(args)
         if args.comando == 'run':
             return Daemon(args.config).run(verbose=args.v)
         if args.comando == 'status':

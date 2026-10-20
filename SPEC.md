@@ -483,7 +483,13 @@ rimane la fonte per il ramo macOS.
 
 ### 8.1 Plist completo
 
-`~/Library/LaunchAgents/com.safekeep.agent.plist`:
+**Template (0.7.0)**: `safekeep/data/com.safekeep.agent.plist.tmpl` — package
+data, sorgente unica; `safekeep daemon install` lo renderizza in
+`~/Library/LaunchAgents/com.safekeep.agent.plist` (§14.3). Placeholder:
+`__EXEC__` (shim assoluto `safekeep` sul PATH), `__HOME__`, `__PATH__`
+(dir dove riside fswatch + path di sistema — launchd non eredita il PATH di
+login). **Nessun interprete nel template**: `ProgramArguments` è lo shim →
+`run` (vedi §8.4).
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -496,8 +502,7 @@ rimane la fonte per il ramo macOS.
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>/Users/REPLACEME/safekeep/bin/safekeep.py</string>
+        <string>__EXEC__</string>
         <string>run</string>
     </array>
 
@@ -509,24 +514,41 @@ rimane la fonte per il ramo macOS.
     <key>KeepAlive</key>
     <true/>
 
-    <!-- Opzionale: (ri)avvio quando un volume viene montato (vedi §8.3) -->
-    <!-- <key>StartOnMount</key><true/> -->
+    <!-- Niente restart-loop frenetico: al massimo un riavvio ogni 30s -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
 
+    <!-- Background: non compete con l'interfaccia (CPU) -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- ...né con altre operazioni di I/O -->
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- Log del daemon: ~/.local/state/safekeep/ (§3) — launchd NON espande ~ -->
     <key>StandardOutPath</key>
-    <string>/tmp/safekeep.out.log</string>
+    <string>__HOME__/.local/state/safekeep/out.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/safekeep.err.log</string>
+    <string>__HOME__/.local/state/safekeep/err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <!-- fswatch deve trovarsi nel PATH del processo -->
+        <key>PATH</key>
+        <string>__PATH__</string>
+        <!-- s3_secret_key_env (§18): decommenta per esporre la variabile -->
+        <!-- <key>SAFEKEEP_S3_SECRET</key><string>REPLACEME</string> -->
     </dict>
 </dict>
 </plist>
 ```
 
-Validazione: `plutil -lint ~/Library/LaunchAgents/com.safekeep.agent.plist`.
+Validazione: `plutil -lint ~/Library/LaunchAgents/com.safekeep.agent.plist`
+(eseguita dal comando `daemon install` stesso). Opzione `StartOnMount`
+commentata non inclusa nel template: vedi §8.3.
 
 ### 8.2 Comandi di reload
 
@@ -587,6 +609,15 @@ già l'interprete che §11 raccomanda per il consenso FDA), validato **≥ 3.9**
 alimenta `SAFEKEEP_PYTHON` del plist trend (§9.2), quindi **entrambi** gli agent sono
 coperti dalla stessa scelta.
 
+**0.7.0 — l'interprete esce dal plist principale**: il rendering è passato a
+`safekeep daemon install` (§14.3) e `ProgramArguments` è ora **lo shim `safekeep`
+(`__EXEC__`) → `run`** (§8.1): il plist non nomina più nessun interprete, quindi
+la classe "exe sparito sotto un processo vivo" non si applica più all'agent
+principale (lo shim console-script di pipx è uno shebang che sopravvive a
+`pipx reinstall`; TCC guarda il processo, che resta identificabile). `__PYTHON__`
+resta in uso **solo** per l'agent trend (`install.sh --trend`, §9.2, fuori scope
+di `safekeep daemon`) — lì la scelta 0.5.1 continua a valere.
+
 Soluzioni valutate:
 
 - **(a) shim di sistema** — **scelta**. L'exe su cui gira il daemon non può essere
@@ -603,21 +634,25 @@ richiede i CLT: senza, l'esecuzione mostra il prompt d'installazione. Mitigazion
 `install.sh` validerebbe comunque l'interprete eseguendolo (shim che non risponde →
 fallback `command -v python3`, comportamento pre-0.5.1) e Homebrew presente implica quasi
 certamente CLT (verificato in locale: `xcode-select -p` → Xcode.app; `/usr/bin/python3` →
-3.9.6; la suite è verde anche girata con quell'interprete).
+3.9.6; la suite è verde anche girata con quell'interprete). **Nota 0.7.0**: questo
+paragrafo riguarda ora **solo l'agent trend** (`__PYTHON__`, §9.2) — il plist
+principale non nomina più interprete (§8.1).
 
 **Plist live già installati:** launchd **non rilegge** il file fino a `bootout`+`bootstrap`
 (o reboot): i plist renderizzati col vecchio default restano fragili finché non vengono
-re-renderizzati. `install.sh` è idempotente; re-render + ricarica:
+re-renderizzati. `safekeep daemon install` è idempotente (sostituisce anche unit con
+placeholder residui, con riga informativa); re-render + ricarica:
 
 ```bash
-./install.sh            # re-render del plist principale (idempotente, non riparte da solo)
-launchctl bootout gui/$(id -u)/com.safekeep.agent 2>/dev/null
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
-./install.sh --trend    # stesso trattamento per l'agent trend (fa da solo bootout+bootstrap)
+safekeep daemon install  # re-render del plist (idempotente, non avvia)
+safekeep daemon stop     # bootout se caricato (exit 1 se non lo era — ok)
+safekeep daemon start    # bootstrap + avvio
+./install.sh --trend    # trattamento trend invariato (legacy, §9.2)
 ```
 
-Verifica: `ps -p <pid> -o comm=` deve mostrare `/usr/bin/python3` (exe esistente su disco)
-e `launchctl print gui/$(id -u)/com.safekeep.agent | grep -E 'state|program'`.
+Verifica: `ps -p <pid> -o comm=` deve mostrare un exe **esistente su disco**
+(la process image dello shim → python del venv pipx) e
+`launchctl print gui/$(id -u)/com.safekeep.agent | grep -E 'state|program'`.
 
 ---
 
@@ -633,6 +668,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
 | `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC, lint plist ed eseguibile del processo ancora su disco (solo macOS, §14.4), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
+| `daemon {install,start,stop,status,uninstall}` | gestione dell'agent di boot (§14.3): `install [--enable-linger] [--dry-run]` preflight + render della unit da template embedded (idempotente, non avvia); `start`/`stop` caricano/scaricano la unit; `status` = sola lettura; `uninstall [--purge]` rimuove la unit (`--purge` toglie anche `~/.safekeep` e i log) | 0 se tutto ok; 1 se il preflight fallisce, la unit non è installata (`start`/`status`) o l'agent non è in esecuzione (`status`) |
 
 `sync-once --prune` è l'unica opzione che **cancella**: rimuove dalla dest i file il cui
 sorgente esiste ancora ma che il matcher ora esclude (regole cambiate), solo sotto il
@@ -981,17 +1017,32 @@ fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>
 | | Darwin | Linux |
 |---|---|---|
 | init system | `launchd` | `systemd` (**user unit**, niente root) |
-| template | `launchd/com.safekeep.agent.plist` | `systemd/safekeep.service` |
+| template (package data, 0.7.0) | `safekeep/data/com.safekeep.agent.plist.tmpl` | `safekeep/data/safekeep.service.tmpl` |
 | installato in | `~/Library/LaunchAgents/com.safekeep.agent.plist` | `~/.config/systemd/user/safekeep.service` |
+| installazione | **`safekeep daemon install`** — preflight + render + scrittura, idempotente, **non avvia** | (identico: stesso comando, ramo per piattaforma) |
 | avvio al boot | `RunAtLoad` | `WantedBy=default.target` |
 | tenerlo vivo | `KeepAlive` (+ `ThrottleInterval` 30s) | `Restart=always` + `RestartSec=2` + `StartLimitIntervalSec=0` |
 | stdout/stderr | file in `~/.local/state/safekeep/` | journal di systemd (`journalctl --user -u safekeep`) |
-| load / unload | `launchctl bootstrap` / `bootout` | `systemctl --user enable --now` / `disable --now` |
-| validazione | `plutil -lint` | (nessuna: la sintassi la controlla `systemctl` a load) |
+| load / unload | `safekeep daemon start` / `stop` (≡ `launchctl bootstrap` / `bootout`) | `safekeep daemon start` / `stop` (≡ `systemctl --user enable --now` / `disable --now`) |
+| validazione | `plutil -lint` (dal comando install) | (nessuna: la sintassi la controlla `systemctl` a load) |
 
-- Entrambi i file sono **template** con placeholder `__REPO__` e `__PYTHON__`
-  (come il plist: nessun path assoluto nel repo, così il repo si può spostare),
-  resi da `install.sh`.
+- **0.7.0 — sorgente unica dei template**: i template vivono nel package
+  (`safekeep/data/*.tmpl`) e **`safekeep daemon install`** (`safekeep/daemonctl.py`)
+  fa preflight → render → scrittura → lint. Preflight: OS supportato, `fswatch`
+  presente (hint per piattaforma), python ≥ 3.9, **shim `safekeep` sul PATH** e —
+  su WSL — systemd attivo (§17.3); zero scrittura se fallisce. Placeholder
+  `__EXEC__` (shim assoluto `safekeep` → ExecStart = `<shim> run`: **nessun
+  interprete nel template**, sopravvive a `pipx reinstall`), `__HOME__` (launchd
+  non espande `~`), `__PATH__` (dir di fswatch + path di sistema: launchd/systemd
+  non ereditano il PATH di login). Unit esistente con placeholder residui →
+  segnalata e sostituita. `daemon install` **non avvia** nulla: poi
+  `safekeep daemon start`. I sottocomandi: `install [--enable-linger] [--dry-run]`,
+  `start`, `stop`, `status` (exit 0 se in esecuzione, 1 altrimenti),
+  `uninstall [--purge]` (`--purge` toglie anche `~/.safekeep` e
+  `~/.local/state/safekeep/`, altrimenti restano intatti).
+- **`install.sh` / `uninstall.sh` deprecati da 0.7.0** (rimozione in 0.8.0): sono
+  wrapper che delegano a `safekeep daemon install` / `uninstall` — non renderizzano
+  più nulla. Resta **solo** il ramo `--trend` (§9.2, fuori scope di `safekeep daemon`).
 - `Restart=always` + `RestartSec=2` ≈ `KeepAlive`: se il processo muore systemd lo
   riavvia dopo 2s.
 - `StartLimitIntervalSec=0` disabilita il rate-limit di default di systemd (5 start
@@ -999,15 +1050,15 @@ fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>
   ripetutamente finirebbe irrimediabilmente in `failed`, mentre launchd con
   `KeepAlive` ci riprova sempre. Il pacing resta al daemon stesso (`MAX_DEATHS` in
   `DEATH_WINDOW`, §6).
-- **`install.sh` / `uninstall.sh` ramificati su `uname -s`**: Darwin = comportamento
-  attuale **invariato** (render del plist, nessun `bootstrap`); Linux = render della
-  unit + `systemctl --user daemon-reload` + istruzioni stampate. Nessuno dei due script
-  **avvia** l'agent: serve prima una `~/.safekeep` con dest reali (stessa regola del
-  plist di macOS). Il plist macOS non viene toccato.
-- **Boot senza login**: una *user unit* parte solo con una sessione utente (o con il
-  linger). Per averla al boot senza nessun login serve
-  `loginctl enable-linger $USER` — **documentato, non automatizzato**: richiederebbe
-  `sudo` e gli script non chiedono mai password.
+- **Nessuno dei due comandi avvia l'agent**: serve prima una `~/.safekeep` con dest
+  reali (stessa regola di sempre). Nota macOS: dopo l'installazione va concesso
+  FDA (Full Disk Access) all'interprete dietro lo shim e a `fswatch` — il comando
+  lo ricorda.
+- **Boot senza login (linger)**: una *user unit* parte solo con una sessione utente
+  (o con il linger). `safekeep daemon install` stampa l'hint
+  `loginctl enable-linger $USER`; con **`--enable-linger`** lo esegue lui
+  (best-effort: `loginctl` fallito → warning, non errore; linger = unit user
+  attive anche senza login). Il check `doctor` (§14.4) resta non fatale.
 
 ### 14.4 `doctor`
 
@@ -1075,7 +1126,8 @@ fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>
   in `/var/lib/systemd/linger/` (fonte di verità di systemd, leggibile senza root —
   l'equivalente umano è `loginctl show-user $USER -p Linger`). Non abilitato →
   **warning non fatale**: "l'agent non partirà al boot senza login" + hint
-  `loginctl enable-linger $USER` (§14.3: documentato, non automatizzato). Directory
+  `loginctl enable-linger $USER` (§14.3: hint di default, automatizzato con
+  `safekeep daemon install --enable-linger`). Directory
   `/var/lib/systemd/linger/` assente (niente systemd) → check saltato con riga ✔.
   Unit assente o non-Linux → il check **non compare** (stessa regola del resto della
   sezione: i check Linux esistono solo dove ha senso).
@@ -1109,6 +1161,17 @@ della piattaforma giusta la suite gira con il binario reale su Linux — che era
 esattamente l'incompatibilità documentata nella vecchia nota di portabilità di
 `.gitlab-ci.yml` (nota **aggiornata**, non contraddetta). I job `publish` e
 `publish-test` restano invariati.
+
+**Install-smoke (0.7.0)**: un job dedicato (`install-smoke` su GitLab, step
+`Daemon install smoke` su GitHub) esegue `bash tests/ci_daemon_install.sh` —
+build della wheel da sorgenti, venv pulito + `$HOME` temporaneo →
+`safekeep daemon install` → unit presente, **nessun placeholder residuo**,
+config chmod 600, `doctor` best-effort. Nessuna operazione che avvii/fermi un
+agent (niente bootstrap/enable/start/stop/uninstall in CI). Su GitLab gira in
+un'immagine `-slim` **senza systemd**: si esercitano così il ramo errore WSL
+(`WSL_DISTRO_NAME` + systemd assente → exit ≠ 0 con istruzioni `/etc/wsl.conf`)
+e il ramo non-WSL-senza-systemd (warning + unit scritta, exit 0). Il job
+`publish` del tag aspetta **anche** `install-smoke` oltre a `test`.
 
 **Matrix delle versioni di Python (0.3.1)**: entrambi i job `test` girano su **tre
 gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
@@ -1232,6 +1295,13 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   `doctor` con righe dedicate (tutte non fatali), secret con enforcement
   `chmod 600` + fallback `s3_secret_key_env`. **NO prune/cancellazioni su
   S3, NO versioning**; `--prune` tocca solo le dest fs.
+- **0.7.0** — `safekeep daemon {install,start,stop,status,uninstall}` (§14.3, §8.1):
+  gestione dell'agent di boot da comando CLI — template launchd/systemd nel
+  package (`safekeep/data/*.tmpl`), preflight (fswatch, shim `safekeep` sul PATH,
+  python ≥ 3.9, WSL systemd-on), ExecStart = **shim `safekeep` → `run`** (niente
+  `__PYTHON__` nel plist principale, §8.4), linger con `--enable-linger`,
+  `uninstall --purge`. `install.sh`/`uninstall.sh` deprecati (wrapper; il ramo
+  `--trend` resta), CI con smoke di install standalone su wheel + venv pulito.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
@@ -1279,17 +1349,24 @@ Nessuno dei tre è fatale: `doctor` esce 0 anche su WSL1 senza systemd.
 ### 17.3 Init e installazione
 
 - **WSL2 con systemd attivo**: la *user unit* di §14.3 si comporta come su
-  Linux (`install.sh` fa render + `systemctl --user daemon-reload`), linger
-  compreso (§14.4).
-- **Senza systemd** (WSL1 / systemd off): `install.sh` **non installa la unit**
-  e termina con **exit 0** dopo aver stampato le istruzioni di avvio manuale
-  (`safekeep run`) — degradazione graziosa, non errore duro.
+  Linux — `safekeep daemon install` fa render + `systemctl --user daemon-reload`
+  (best-effort), linger compreso (§14.4, hint o `--enable-linger`).
+- **Senza systemd** (WSL1 / systemd off): il **preflight di `safekeep daemon
+  install` fallisce** (exit ≠ 0) con l'errore chiaro: abilita systemd in
+  `/etc/wsl.conf` (`[boot] systemd=true`), poi `wsl --shutdown` da Windows —
+  **oppure** avvia a mano `safekeep run` (niente fallback su bash profile:
+  decisione). **Cambiamento 0.7.0**: `install.sh` (pre-0.7.0) terminava con
+  exit 0 dopo le istruzioni — degradazione graziosa; il nuovo comando tratta la
+  mancanza di systemd come preflight fallito, perché senza systemd la unit non
+  ha senso e l'errore va visto. `safekeep doctor` resta **exit 0** su WSL
+  senza systemd (§17.2: tutti i check WSL sono informativi e non fatali).
 - **Path**: dest/source sotto `/mnt/<lettera>/` = drvfs (vedi §17.2.3).
 
 ### 17.4 Limiti dichiarati
 
 - **Nessun test su WSL reale** (nessuna macchina WSL disponibile): detection,
-  marker di `doctor` e branch di `install.sh` testati con env/kernel finto; un
+  marker di `doctor` e branch di preflight/install (0.7.0: `daemonctl.preflight`
+  / `install`, ex-`install.sh`) testati con env/kernel finto; un
   E2E su WSL no.
 - Eventi su `/mnt/*` (drvfs/9p) e fswatch su WSL: non documentati qui, da
   verificare quando ci sarà una macchina WSL.

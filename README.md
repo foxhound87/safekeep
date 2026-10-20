@@ -59,21 +59,22 @@ sudo dnf install fswatch  # Fedora
 ```
 
 The **agent** (daemon at boot: launchd on macOS, a systemd *user unit* on Linux)
-is installed from a checkout of this repository with `./install.sh` — not from
-the wheel — see [Agent](#agent) below.
+is installed from the installed package with `safekeep daemon install` — the
+unit templates ship inside the wheel, no checkout needed — see
+[Agent](#agent) below. The old `./install.sh` wrapper is deprecated.
 
 ## Agent
 
 ```bash
-git clone https://github.com/foxhound87/safekeep.git
-cd safekeep
+pipx install safekeep        # or: pip install --user safekeep
 
 # only external dependency, if not installed yet (see the per-OS list above)
-brew install fswatch      # macOS — the script suggests the right command on Linux
+brew install fswatch      # macOS — the preflight suggests the right command on Linux
 
-# copies the example into ~/.safekeep, renders the plist / systemd unit,
-# runs preflight checks
-bash install.sh
+# preflight (fswatch / shim on PATH / python / WSL systemd-on), then renders
+# the plist or systemd user unit from the embedded template into place —
+# idempotent, does NOT start anything yet
+safekeep daemon install        # --dry-run to preview, nothing is written
 ```
 
 Then:
@@ -87,16 +88,18 @@ Then:
 3. load the agent:
 
 ```bash
-# macOS (launchd)
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
-# unload with: launchctl bootout gui/$(id -u)/com.safekeep.agent
+safekeep daemon start        # launchctl bootstrap (macOS) / systemctl --user enable --now (Linux)
+safekeep daemon status       # exit 0 while running, 1 otherwise
+safekeep daemon stop         # unload
 
-# Linux (systemd user unit)
-systemctl --user enable --now safekeep
-# status with: systemctl --user status safekeep
-# logs with:   journalctl --user -u safekeep -f
-# unload with: systemctl --user disable --now safekeep
-# start at boot without a login session: loginctl enable-linger $USER
+# logs (Linux): journalctl --user -u safekeep -f
+# remove the unit (config and logs stay): safekeep daemon uninstall
+# remove everything, incl. ~/.safekeep:    safekeep daemon uninstall --purge
+
+# Linux - start at boot without a login session (linger = user units active
+# without a login), either pass
+safekeep daemon install --enable-linger
+# or run once: loginctl enable-linger $USER
 ```
 
 On macOS, once you have granted TCC/FDA (Full Disk Access) permissions to the
@@ -227,6 +230,7 @@ safekeep <command> [--config PATH] [-v]
 | `sync-once [--dry-run] [--project PATH] [--prune]` | a single pass: walks the source and copies whatever differs (`--dry-run` only prints what it would copy; `--prune` also removes dest files whose source still exists but is no longer included) |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
 | `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, permission errors in the log (last 24h), TCC/launchd plist (macOS), inotify limit, systemd unit and linger (Linux), WSL detection (best-effort) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code, including a structured `permission_errors` count of the last 24h |
+| `daemon {install,start,stop,status,uninstall}` | manage the boot agent: `install` runs preflight (fswatch, shim on PATH, WSL systemd-on) and renders the launchd plist / systemd user unit from the embedded templates (idempotent, `--dry-run`, `--enable-linger`); `start`/`stop`/`status` load, unload and probe it; `uninstall` removes the unit (`--purge` also drops `~/.safekeep` and state) |
 
 ## Tests
 
@@ -234,7 +238,7 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 287 tests covering the matcher,
+Stdlib (`unittest`) suite, zero dependencies: 333 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery, CLI, the permission-trend
 wrapper and the POSIX portability layer (platform helper, per-OS fswatch
 monitor, systemd template, doctor log/linger checks, WSL detection,

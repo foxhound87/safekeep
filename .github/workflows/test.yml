@@ -74,3 +74,11 @@ jobs:
           log="$(mktemp)"
           WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only | tee "$log"
           grep -F 'WSL rilevato: SafekeepCITest' "$log"
+      # 0.7.0 (task 7): smoke di install standalone — build della wheel, venv
+      # pulito + HOME temporaneo → `safekeep daemon install` → unit presente,
+      # nessun placeholder residuo, config chmod 600, doctor best-effort.
+      # NESSUNA operazione che avvii/fermi un agent (vedi header di
+      # tests/ci_daemon_install.sh). Su questo runner systemd c'è → ramo WSL
+      # esercitato solo nei job senza systemd (GitLab -slim) e dai test unit.
+      - name: Daemon install smoke (wheel + clean venv)
+        run: bash tests/ci_daemon_install.sh

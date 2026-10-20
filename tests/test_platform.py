@@ -115,51 +115,73 @@ class PiattaformaCentralizzataTest(unittest.TestCase):
 
 
 class AgentTemplateTest(unittest.TestCase):
-    """SPEC.md §14.3: la unit systemd è un template con gli stessi placeholder
-    del plist e copre RunAtLoad/KeepAlive."""
+    """SPEC §14.3 + piano 0.7.0: i template canonici sono package data in
+    `safekeep/data/` (sorgente unica, render da `safekeep daemon install`);
+    ExecStart = shim `safekeep` sul PATH, nessun interprete nel template."""
 
     def test_unit_systemd_template(self):
-        path = os.path.join(REPO, 'systemd', 'safekeep.service')
+        path = os.path.join(REPO, 'safekeep', 'data', 'safekeep.service.tmpl')
         with open(path, encoding='utf-8') as fh:
             text = fh.read()
-        for needle in ('ExecStart=__PYTHON__ __REPO__/bin/safekeep.py run',
+        for needle in ('ExecStart=__EXEC__ run',
+                       'Environment=PATH=__PATH__',
                        'Restart=always',
                        'RestartSec=2',
                        'StartLimitIntervalSec=0',
                        'WantedBy=default.target'):
             self.assertIn(needle, text, needle)
         self.assertNotIn('/Users/', text, 'path assoluto nel template')
+        self.assertNotIn('__REPO__', text,
+                         'nessun checkout del repo: ExecStart = shim sul PATH')
+        self.assertNotIn('__PYTHON__', text,
+                         'nessun interprete nel template (shim `safekeep`)')
 
-    def test_gli_script_si_ramificano_per_os(self):
-        for name in ('install.sh', 'uninstall.sh'):
+    def test_gli_script_sono_wrapper_delegati(self):
+        """0.7.0: install.sh/uninstall.sh deprecati delegano ai comandi nuovi
+        (rimozione in 0.8.0); il ramo `--trend` resta legacy nel wrapper."""
+        for name, nuovo in (('install.sh', 'safekeep daemon install'),
+                            ('uninstall.sh', 'safekeep daemon uninstall')):
             with self.subTest(script=name), \
                     open(os.path.join(REPO, name), encoding='utf-8') as fh:
                 text = fh.read()
-            self.assertIn('uname -s', text, name)          # ramo Darwin/Linux
-            self.assertIn('launchctl', text, name)         # ramo macOS invariato
-            self.assertIn('systemctl --user', text, name)  # ramo Linux
+            self.assertIn('deprecato', text, name)
+            self.assertIn(nuovo, text, name)         # delega, niente render
+            self.assertIn('--trend', text, name)     # trend fuori scope resta
+            self.assertIn(f'exec {nuovo}', text,
+                          'il percorso principale è un exec delegato')
 
-    def test_il_plist_macos_non_e_toccato(self):
-        with open(os.path.join(REPO, 'launchd', 'com.safekeep.agent.plist'),
+    def test_il_plist_macos_vive_nel_package(self):
+        with open(os.path.join(REPO, 'safekeep', 'data',
+                               'com.safekeep.agent.plist.tmpl'),
                   encoding='utf-8') as fh:
             text = fh.read()
-        for needle in ('RunAtLoad', 'KeepAlive', '__REPO__', '__PYTHON__'):
+        for needle in ('RunAtLoad', 'KeepAlive', '__EXEC__', '__HOME__',
+                       '__PATH__'):
             self.assertIn(needle, text, needle)
+        self.assertNotIn('/Users/', text, 'path assoluto nel template')
 
     def test_install_sh_interprete_stabile(self):
-        """SPEC.md §8.4 (0.5.1): il default renderizzato è lo shim di sistema
-        /usr/bin/python3, MAI un path Cellar di Homebrew — un `brew upgrade`
-        cancella il Cellar sotto il processo vivo e TCC non lo identifica più."""
+        """SPEC.md §8.4 (0.5.1): il ramo `--trend` renderizza ancora
+        __PYTHON__ con default lo shim di sistema /usr/bin/python3, MAI un
+        path Cellar di Homebrew — un `brew upgrade` cancella il Cellar sotto
+        il processo vivo e TCC non lo identifica più. Il template principale
+        invece non ha più interprete (0.7.0: ExecStart = shim `safekeep`)."""
         with open(os.path.join(REPO, 'install.sh'), encoding='utf-8') as fh:
             text = fh.read()
         self.assertIn('SAFEKEEP_PYTHON:-/usr/bin/python3', text)
         self.assertNotIn('/opt/homebrew/bin/python3', text,
                          'il default non deve più puntare al Cellar di brew')
         self.assertIn('py_ok', text, "validazione ≥ 3.9 dell'interprete")
-        for name in ('com.safekeep.agent.plist', 'com.safekeep.trend.plist'):
-            with open(os.path.join(REPO, 'launchd', name), encoding='utf-8') as fh:
-                tpl = fh.read()
-            self.assertIn('default: /usr/bin/python3', tpl, name)
+        with open(os.path.join(REPO, 'launchd', 'com.safekeep.trend.plist'),
+                  encoding='utf-8') as fh:
+            tpl = fh.read()
+        self.assertIn('default: /usr/bin/python3', tpl)
+        with open(os.path.join(REPO, 'safekeep', 'data',
+                               'com.safekeep.agent.plist.tmpl'),
+                  encoding='utf-8') as fh:
+            main_tpl = fh.read()
+        self.assertNotIn('__PYTHON__', main_tpl,
+                         'il template principale non rende più un interprete')
 
 
 class RecentPermissionErrorsTest(unittest.TestCase):
@@ -347,36 +369,11 @@ class WslTest(unittest.TestCase):
             '/run/systemd/system assente = WSL1 o systemd spento (SPEC §17.2)')
 
 
-@unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
-class InstallShSenzaSystemdTest(unittest.TestCase):
-    """SPEC.md §17.3: `install.sh` su Linux senza systemd → unit NON installata,
-    istruzioni di avvio manuale ed exit 0 (nessun errore duro)."""
-
-    def test_ramo_linux_senza_systemd_esce_0(self):
-        if os.path.isdir('/run/systemd/system'):
-            self.skipTest('questa macchina ha systemd: ramo diverso')
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        home, fake_bin = os.path.join(tmp, 'home'), os.path.join(tmp, 'bin')
-        os.makedirs(home)
-        os.makedirs(fake_bin)
-        uname = os.path.join(fake_bin, 'uname')            # uname finto → Linux
-        with open(uname, 'w') as fh:
-            fh.write('#!/bin/bash\necho Linux\n')
-        os.chmod(uname, 0o755)
-        env = dict(os.environ, HOME=home,
-                   PATH=fake_bin + os.pathsep + os.environ['PATH'])
-        r = subprocess.run(['bash', os.path.join(REPO, 'install.sh')],
-                           capture_output=True, text=True, env=env, timeout=60)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('systemd non disponibile', r.stdout)
-        self.assertIn('safekeep.py run', r.stdout)         # avvio manuale
-        self.assertIn('systemd=true', r.stdout)            # hint /etc/wsl.conf
-        self.assertTrue(os.path.exists(os.path.join(home, '.safekeep')),
-                        'la config viene creata comunque')
-        self.assertFalse(os.path.exists(
-            os.path.join(home, '.config/systemd/user/safekeep.service')),
-            'niente unit senza systemd')
+# `InstallShSenzaSystemdTest` (0.3.x): il ramo "install.sh senza systemd →
+# unit NON installata, exit 0" non esiste più — 0.7.0: install.sh è un wrapper
+# che delega, e il comportamento senza systemd vive in `daemonctl.install`
+# (WSL senza systemd = errore chiaro; non-WSL = warning + unit scritta):
+# vedi tests/test_daemonctl.py (PreflightTest / InstallTest).
 
 
 if __name__ == '__main__':
