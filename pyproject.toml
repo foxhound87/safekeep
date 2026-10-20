@@ -43,5 +43,10 @@ safekeep = "safekeep.cli:main"
 # NO auto-discovery: bin/ e tests/ farebbero errore di build
 packages = ["safekeep"]
 
+[tool.setuptools.package-data]
+# 0.7.0: template unit + example config embedded — `safekeep daemon install`
+# funziona da PyPI senza git clone (sorgente unica: safekeep/data/)
+safekeep = ["data/*"]
+
 [tool.setuptools.dynamic]
 version = {attr = "safekeep.__version__"}

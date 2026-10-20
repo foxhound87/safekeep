@@ -21,6 +21,16 @@
 #
 # NOTA di portabilità (macOS → Linux), letta dai test prima di scriverla:
 #
+# - install-smoke (0.7.0): job dedicato che fa `bash tests/ci_daemon_install.sh`
+#   — build della wheel, install in un venv pulito, HOME temporaneo,
+#   `safekeep daemon install` → unit presente, nessun placeholder residuo,
+#   config chmod 600, doctor best-effort. NESSUNA operazione che avvii o fermi
+#   un agent (niente bootstrap/enable/start/stop/uninstall nel job; l'unica
+#   chiamata di servizio è `systemctl --user daemon-reload`, best-effort).
+#   Nel container slim NON c'è systemd → si esercita il ramo ERRORE WSL
+#   (WSL_DISTRO_NAME + systemd assente → exit != 0 con /etc/wsl.conf) e il
+#   ramo non-WSL-senza-systemd (warning + unit scritta, exit 0).
+#
 # - fswatch VIENE installato nel job (0.3.0): `doctor` ora cerca il monitor della
 #   piattaforma (`fsevents_monitor` su Darwin, `inotify_monitor` su Linux, SPEC
 #   §14.2) e i check TCC/plist sono Darwin-only (SPEC §14.4), quindi la suite
@@ -49,6 +59,9 @@
 #   macOS-specifici da risolvere.
 # - gli esempi in `examples/` contengono path `/Users/REPLACEME/...` ma sono
 #   solo stringhe di parse, non vengono toccati dal filesystem.
+# - install-smoke (0.7.0) gira in un job SEPARATO (vedi sotto): build wheel +
+#   venv pulito + HOME temporaneo, così il suo mktemp e la sua pip non
+#   interferiscono con la suite.
 # - `doctor` (0.3.1) legge anche il log corrente
 #   (`~/.local/state/safekeep/safekeep.log`, SPEC §14.4): nel container non
 #   esiste → check "saltato" con riga ✔; il check **linger** compare solo dove
@@ -94,6 +107,17 @@ test:
       WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only | tee "$log"
       grep -F 'WSL rilevato: SafekeepCITest' "$log"
 
+# Smoke di install standalone (0.7.0, task 7): wheel da sorgenti, venv pulito,
+# HOME temporaneo → `safekeep daemon install` → unit + placeholder assenti +
+# doctor best-effort; senza systemd (immagine slim) si esercita il ramo errore
+# WSL. Un solo job fuori dalla matrix: la wheel si builda una volta.
+install-smoke:
+  image: python:3.12-slim
+  script:
+    # fswatch: preflight di `daemon install` è fatale con install_hint
+    - apt-get update && apt-get install -y --no-install-recommends fswatch
+    - bash tests/ci_daemon_install.sh
+
 # Publish to PyPI with Trusted Publishing (OIDC = OpenID Connect, no stored
 # credentials). Doc followed:
 #   https://docs.pypi.org/trusted-publishers/using-a-publisher/ (GitLab CI/CD tab)
@@ -117,7 +141,8 @@ test:
 publish:
   stage: deploy
   image: python:3.12-slim
-  needs: [test]
+  # il tag di release aspetta ANCHE lo smoke di install standalone (0.7.0)
+  needs: [test, install-smoke]
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
   environment:
@@ -158,7 +183,7 @@ publish:
 publish-test:
   stage: deploy
   image: python:3.12-slim
-  needs: [test]
+  needs: [test, install-smoke]
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
       when: manual

@@ -1,0 +1,91 @@
+# safekeep — configurazione globale (l'UNICO posto dove vivono le destinazioni)
+#
+# Percorso: ~/.safekeep   (file singolo nella home, niente ~/.config/…)
+# Sintassi: chiave: valore (una per riga), commenti con #, righe vuote ignorate.
+# Le chiavi `source` e `dest` sono RIPETIBILI: più righe = più valori.
+# `dest` è OBBLIGATORIA a meno che non sia configurato `s3_bucket` (dest
+# S3-compatible, SPEC.md §18), `source` è opzionale (vedi sopra le modalità).
+# I .sync dei progetti NON possono aggiungere o rimuovere destinazioni (SPEC.md §11).
+
+# --- Sorgenti (radici da osservare) — OPZIONALE ------------------------
+# MODALITÀ SOURCE (queste righe presenti, backward compat): ogni riga è una
+# radice monitorata da fswatch, esattamente come sempre.
+# MODALITÀ AUTO-DISCOVERY (righe `source:` assenti): safekeep scandaglia $HOME
+# alla ricerca di file `.sync` (potando le dir nascoste, Library, .Trash,
+# .cache, node_modules, .git, .venv, __pycache__, venv) e osserva $HOME —
+# un `.sync` creato dopo l'avvio viene agganciato da solo (SPEC.md §6).
+# In entrambe le modalità SOLO le directory che contengono un file `.sync`
+# vengono seguite: una directory senza .sync NON è seguita (nessuna copia).
+# (Decisione aperta: qui vanno i percorsi reali dei progetti — vedere SPEC.md §14.)
+# source: /Users/REPLACEME/Code
+# source: /Users/REPLACEME/Projects
+
+# --- Destinazioni globali (OBBLIGTORIE) ------------------------------
+# Usate per TUTTI i progetti: le destinazioni vivono SOLO qui.
+# Nessuna riga `dest:` → il config è invalido (errore con hint).
+# Su volumi esterni/non montati la dest passa in stato `pending`:
+# backoff sullo stat del mountpoint, poi sync al remount.
+dest: /Volumes/BackupUSB/backup
+dest: /Volumes/NAS/generale
+
+# --- Destinazione S3-compatible (OPZIONALE, SPEC.md §18) ----------------
+# UNA sola dest S3, affiancata alle `dest:` sopra — oppure AL POSTO di esse
+# (senza nessuna `dest:`, serve almeno `s3_bucket:`). I .sync NON possono
+# aggiungere chiavi s3_*: vivono solo in QUESTO file.
+# Client: botocore via extra —  pipx install "safekeep[s3]"
+# (senza extra, una config s3_* esce con errore e hint: fail-fast)
+# Le CHIAVI E IL SECRET VANNO SOSTITUITI: placeholder, mai valori reali
+# (il file va tenuto con permessi stretti: chmod 600 ~/.safekeep).
+#
+# s3_endpoint: https://s3.example.com:443     # http:// → warning cleartext
+# s3_bucket: my-backup-bucket                 # obbligatorio
+# s3_prefix: safekeep                         # opzionale, no '..'
+# s3_region: us-east-1                        # default us-east-1
+# s3_access_key: REPLACEME_ACCESS_KEY         # obbligatorio
+# s3_secret_key: REPLACEME_SECRET_KEY         # XOR s3_secret_key_env (chmod 600!)
+# # alternativa senza secret nel file (serve la variabile nell'ambiente
+# # dell'agent launchd/systemd):
+# # s3_secret_key_env: SAFEKEEP_S3_SECRET
+# s3_addressing: path                         # path (default) | virtual
+# s3_tls_check: true                          # false = certificati self-signed
+#
+# Semantica: upload + needs_copy via metadata (mtime ns, mode, symlink),
+# MAI cancellazioni — `--prune` tocca solo le dest filesystem.
+# Silo/MinIO/Ceph/Wasabi/B2/AWS: path-style + SIGV4, vedi README e SPEC §18.
+
+# --- Layout dei path in destinazione --------------------------------
+# relative (default): <dest>/<path relativo alla radice sorgente>
+#     sorgente ~/Code/myapp/docs/a.md  →  /Volumes/BackupUSB/backup/myapp/docs/a.md
+# full:              <dest>/<path assoluto sorgente>
+#     sorgente ~/Code/myapp/docs/a.md  →  /Volumes/BackupUSB/backup/Users/REPLACEME/Code/myapp/docs/a.md
+layout: relative
+
+# --- Defaults -------------------------------------------------------
+# Regole di default a BASSA priorità (sotto le regole globali, sotto i .sync).
+# Sintassi identica a include:/exclude: dei .sync, una regola per riga.
+# Quelle builtin (sempre presenti, le sovrascrivi solo se vuoi):
+#   .git/  node_modules/  .venv/  __pycache__/  .DS_Store  *.swp
+#
+# Con la semantica allow-list (SPEC.md §4.3) dei soli exclude qui sotto non
+# bastano: un progetto il cui .sync non ha nessun include non copia alcun file.
+# Per un default "copia tutto tranne X" serve un include che copra tutto:
+#   defaults: include: **
+# (ma include: ** sta SOPRA i builtin e ri-includerebbe .git/, node_modules/, …:
+#  rielencali poi come `defaults: exclude:` o negli .sync — vedere
+#  examples/sync.example, blocco "copia tutto tranne X")
+defaults: exclude: *.log
+defaults: exclude: .cache/
+
+# --- Sicurezza ------------------------------------------------------
+# L'unica chiave di sicurezza di destinazione è `s3_secret_key` (solo se
+# usi la dest S3) e sta SOLO in QUESTO file: va tenuto con chmod 600 —
+# meglio ancora `s3_secret_key_env` (variabile d'ambiente, niente secret
+# nel file). I file `.sync` dei progetti contengono SOLO regole
+# include/exclude — una riga `dest:` (o `s3_*`) in un `.sync` è una riga
+# invalida e viene rifiutata (SPEC.md §11/§18).
+# Chiave ignota in QUESTO file → errore fatale con numero di riga (fail-fast).
+
+# --- Logging --------------------------------------------------------
+# debug | info | warn | error  (default: info)
+# debug rende fatale anche una riga invalida nei file di config.
+log_level: info
