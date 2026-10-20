@@ -78,6 +78,9 @@ test:
     - fswatch --version
     - fswatch -M
     - pgrep --version
+    # s3 (0.6.0): extra safekeep[s3] → botocore, così gli itest-ready S3 non
+    # saltano più per import mancante (il config s3_* resta l'unico gate live)
+    - python3 -m pip install ".[s3]"
     - python3 -m unittest discover -s tests
     # E2E (0.3.1): daemon live col fswatch reale, stessa gamba della suite
     - bash tests/e2e_linux.sh
