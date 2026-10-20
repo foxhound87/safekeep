@@ -36,8 +36,8 @@ auto-discovery mode.
 its old context:
 
 ```bash
-launchctl bootout gui/$(id -u)/com.safekeep.agent
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
+safekeep daemon stop && safekeep daemon start
+# (≡ launchctl bootout + bootstrap on the rendered plist)
 ```
 
 ## Daemon runs from a deleted executable (Homebrew upgrade)
@@ -70,24 +70,27 @@ it works even with an old, fragile plist still installed:
   gui/$(id -u)/com.safekeep.agent — warning non fatale
 ```
 
-**Fix:** re-run the installer (idempotent) and reload the job. Since 0.5.1 it
-renders `/usr/bin/python3` — the Apple-managed system shim no Homebrew upgrade
-can delete — for **both** agents:
+**Fix:** re-run the installer (idempotent) and reload the job.
 
 ```bash
-./install.sh            # re-render with the stable interpreter
-launchctl bootout gui/$(id -u)/com.safekeep.agent 2>/dev/null
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
-./install.sh --trend    # same treatment for the hourly trend agent
+safekeep daemon install   # re-render the unit (idempotent; does not start)
+safekeep daemon stop      # bootout / disable (exit 1 if it was not loaded — fine)
+safekeep daemon start     # bootstrap + start
+./install.sh --trend      # same treatment for the hourly trend agent
 ```
 
-Verify: `ps -p <pid> -o comm=` must print `/usr/bin/python3`. launchd does
-**not** re-read a plist on its own: without `bootout`+`bootstrap` (or a reboot)
-the old rendering keeps running. If Full Disk Access was granted to a Homebrew
-python, grant it to `/usr/bin/python3` too — a one-time step, that path never
-changes again. A shell wrapper that re-resolves `python3` at every start was
-considered and rejected: it would only resolve at start, recreating the same
-incident on the next upgrade while the daemon keeps running (SPEC §8.4).
+Since 0.7.0 the main plist has **no interpreter at all**: `ProgramArguments`
+is the `safekeep` shim → `run`, so this incident class no longer applies to
+the main agent (verify with `ps -p <pid> -o comm=`: it must print an
+executable **still on disk**). The `--trend` agent still renders
+`__PYTHON__` = `/usr/bin/python3` — the Apple-managed system shim no Homebrew
+upgrade can delete. launchd does **not** re-read a plist on its own: without
+`bootout`+`bootstrap` (or a reboot) the old rendering keeps running. If Full
+Disk Access was granted to a Homebrew python, grant it to `/usr/bin/python3`
+too — a one-time step, that path never changes again. A shell wrapper that
+re-resolves `python3` at every start was considered and rejected: it would
+only resolve at start, recreating the same incident on the next upgrade while
+the daemon keeps running (SPEC §8.4).
 
 ## Recent permission errors in the log
 
@@ -156,9 +159,14 @@ The systemd *user* unit starts with the login session only: without linger it
 runs after the first login, not at boot.
 
 ```bash
-loginctl enable-linger $USER            # no root needed
+safekeep daemon install --enable-linger   # runs it for you (best-effort)
+loginctl enable-linger $USER            # or by hand, no root needed
 loginctl show-user $USER -p Linger      # yes / no
 ```
+
+By default `daemon install` only **prints** the hint; with `--enable-linger`
+it runs `loginctl enable-linger $USER` itself (a failure there is a warning,
+not an error).
 
 Since 0.3.1 `doctor` checks linger whenever
 `~/.config/systemd/user/safekeep.service` is installed, and warns (non-fatal)
@@ -203,8 +211,36 @@ fswatch) is the 0.3.0 one, E2E-tested on real Linux.
   slow (9p translation) and case-insensitive by default — prefer a native ext4
   destination inside the distro (e.g. `~/backup`) over `/mnt/c/...`.
 
-`install.sh` follows the same rule: without systemd it installs **no** unit and
-exits `0` with manual-start instructions instead of failing.
+`safekeep daemon install` follows a stricter rule since 0.7.0: without
+systemd the **preflight fails (exit 1)** with the fix above and the
+manual-start alternative (`safekeep run`) — no unit is written.
+(`install.sh`, pre-0.7.0, used to install nothing and exit `0`; the wrapper
+now delegates to the new command.) `safekeep doctor` stays **exit 0** on WSL
+without systemd: all three WSL checks are informational.
+
+## `safekeep daemon install` fails (preflight)
+
+`daemon install` writes nothing and exits `1` when one of these is missing —
+each line comes with its fix:
+
+- **`fswatch` missing** — install it for your platform (the error prints the
+  right command: `brew` / `pacman` / `apt` / `dnf`). The unit's `PATH` can
+  only *find* binaries, never install them.
+- **`shim safekeep not found on PATH`** — `ExecStart` is the absolute path of
+  the `safekeep` shim resolved on `PATH` at install time. With
+  `pipx install safekeep` it is `~/.local/bin/safekeep`; with
+  `pip install --user safekeep` make sure `~/.local/bin` is on the `PATH` of
+  both your login shell and the service environment (put it in `~/.profile` /
+  `~/.zprofile`, then open a new session). A shim that moves *after* install
+  only breaks at the next `daemon start` — re-run `daemon install` to re-resolve.
+- **WSL without systemd** — see
+  [Windows: WSL](/troubleshooting#windows-wsl-best-effort).
+- **python < 3.9 / unsupported OS** — upgrade python; safekeep needs macOS or
+  Linux.
+
+Nothing was written when this happens: fix the reported item and re-run
+`safekeep daemon install`. Use `--dry-run` to check the preflight without
+touching anything.
 
 ## Nothing is copied
 

@@ -10,6 +10,7 @@ safekeep <command> [--config PATH] [-v]
 | `sync-once [--dry-run] [--prune] [--project PATH]` | one pass: walks the source and copies whatever differs, then exits |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
 | `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist and daemon executable (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code |
+| `daemon {install,start,stop,status,uninstall}` | manage the boot agent — see below |
 
 ## `run`
 
@@ -137,3 +138,34 @@ launchctl kickstart gui/$(id -u)/com.safekeep.trend   # first row now, not in an
 `~/.local/state/safekeep/trend.log`. `install.sh --trend` never touches nor
 reloads the main `com.safekeep.agent` job. On Linux no unit ships yet — run it
 from cron or a systemd timer.
+
+## `daemon`
+
+```bash
+safekeep daemon install                 # preflight + render + write the unit
+safekeep daemon install --dry-run       # preview, nothing is written
+safekeep daemon install --enable-linger # Linux: also run loginctl enable-linger
+safekeep daemon start                   # load + start (bootstrap / enable --now)
+safekeep daemon stop                    # unload + stop (bootout / disable --now)
+safekeep daemon status                  # exit 0 if running, 1 otherwise
+safekeep daemon uninstall               # remove the unit, keep ~/.safekeep + logs
+safekeep daemon uninstall --purge       # also remove ~/.safekeep and state/logs
+```
+
+Manages the boot agent (launchd plist on macOS, systemd user unit on Linux —
+full reference in [Agent](/agent)). Since 0.7.0; the `install.sh` /
+`uninstall.sh` wrappers are deprecated (removal in 0.8.0) and just delegate
+here — their `--trend` branch is the one legacy piece that stays.
+
+- `install` is idempotent and **never starts the agent**: preflight first
+  (`fswatch`, `safekeep` shim on `PATH`, python >= 3.9, WSL systemd-on) —
+  a failed preflight writes nothing and exits `1`; then the config example
+  (created only if missing, chmod `600`), the rendered unit (existing units
+  with leftover placeholders are reported and replaced) and `plutil -lint` /
+  `systemctl --user daemon-reload`;
+- `start` is idempotent (already loaded → exit 0); missing unit → exit `1`
+  with the install hint;
+- `status` is read-only: exit `0` running, `1` not running (or no unit);
+- `uninstall` removes **only** the unit — config, logs and state survive, so
+  `daemon install` again restores everything; `--purge` deletes `~/.safekeep`
+  and `~/.local/state/safekeep/` too.

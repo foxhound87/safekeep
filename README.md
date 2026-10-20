@@ -242,7 +242,7 @@ Stdlib (`unittest`) suite, zero dependencies: 333 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery, CLI, the permission-trend
 wrapper and the POSIX portability layer (platform helper, per-OS fswatch
 monitor, systemd template, doctor log/linger checks, WSL detection,
-`install.sh` without systemd).
+`safekeep daemon install` without systemd).
 `fswatch` is not needed to run the suite — the few `doctor` checks that talk to
 the real binary are skipped when it's missing — but CI installs it so every
 matrix leg (3.9 / 3.12 / 3.14) exercises the real `inotify` monitor and the

@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| OS | macOS, or Linux with systemd (POSIX). Windows: run it inside [WSL](/troubleshooting#windows-wsl-best-effort) (best-effort) |
-| Python | >= 3.9 (on macOS the launchd agent runs on the system `/usr/bin/python3`, validated by `install.sh` since 0.5.1) |
+| OS | macOS, or Linux with systemd (POSIX). Windows: run it inside [WSL](/troubleshooting#windows-wsl-best-effort) (best-effort, systemd-on required for the agent) |
+| Python | >= 3.9 |
 | fswatch | [emcrisostomo/fswatch](https://github.com/emcrisostomo/fswatch) |
 
 ```bash
@@ -28,7 +28,7 @@ pipx install safekeep
 ## pip
 
 ```bash
-pip install safekeep
+pip install --user safekeep     # make sure ~/.local/bin is on your PATH
 ```
 
 ### Optional: S3-compatible destination
@@ -45,23 +45,31 @@ Full reference: [S3 destination](/s3).
 
 ## Agent (launchd / systemd)
 
-The agent that runs the daemon at boot is installed from a checkout of the
-repository — not from the wheel — because the rendered plist / systemd unit
-points at a concrete checkout:
+The agent that runs the daemon at boot is installed **from the installed
+package** — the unit templates ship inside the wheel, no checkout needed:
 
 ```bash
-git clone https://github.com/foxhound87/safekeep.git
-cd safekeep
-bash install.sh
+safekeep daemon install          # preflight + render + write; does NOT start
+safekeep daemon install --dry-run    # preview, nothing is written
+safekeep daemon start            # after filling ~/.safekeep — loads and starts
 ```
 
-`install.sh` is idempotent: it creates `~/.safekeep` from the example (if
-missing), renders `~/Library/LaunchAgents/com.safekeep.agent.plist` on macOS
-or `~/.config/systemd/user/safekeep.service` on Linux, and runs preflight
-checks. It does **not** start the job — see [Agent](/agent).
+The install step runs preflight checks first — `fswatch` present, `safekeep`
+shim on `PATH`, python >= 3.9, and **WSL with systemd on** — and fails fast
+(exit 1) if any is missing. It creates `~/.safekeep` from the embedded example
+if missing (chmod `600`), renders `~/Library/LaunchAgents/com.safekeep.agent.plist`
+on macOS or `~/.config/systemd/user/safekeep.service` on Linux, and does
+**not** start the job — see [Agent](/agent).
 
-On Linux **without** systemd (WSL1, WSL2 with systemd off, containers) it
-installs no unit and exits `0` with manual-start instructions — see
+On Linux, to start at boot without a login session, add `--enable-linger`
+(runs `loginctl enable-linger $USER` — linger = user units active even
+without a login).
+
+The old `bash install.sh` wrapper still works but is **deprecated since
+0.7.0** (removal in 0.8.0): it just delegates to `safekeep daemon install`.
+On Linux **without** systemd (WSL1, WSL2 with systemd off, containers) the
+preflight **fails with exit 1** and prints the fix (enable systemd in
+`/etc/wsl.conf`) or the manual-start alternative (`safekeep run`) — see
 [Windows: WSL](/troubleshooting#windows-wsl-best-effort).
 
 ## Verify
