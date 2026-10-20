@@ -28,6 +28,18 @@ BASE_MARKERS = ('config', 'dest non annidate', 'fswatch', 'python', 'residui')
 DARWIN_MARKERS = ('TCC', 'plist')
 LINUX_MARKERS = ('inotify', 'unit systemd')
 
+try:
+    import botocore  # noqa: F401
+    HAVE_BOTOCORE = True
+except ImportError:
+    HAVE_BOTOCORE = False
+
+# Endpoint morto su loopback: connect rifiutato all'istante → HeadBucket
+# offline senza attendere i timeout, e cleartext http:// di proposito (§18.1)
+S3_BLOCK = ('s3_endpoint: http://127.0.0.1:1\n'
+            's3_bucket: bkt\ns3_prefix: pre\n'
+            's3_access_key: AK\ns3_secret_key: SK\n')
+
 
 def write(path, text=''):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -145,6 +157,42 @@ class DoctorTest(CliTestCase):
         self.assertIn('safekeep.example', r.stdout)
         if shutil.which('fswatch'):     # unica dipendenza esterna del resto
             self.assertEqual(r.returncode, 0, r.stdout)
+
+
+class DoctorExeDaemonTest(CliTestCase):
+    """SPEC.md §8.4/§14.4 (0.5.1): exe del processo launchd su disco —
+    esistente ✔, cancellato ✗ **non fatale**, non determinabile → saltato."""
+
+    def doctor_darwin(self, exe):
+        args = argparse.Namespace(config=self.cfg, v=False, json=False)
+        buf = io.StringIO()
+        with mock.patch.object(cli, 'is_darwin', return_value=True), \
+                mock.patch.object(cli, 'daemon_exe', return_value=exe), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_doctor(args)
+        line = next((l for l in buf.getvalue().splitlines()
+                     if 'exe del daemon' in l), '')
+        return code, buf.getvalue(), line
+
+    def test_exe_esistente_verde(self):
+        code, _, line = self.doctor_darwin(sys.executable)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('presente su disco', line)
+        self.assertEqual(code, 0)
+
+    def test_exe_cancellato_warning_non_fatale(self):
+        exe = os.path.join(self.tmp, 'Cellar', 'python@3.14', '3.14.6', 'Python')
+        code, _, line = self.doctor_darwin(exe)          # non creato: inesistente
+        self.assertTrue(line.startswith('✗'), line)
+        for needle in ('NON esiste su disco', 'kickstart', 'warning non fatale'):
+            self.assertIn(needle, line)
+        self.assertEqual(code, 0, 'sintomo con rimedio manuale: NON fatale')
+
+    def test_non_determinabile_check_saltato(self):
+        code, _, line = self.doctor_darwin(None)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('check saltato', line)
+        self.assertEqual(code, 0)
 
 
 class AutoDiscoveryCliTest(CliTestCase):
@@ -501,6 +549,90 @@ class DoctorJsonTest(CliTestCase):
         self.assertEqual(doc['exit'], 1)
         self.assertTrue(any(c['status'] == 'fail' for c in doc['checks']),
                         'il check fatale deve comparire come fail')
+
+
+class S3StatusTest(CliTestCase):
+    """`status` mostra la dest S3 (ok/offline, endpoint) — SPEC.md §18."""
+
+    @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+    def test_status_mostra_riga_s3_offline(self):
+        write(self.cfg, f'source: {self.src}\ndest: {self.dest}\n' + S3_BLOCK)
+        os.chmod(self.cfg, 0o600)
+        r = self.cli('status', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('s3        s3://bkt/pre [offline]', r.stdout)
+        self.assertIn('http://127.0.0.1:1', r.stdout)
+        self.assertIn(f'dest      {self.dest} [ok]', r.stdout)  # fs invariato
+
+    @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+    def test_sync_once_s3_offline_esce_zero(self):
+        # errore di rete su S3 → pending/errati, MAI crash della CLI (§18.3)
+        write(self.cfg, f'source: {self.src}\ndest: {self.dest}\n' + S3_BLOCK)
+        os.chmod(self.cfg, 0o600)
+        r = self.cli('sync-once', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('copie', r.stdout)
+        self.assertIn('errori', r.stdout)
+
+    @unittest.skipIf(HAVE_BOTOCORE, 'extra installato: qui si testa la sua assenza')
+    def test_s3_senza_extra_fail_fast_con_hint(self):
+        # run/sync-once/status: ConfigError fail-fast con hint (§18.1)
+        write(self.cfg, f'source: {self.src}\ndest: {self.dest}\n' + S3_BLOCK)
+        for cmd in ('status', 'sync-once'):
+            with self.subTest(cmd=cmd):
+                r = self.cli(cmd, '--config', self.cfg)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn('safekeep[s3]', r.stderr)
+                self.assertIn('pipx install', r.stderr)
+
+
+class S3DoctorTest(CliTestCase):
+    """Righe `doctor` dedicate alla dest S3: tutte NON fatali (§18/§18.4)."""
+
+    @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+    def test_doctor_check_s3_tutti_non_fatali(self):
+        write(self.cfg, f'source: {self.src}\ndest: {self.dest}\n' + S3_BLOCK)
+        os.chmod(self.cfg, 0o644)               # secret inline con perms larghe
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('s3 credenziali risolte', r.stdout)
+        self.assertIn('permessi > 0600', r.stdout)          # remediation §18.4
+        self.assertIn('chmod 600', r.stdout)
+        self.assertIn('cleartext', r.stdout)                # http:// warning
+        self.assertIn('s3 HeadBucket s3://bkt/pre: offline', r.stdout)
+        self.assertIn('warning non fatale', r.stdout)
+
+    @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+    def test_doctor_secret_con_chmod_600_verde(self):
+        write(self.cfg, f'source: {self.src}\ndest: {self.dest}\n' + S3_BLOCK)
+        os.chmod(self.cfg, 0o600)
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('permessi del config ≤ 0600', r.stdout)
+        self.assertNotIn('permessi > 0600', r.stdout)
+
+    @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+    def test_doctor_json_le_righe_s3_ci_sono(self):
+        write(self.cfg, f'source: {self.src}\ndest: {self.dest}\n' + S3_BLOCK)
+        os.chmod(self.cfg, 0o600)
+        r = self.cli('doctor', '--json', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        doc = json.loads(r.stdout)
+        ids = [c['id'] for c in doc['checks']]
+        self.assertTrue(any(i.startswith('s3') for i in ids), ids)
+        # tutte non fatali: nessuna s3 in fail
+        self.assertNotIn('fail', [c['status'] for c in doc['checks']
+                                  if c['id'].startswith('s3')])
+
+    @unittest.skipIf(HAVE_BOTOCORE, 'extra installato: qui si testa la sua assenza')
+    def test_doctor_extra_mancante_warning_non_fatale(self):
+        write(self.cfg, f'source: {self.src}\ndest: {self.dest}\n' + S3_BLOCK)
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('safekeep[s3]', r.stdout)
+        self.assertIn('warning non fatale', r.stdout)
+        # il resto della diagnostica gira comunque (daemon/cfg restano validi)
+        self.assertIn('config valida', r.stdout)
 
 
 if __name__ == '__main__':

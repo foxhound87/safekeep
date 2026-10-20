@@ -380,5 +380,127 @@ class DiscoveryTest(unittest.TestCase):
                               os.path.join(tmp, 'Library')])
 
 
+class S3ConfigTest(unittest.TestCase):
+    """Blocco `s3_*` del config globale (SPEC.md §18.1) — fail-fast."""
+
+    @staticmethod
+    def block(extra='', secret='s3_secret_key: SK\n'):
+        return ('s3_endpoint: https://s3.example.com:443\n'
+                's3_bucket: bkt\n'
+                's3_access_key: AK\n' + secret + extra)
+
+    def test_blocco_valido_e_default(self):
+        cfg = parse_config(self.block('s3_prefix: /safekeep/\n'), origin='cfg')
+        self.assertEqual(cfg.s3.endpoint, 'https://s3.example.com:443')
+        self.assertEqual(cfg.s3.bucket, 'bkt')
+        self.assertEqual(cfg.s3.prefix, 'safekeep')    # normalizzato
+        self.assertEqual(cfg.s3.region, 'us-east-1')   # default
+        self.assertEqual(cfg.s3.addressing, 'path')    # default (endpoint custom)
+        self.assertTrue(cfg.s3.tls_check)              # default
+        self.assertEqual(cfg.s3.access_key, 'AK')
+        self.assertEqual(cfg.s3.secret_key, 'SK')
+        self.assertIsNone(cfg.s3.secret_env)
+
+    def test_config_solo_fs_s3_assente(self):
+        # backward compat: senza chiavi s3_* nulla cambia (SPEC §18)
+        cfg = parse_config('dest: /d\n', origin='cfg')
+        self.assertIsNone(cfg.s3)
+
+    def test_solo_s3_senza_dest_valido(self):
+        # almeno una dest: OPPURE s3_bucket (SPEC §18.1)
+        cfg = parse_config(self.block(), origin='cfg')
+        self.assertEqual(cfg.dests, [])
+        self.assertEqual(cfg.s3.bucket, 'bkt')
+
+    def test_senza_dest_e_senza_s3_errore_menziona_s3(self):
+        with self.assertRaises(ConfigError) as cm:
+            parse_config('source: /a\n', origin='cfg')
+        msg = str(cm.exception)
+        self.assertIn('dest', msg)
+        self.assertIn('s3_bucket', msg)
+        self.assertIn('safekeep.example', msg)
+
+    def test_bucket_senza_access_key_errore(self):
+        text = 's3_endpoint: https://e:443\ns3_bucket: b\ns3_secret_key: SK\n'
+        with self.assertRaises(ConfigError) as cm:
+            parse_config(text, origin='cfg')
+        self.assertIn('cfg:2', str(cm.exception))
+        self.assertIn('s3_access_key', str(cm.exception))
+
+    def test_secret_ed_env_insieme_errore(self):
+        with self.mock_env('VAR', 'x'):
+            with self.assertRaises(ConfigError) as cm:
+                parse_config(self.block('s3_secret_key_env: VAR\n'), origin='cfg')
+        self.assertIn('s3_secret_key_env', str(cm.exception))
+        self.assertIn('insieme', str(cm.exception))
+
+    def test_credenziali_assenti_errore(self):
+        with self.assertRaises(ConfigError) as cm:
+            parse_config(self.block(secret=''), origin='cfg')
+        self.assertIn('s3_secret_key', str(cm.exception))
+
+    def test_env_richiamata_ma_assente_errore(self):
+        var = 'SAFEKEEP_TEST_ABSENT_9f2a'
+        with self.assertRaises(ConfigError) as cm:
+            parse_config(self.block(secret=f's3_secret_key_env: {var}\n'),
+                         origin='cfg')
+        self.assertIn(var, str(cm.exception))
+
+    def test_env_presente_risolta(self):
+        with self.mock_env('SK_SAFEKEEP', 'dai-variabile'):
+            cfg = parse_config(
+                self.block(secret='s3_secret_key_env: SK_SAFEKEEP\n'), origin='cfg')
+        self.assertEqual(cfg.s3.secret_key, 'dai-variabile')
+        self.assertEqual(cfg.s3.secret_env, 'SK_SAFEKEEP')
+
+    def test_chiave_s3_ignota_errore(self):
+        with self.assertRaises(ConfigError) as cm:
+            parse_config(self.block('s3_buket: oops\n'), origin='cfg')
+        msg = str(cm.exception)
+        self.assertIn('s3_buket', msg)
+        self.assertIn('sconosciuta', msg)
+
+    def test_prefix_con_dotdot_errore(self):
+        with self.assertRaises(ConfigError) as cm:
+            parse_config(self.block('s3_prefix: a/../b\n'), origin='cfg')
+        self.assertIn('s3_prefix', str(cm.exception))
+        self.assertIn('..', str(cm.exception))
+
+    def test_addressing_e_tls_invalidi(self):
+        for extra in ('s3_addressing: style3\n', 's3_tls_check: maybe\n'):
+            with self.subTest(extra=extra):
+                with self.assertRaises(ConfigError):
+                    parse_config(self.block(extra), origin='cfg')
+
+    def test_endpoint_senza_scheme_errore(self):
+        text = self.block().replace('https://s3.example.com:443', 's3.example.com')
+        with self.assertRaises(ConfigError) as cm:
+            parse_config(text, origin='cfg')
+        self.assertIn('s3_endpoint', str(cm.exception))
+
+    def test_endpoint_cleartext_warning_non_fatale(self):
+        text = self.block().replace('https://', 'http://')
+        with self.assertLogs(LOGGER, 'WARNING') as cm:
+            cfg = parse_config(text, origin='cfg')
+        self.assertIn('cleartext', cm.output[0])
+        self.assertEqual(cfg.s3.endpoint, 'http://s3.example.com:443')
+
+    def test_s3_in_sync_restano_riga_invalida(self):
+        # invariante §11: un .sync non può configurare destinazioni — le chiavi
+        # s3_* sono righe invalide esattamente come `dest:`
+        text = 'name: x\ns3_bucket: bkt\ns3_secret_key: SK\ninclude: *.md\n'
+        with self.assertLogs(LOGGER, 'WARNING') as cm:
+            cfg = parse_sync(text, log_level='info', origin='p.sync')
+        self.assertEqual(len(cm.output), 2)
+        self.assertEqual(cfg.discarded, 2)
+        self.assertEqual([r.pattern for r in cfg.rules], ['*.md'])
+        with self.assertRaises(ConfigError):
+            parse_sync(text, log_level='debug', origin='p.sync')
+
+    @staticmethod
+    def mock_env(name, value):
+        return mock.patch.dict(os.environ, {name: value})
+
+
 if __name__ == '__main__':
     unittest.main()

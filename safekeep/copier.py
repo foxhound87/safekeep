@@ -20,6 +20,36 @@ MTIME_TOLERANCE = 1.0      # secondi: tolleranza mtime per volumi a risoluzione 
 TMP_INFIX = '.safekeep.tmp.'
 # errori che dicono "questa dest non è usabile adesso" → pending + backoff (§8.3)
 MOUNT_ERRNOS = (errno.ENODEV, errno.EBUSY, errno.ENOSPC)
+# throttle delle copie fallite (SPEC.md §10.1, 0.5.1): stessa (path, errno) →
+# una riga + `— ripetuto N volte` ogni THROTTLE_INTERVAL, non una riga a fallimento
+THROTTLE_INTERVAL = 300.0       # secondi
+_copy_errors = {}               # (src, errno) → [ultimo log monotonic, non loggati]
+
+
+def log_copy_error(src, dst, e, now=None):
+    """`copia fallita src → dst: e` con dedup per **(path, errno)** (SPEC.md §10.1).
+
+    Prima occorrenza: riga storica invariata. Poi al massimo una riga ogni
+    `THROTTLE_INTERVAL` per chiave, col suffisso `— ripetuto N volte` (N =
+    fallimenti non loggati da quell'ultima riga). `recent_permission_errors`
+    (§14.4) somma N+1 su queste righe: `count_24h` resta il conteggio vero,
+    sono solo le righe sul file a essere di meno. I conteggi in memoria
+    (`stats['errati']`, `sync-once`) non leggono da qui.
+    """
+    if now is None:
+        now = time.monotonic()
+    key = (src, e.errno)
+    entry = _copy_errors.get(key)
+    if entry is None or now - entry[0] >= THROTTLE_INTERVAL:
+        pending = 0 if entry is None else entry[1]
+        if pending:
+            log.error('copia fallita %s → %s: %s — ripetuto %d volte',
+                      src, dst, e, pending)
+        else:
+            log.error('copia fallita %s → %s: %s', src, dst, e)
+        _copy_errors[key] = [now, 0]
+    else:
+        entry[1] += 1
 
 
 def _tmp_path(dst):
@@ -176,7 +206,8 @@ def needs_copy(src: str, dst: str) -> bool:
 
 
 def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
-                      stats=None, dry_run=False, dest_base=None) -> int:
+                      stats=None, dry_run=False, dest_base=None,
+                      copy_fn=None, needs_copy_fn=None) -> int:
     """Walk della sorgente con pruning delle dir con verdict escluso; copia ogni
     file con verdict incluso che differisce (un file non matchato da nessuna
     regola NON viene copiato: allow-list, SPEC.md §4.3). Ritorna il numero di copie.
@@ -193,12 +224,22 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
     fermato la passata: il caller metta quella dest in pending (CR-05).
     `dry_run`: conta ed elenca senza copiare.
 
+    Seam destinazioni (SPEC.md §18.2): `copy_fn(src, dst)` e
+    `needs_copy_fn(src, dst)` — default invariati (`copier.copy_one` con
+    containment + `copier.needs_copy`); una dest S3 passa i propri. Gli
+    errori di rete S3 arrivano come `OSError(ENODEV)` e cadono nel percorso
+    pending già esistente.
+
     Nessun errore I/O di un singolo file abortisce il walk: viene loggato e
     contato, e gli altri file vengono processati comunque.
     """
     root = os.path.abspath(os.path.expanduser(source_root))
     base_root = os.path.abspath(os.path.expanduser(dest_base)) if dest_base else root
     prefix = os.path.relpath(root, base_root)   # radice del walk rispetto a base_root
+    # default invariati: le dest fs continuano a usare copy_one/needs_copy
+    do_copy = copy_fn if copy_fn is not None else (
+        lambda src, dst: copy_one(src, dst, dest_root))
+    do_need = needs_copy_fn if needs_copy_fn is not None else needs_copy
     copied = 0
     excluded = 0
     skipped = 0
@@ -215,7 +256,7 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
             log.error('errore di mount su %s → %s: %s: la dest va in pending',
                       src, dst, e)
             return True
-        log.error('copia fallita %s → %s: %s', src, dst, e)
+        log_copy_error(src, dst, e)
         return False
 
     for dirpath, dirnames, filenames in os.walk(root):
@@ -236,7 +277,7 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
                     dst = dest_path_fn(dest_root, base_root,
                                        os.path.join(prefix, r), layout)
                     try:
-                        if dry_run or copy_one(full, dst, dest_root):
+                        if dry_run or do_copy(full, dst):
                             copied += 1
                             if plan is not None:
                                 plan.append((full, dst))
@@ -258,8 +299,8 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
             dst = dest_path_fn(dest_root, base_root,
                                os.path.join(prefix, r), layout)
             try:
-                if needs_copy(src, dst):
-                    if dry_run or copy_one(src, dst, dest_root):
+                if do_need(src, dst):
+                    if dry_run or do_copy(src, dst):
                         copied += 1
                         if plan is not None:
                             plan.append((src, dst))

@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from safekeep import copier
+from safekeep import daemon as daemon_mod
 from safekeep.config import ConfigError, dest_path, parse_config
 from safekeep.copier import reconcile_project
 from safekeep.daemon import (
@@ -31,6 +32,12 @@ from safekeep.daemon import (
     plan_batch,
 )
 from safekeep.matcher import BUILTIN_RULES, Matcher, parse_rules
+
+try:
+    import botocore  # noqa: F401
+    HAVE_BOTOCORE = True
+except ImportError:
+    HAVE_BOTOCORE = False
 
 
 def write(path, text=''):
@@ -433,6 +440,10 @@ class FswatchArgvTest(unittest.TestCase):
         self.assertEqual(argv[:3], ['fswatch', '-0', '-m'])
         self.assertIn(argv[3], ('fsevents_monitor', 'inotify_monitor'))
         self.assertEqual(argv[4:7], ['-r', '-l', '1.0'])
+        # `-E` obbligatorio: fswatch legge le `-e` come BRE (gruppi/alternanze
+        # letterali) e le esclusioni non filtrerebbero più nulla
+        self.assertIn('-E', argv)
+        self.assertLess(argv.index('-E'), argv.index('-e') if '-e' in argv else len(argv))
         regexes = [argv[i + 1] for i, a in enumerate(argv) if a == '-e']
         self.assertTrue(regexes)
         self.assertTrue(any(re.search(rx, '/qualcuno/node_modules/x') for rx in regexes))
@@ -797,6 +808,163 @@ class WatchRootsSourceModeTest(TmpTestCase):
         argv = daemon.fswatch_argv()
         self.assertEqual(argv[argv.index('--') + 1:], [outer])
         self.assertEqual(len(daemon.projects), 1, 'progetto scoperto una volta sola')
+
+
+S3_TEXT = ('s3_endpoint: https://s3.example.com:443\n'
+           's3_bucket: bkt\ns3_prefix: pre\n'
+           's3_access_key: AK\ns3_secret_key: SK\n')
+
+
+class FakeS3:
+    """Doppione senza rete di `S3Destination`: stesso seam
+    (`state`/`dest_path`/`needs_copy`/`copy`), contatore delle copie.
+    Nessun botocore richiesto — qui si testa il wiring del daemon (§18)."""
+
+    def __init__(self, state='ok', copy_error=None):
+        self.root = 's3://bkt/pre'
+        self._state = state
+        self._copy_error = copy_error
+        self.copies = []
+
+    def state(self):
+        return self._state
+
+    def dest_path(self, dest_root, source_root, relpath, layout):
+        return dest_root.rstrip('/') + '/' + os.path.normpath(relpath)
+
+    def needs_copy(self, src, dst):
+        return True                      # sempre "da copiare": conta le copie
+
+    def copy(self, src, dst):
+        if self._copy_error is not None:
+            raise self._copy_error
+        self.copies.append(dst)
+        return True
+
+
+class S3SeamTest(TmpTestCase):
+    """Seam `copy_fn`/`needs_copy_fn` (task 4): reconcile, evento `_copy` e
+    `sync_once --prune` con dest S3 — zero rete, zero botocore."""
+
+    def build(self, s3):
+        src = self.path('src')
+        proj = os.path.join(src, 'proj')
+        write(os.path.join(proj, '.sync'), 'include: *.md\n')
+        write(os.path.join(proj, 'a.md'), 'x')
+        dest = self.path('dst')
+        os.makedirs(dest, exist_ok=True)
+        cfg_path = write(self.path('safekeep.cfg'),
+                         f'source: {src}\ndest: {dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        daemon.s3 = s3                  # il doppione al posto del client reale
+        return daemon
+
+    def test_reconcile_copia_anche_su_s3_e_somma_le_conta(self):
+        fake = FakeS3()
+        daemon = self.build(fake)
+        copied = daemon.reconcile(daemon.projects[0])
+        # il walk copia `.sync` (sempre inclusa, §4.1) + a.md, su OGNI dest
+        self.assertEqual(sorted(fake.copies),
+                         ['s3://bkt/pre/proj/.sync', 's3://bkt/pre/proj/a.md'])
+        self.assertEqual(copied, 4, '2 copie fs + 2 copie s3')
+
+    def test_s3_offline_pending_senza_copie(self):
+        fake = FakeS3(state='offline')
+        daemon = self.build(fake)
+        daemon.reconcile(daemon.projects[0])
+        self.assertIn(fake.root, daemon.pending)     # retry via backoff §8.3
+        self.assertEqual(fake.copies, [])
+
+    def test_errore_di_rete_s3_mette_pending(self):
+        # ENODEV è il percorso già usato per i mount spariti (§18.3)
+        fake = FakeS3(copy_error=OSError(errno.ENODEV, 'S3 irraggiungibile'))
+        daemon = self.build(fake)
+        daemon.reconcile(daemon.projects[0])
+        self.assertIn(fake.root, daemon.pending)
+        self.assertEqual(fake.copies, [])
+
+    def test_eacces_s3_solo_log_non_pending(self):
+        fake = FakeS3(copy_error=OSError(errno.EACCES, 'S3: AccessDenied'))
+        daemon = self.build(fake)
+        daemon.reconcile(daemon.projects[0])
+        self.assertNotIn(fake.root, daemon.pending,
+                         'auth errata non deve loopare nel backoff')
+
+    def test_evento_copy_s3(self):
+        fake = FakeS3()
+        daemon = self.build(fake)
+        daemon._copy(os.path.join(daemon.projects[0].root, 'a.md'),
+                     daemon.projects[0])
+        self.assertEqual(fake.copies, ['s3://bkt/pre/proj/a.md'])
+
+    def test_evento_s3_offline_pending(self):
+        fake = FakeS3(state='offline')
+        daemon = self.build(fake)
+        daemon._copy(os.path.join(daemon.projects[0].root, 'a.md'),
+                     daemon.projects[0])
+        self.assertIn(fake.root, daemon.pending)
+        self.assertEqual(fake.copies, [])
+
+    def test_dest_ready_s3_usa_lo_stato(self):
+        fake = FakeS3(state='offline')
+        daemon = self.build(fake)
+        self.assertFalse(daemon.dest_ready(fake.root))
+        fake._state = 'ok'
+        self.assertTrue(daemon.dest_ready(fake.root))
+
+    def test_sync_once_solo_s3_e_prune_non_lo_tocca(self):
+        # config SENZA dest fs (almeno dest: oppure s3_bucket, §18.1)
+        src = self.path('src')
+        proj = os.path.join(src, 'proj')
+        write(os.path.join(proj, '.sync'), 'include: *.md\n')
+        write(os.path.join(proj, 'a.md'), 'x')
+        cfg_path = write(self.path('safekeep.cfg'), f'source: {src}\n' + S3_TEXT)
+        fake = FakeS3()
+        with mock.patch.object(daemon_mod, 'S3Destination', return_value=fake):
+            daemon = Daemon(cfg_path)
+            daemon.load_config()
+            self.assertIs(daemon.s3, fake)
+        daemon.load_projects()
+        with mock.patch.object(daemon_mod, 'prune_project') as prune:
+            rows = daemon.sync_once(prune=True)
+        prune.assert_not_called()        # `--prune` tocca SOLO le dest fs (§18.2)
+        project, stats, absent = rows[0]
+        self.assertEqual(sorted(fake.copies),
+                         ['s3://bkt/pre/proj/.sync', 's3://bkt/pre/proj/a.md'])
+        self.assertEqual(stats.get('rimossi', 0), 0)
+        self.assertEqual(absent, 0)
+
+
+@unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+class S3LoadConfigTest(TmpTestCase):
+    """`load_config` costruisce il dest S3 reale e controlla chmod 600 (§18.4)."""
+
+    def cfg(self, chmod=0o600):
+        cfg_path = write(self.path('safekeep.cfg'),
+                         f'dest: {self.path("dst")}\n' + S3_TEXT)
+        os.chmod(cfg_path, chmod)
+        return cfg_path
+
+    def test_load_config_costruisce_s3destination(self):
+        from safekeep.s3dest import S3Destination
+        daemon = Daemon(self.cfg(0o600))
+        daemon.load_config()
+        self.assertIsInstance(daemon.s3, S3Destination)
+        self.assertEqual(daemon.s3.root, 's3://bkt/pre')
+        self.assertFalse(daemon.s3_secret_perms_bad)
+
+    def test_permessi_larghi_warning_una_tantum(self):
+        daemon = Daemon(self.cfg(0o644))
+        daemon.load_config()
+        self.assertTrue(daemon.s3_secret_perms_bad)
+        with self.assertLogs('safekeep', 'WARNING') as cm:
+            daemon.log_s3_secret_perms()
+        self.assertIn('chmod 600', cm.output[0])
+        with mock.patch.object(daemon_mod.log, 'warning') as warn:
+            daemon.log_s3_secret_perms()          # già emesso → niente replay
+        warn.assert_not_called()
 
 
 if __name__ == '__main__':

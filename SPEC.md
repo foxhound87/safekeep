@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.4.0 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.5.2 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -118,7 +118,7 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 | Chiave | Tipo | Default | Descrizione |
 |---|---|---|---|
 | `source` | path (ripetibile) | **opzionale** | radici da osservare; ogni radice è una "sorgente"; assente → **modalità auto-discovery** da `$HOME` (vedi §6); dir senza `.sync` = **non seguita** (vedi §4.1) |
-| `dest` | path (ripetibile) | **obbligatoria** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11) |
+| `dest` | path (ripetibile) | **obbligatoria\*** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11); \* serve **almeno una `dest:` oppure `s3_bucket:`** (dest S3-compatible, §18) |
 | `layout` | `relative` \| `full` | `relative` | layout dei path di destinazione (vedi nota sotto) |
 | `defaults` | lista regole | builtin | regole di default a **bassa priorità** (sotto le regole globali e sotto `.sync`) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | livello di log su stderr + file di log |
@@ -132,8 +132,10 @@ Note:
   - **auto-discovery** (nessuna riga `source:`): watch root = `$HOME`, scan di
     discovery alla ricerca dei `.sync`, `.sync` creato dopo l'avvio agganciato
     da solo (vedi §6). Una config senza `source` **non** è un errore.
-- **`dest` è obbligatoria**: nessuna riga `dest:` → `ConfigError` con hint
-  (le destinazioni vivono solo qui, §4.2). Nessuna `source` invece non è un errore.
+- **`dest` è obbligatoria** (a meno che non sia configurata una dest S3:
+  `s3_bucket`, §18): nessuna riga `dest:` e nessun `s3_bucket` → `ConfigError`
+  con hint (le destinazioni vivono solo qui, §4.2). Nessuna `source` invece
+  non è un errore.
 - `defaults` accetta regole nella stessa sintassi di `include:`/`exclude:` di `.sync`,
   una per riga, oppure come righe multiple con la stessa chiave.
 - Questo file è **fail-fast**: chiave ignota o riga invalida → `ConfigError` con numero di
@@ -341,7 +343,7 @@ ignorare (§4.2).
    statiche) e avvia il subprocess:
 
    ```
-   fswatch -0 -m <monitor> -r -l 1.0 -e <regex esclusioni> -- <radici watch>
+   fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex esclusioni> -- <radici watch>
    ```
 
    - **radici watch**: le `source` del config (modalità source, deduplicate: una
@@ -354,6 +356,15 @@ ignorare (§4.2).
      `inotify_monitor` su Linux (inotify, subsystem del kernel Linux) — §14.2;
    - `-r`: ricorsivo;
    - `-l 1.0`: batching di almeno 1s (anti-flood a monte);
+   - `-E` (**requisito, §6.4**): le `-e` vanno lette come **ERE (Extended Regular
+     Expressions)**, non come BRE (Basic Regular Expressions) che è il default di
+     fswatch. Senza `-E` i costrutti estesi — gruppi `(...)`, alternanze `|` —
+     sono letterali e **nessuna esclusione filtra più nulla**: con un `.sync` in
+     `$HOME` ogni evento `Library/...`/`.local/...` arriva al matcher, `classify`
+     risponde `walk_dir` e il daemon satura senza processare mai l'evento di
+     reload della config. Le regex servono proprio a descrivere path reali —
+     espressioni con gruppi/alternanze e path con spazi (es. `VAULT CLA/`, già
+     reso sicuro dal separatore NUL di `-0`) — costrutti che esistono solo in ERE;
    - `-e <regex>`: pre-filtro esclusioni lato fswatch (le regex sono un filtro grezzo; la
      decisione finale resta al matcher Python, che è l'unica fonte di verità). In
      **modalità auto-discovery** le regex includono in più le exclude dedicate della
@@ -551,6 +562,63 @@ Destinazioni su volumi esterni/reti:
    invece (o in aggiunta) al backoff applicativo. Nel 0.1.0 è documentato e lasciato commentato
    nel plist: l'event driver fallback è il backoff.
 
+### 8.4 Interprete dell'agent: path stabile (incidente 03/10/2026, fix 0.5.1)
+
+**Incidente reale (timeline).** Fino a 0.5.0 `install.sh` rendeva `__PYTHON__` con default
+`/opt/homebrew/bin/python3`, che Homebrew (package manager di macOS) risolve nel path
+**Cellar** della versione installata:
+
+| Quando | Cosa |
+|---|---|
+| 03/10 18:54 | launchd avvia il daemon: exe = `Cellar/python@3.14/3.14.6/...` |
+| 03/10 21:20 | `brew upgrade` porta Python 3.14.6 → 3.14.8 e **cancella** la vecchia cartella Cellar: l'eseguibile su cui gira il processo sparita da disco |
+| ore dopo | **TCC** (Transparency, Consent and Control, sistema permessi di macOS) non riesce più a identificare il processo (`proc_pidpath_audittoken() failed`) e nega i volumi rimovibili → `EPERM` (Operation not permitted) su **ogni** copia per ~45h: 5.251 righe `ERROR copia fallita …` identiche nel log, 4.829 in un giorno |
+| recovery | ri-grant manuale dei permessi + `launchctl kickstart -k` (riparte sul nuovo exe → torna a funzionare) |
+
+Sintomo e log ribollente erano conseguenze, non la causa: la causa era l'exe cancellato sotto
+un processo vivo. Il check `doctor` "errori di permesso recenti" (§14.4) vedeva il sintomo
+ma non poteva vedere la causa — per questo 0.5.1 aggiunge anche il check exe (§14.4).
+
+**Fix (0.5.1): `__PYTHON__` = `/usr/bin/python3`.** `install.sh` rende ora di default lo
+**shim di sistema** `/usr/bin/python3` (Apple-gestito, non toccato dagli upgrade Homebrew,
+già l'interprete che §11 raccomanda per il consenso FDA), validato **≥ 3.9** eseguendolo
+(`py_ok`); shim assente o troppo vecchio → fallback a `python3` nel `PATH`
+(`SAFEKEEP_PYTHON` resta l'override esplicito, come prima). Lo stesso `__PYTHON__`
+alimenta `SAFEKEEP_PYTHON` del plist trend (§9.2), quindi **entrambi** gli agent sono
+coperti dalla stessa scelta.
+
+Soluzioni valutate:
+
+- **(a) shim di sistema** — **scelta**. L'exe su cui gira il daemon non può essere
+  cancellato da `brew upgrade`, quindi la classe "exe vivo sparito → TCC non identifica il
+  processo" sparisce; il plist resta dichiarativo (launchd vede un `ProgramArguments`
+  stabile, identificabile da TCC a ogni riavvio).
+- **(b) wrapper shell** che risolve `python3` a ogni avvio — **scelta rifiutata**: la
+  risoluzione avviene solo all'avvio, mentre il processo in esercizio resta sull'exe già
+  risolto → un upgrade Homebrew con il daemon vivo ricreerebbe **esattamente** lo stesso
+  incidente; in più il plist dichiarerebbe `/bin/bash` come programma, non l'interprete.
+
+**Rischio CLT (Command Line Tools) dichiarato:** su macOS `/usr/bin/python3` è uno shim che
+richiede i CLT: senza, l'esecuzione mostra il prompt d'installazione. Mitigazione doppia:
+`install.sh` validerebbe comunque l'interprete eseguendolo (shim che non risponde →
+fallback `command -v python3`, comportamento pre-0.5.1) e Homebrew presente implica quasi
+certamente CLT (verificato in locale: `xcode-select -p` → Xcode.app; `/usr/bin/python3` →
+3.9.6; la suite è verde anche girata con quell'interprete).
+
+**Plist live già installati:** launchd **non rilegge** il file fino a `bootout`+`bootstrap`
+(o reboot): i plist renderizzati col vecchio default restano fragili finché non vengono
+re-renderizzati. `install.sh` è idempotente; re-render + ricarica:
+
+```bash
+./install.sh            # re-render del plist principale (idempotente, non riparte da solo)
+launchctl bootout gui/$(id -u)/com.safekeep.agent 2>/dev/null
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
+./install.sh --trend    # stesso trattamento per l'agent trend (fa da solo bootout+bootstrap)
+```
+
+Verifica: `ps -p <pid> -o comm=` deve mostrare `/usr/bin/python3` (exe esistente su disco)
+e `launchctl print gui/$(id -u)/com.safekeep.agent | grep -E 'state|program'`.
+
 ---
 
 ## 9. Comandi CLI
@@ -564,7 +632,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 | `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
-| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC e lint plist (solo macOS), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
+| `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC, lint plist ed eseguibile del processo ancora su disco (solo macOS, §14.4), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
 
 `sync-once --prune` è l'unica opzione che **cancella**: rimuove dalla dest i file il cui
 sorgente esiste ancora ma che il matcher ora esclude (regole cambiate), solo sotto il
@@ -608,7 +676,9 @@ python3 bin/safekeep.py run -v
    se presenti, altrimenti `$HOME` in modalità auto-discovery (§11);
 4. che le dest siano scrivibili;
 5. che l'agent per l'init system esista e sia valido: plist launchd + `plutil -lint`
-   su **Darwin**, unit systemd su **Linux** (§14.3 e §14.4);
+   su **Darwin**, unit systemd su **Linux** (§14.3 e §14.4); su Darwin, se il job è
+   caricato, anche che il processo gira su un **eseguibile ancora presente su disco**
+   (0.5.1, §8.4 e §14.4 — warning non fatale se no);
 6. accesso ai source (test read + probe TCC — solo Darwin);
 7. residui `.safekeep.tmp.*`;
 8. su **Linux**, informativo e **non fatale**: `fs.inotify.max_user_watches` ≥ 16384
@@ -736,6 +806,23 @@ si ferma, `stats['dest_pendente']` segnala al caller di mettere quella dest in `
 (§8.3) — le altre dest proseguono. Al retry la dest rifallisce → il backoff **riprende da
 dove era** (mai ripartire da 1s: niente loop a 1Hz).
 
+**Throttle delle righe di errore (0.5.1).** La stessa copia fallita può ripetersi senza
+fine (un volume negato produce un errore per evento e per reconcile: 5.251 righe identiche
+nell'incidente di §8.4). `log_copy_error()` in `safekeep/copier.py` deduplica per
+**(path, errno)**: la prima occorrenza scrive la riga storica `copia fallita src → dst: …`
+invariata; poi, per ogni chiave, al massimo **una riga ogni 300s** (`THROTTLE_INTERVAL`)
+con il suffisso `— ripetuto N volte` (N = fallimenti compresi fra due righe loggate,
+escluso quello che scrive la riga). I due call site storici (`reconcile_project` in §10.1
+e `_copy` del daemon) passano da lì, quindi event-driven e reconcile sono coperti insieme.
+Le fallite con errno di **mount** (`ENODEV`/`EBUSY`/`ENOSPC`) non sono throttlate: ce n'è
+al massimo una per walk (il walk si ferma) e la loro riga (`errore di mount …`) non è
+cambiata. I conteggi **non leggono mai dal log**: `stats['errati']` e le righe di sintesi
+di `sync-once` restano identici. L'unico consumatore del log è `recent_permission_errors`
+(§14.4), adattato a restare onesto (vedi là). Limite dichiarato: il dizionario in memoria
+cresce con i path distinti falliti e non viene mai ripulito — una voce per (path, errno) di
+un albero di dimensioni normali, da valutare solo se una dest negata produce milioni di
+path distinti.
+
 **Quando gira:**
 
 | Momento | Ambito |
@@ -825,7 +912,7 @@ illimitata della coda in memoria.
 | **T2** | Parser config globale `~/.safekeep` + parser `.sync` senza dest (`safekeep/config.py`): sezioni, regole, errori fail-fast, esempi in `examples/` | parse di `examples/safekeep.example` e `examples/sync.example` produce la struttura attesa; riga invalida → errore con numero di riga; `dest:` in `.sync` → warning con info / errore con debug | ✅ fatto (`tests/test_config.py`) |
 | **T3** | Copia atomica + stability check + symlink + walk/reconcile idempotente (`safekeep/copier.py`) | test su tmpdir: contenuto + mtime preservati; src instabile/sparito → `False` senza residui tmp; symlink (anche rotti e di directory) ricreati come symlink; seconda run = 0 copie | ✅ fatto (`tests/test_copier.py`) |
 | **T4** | Destinazioni non montate (`safekeep/volumes.py`): `dest_state`, `backoff_schedule()` (1→2→…→60 cap), `partition_dests` | `dest_state` su path esistente/assente; backoff con cap a 60s; split (ready, absent) | ✅ fatto (`tests/test_volumes.py`) |
-| **T5** | `run`: subprocess fswatch (`-0 -m fsevents_monitor -r -l 1.0 -e …`), dispatcher eventi, debounce, timer 24h, pending/backoff mount, anti-flood (>5000 → collapse a reconcile) | modificare un file sorgente → compare sul dest entro ~2s; dest smontata → pending, remount → catch-up; flood simulato triggera il collapse | da fare |
+| **T5** | `run`: subprocess fswatch (`-0 -m fsevents_monitor -r -l 1.0 -E -e …`), dispatcher eventi, debounce, timer 24h, pending/backoff mount, anti-flood (>5000 → collapse a reconcile) | modificare un file sorgente → compare sul dest entro ~2s; dest smontata → pending, remount → catch-up; flood simulato triggera il collapse | da fare |
 | **T6** | CLI `status`/`doctor` + plist launchd + comandi bootout/bootstrap/kickstart (`launchd/`, `install.sh`, `uninstall.sh`) | `doctor` verde su macchina con permessi; plist passa `plutil -lint`; kill del processo → launchd lo riavvia da solo | ✅ fatto (`tests/test_cli.py`) |
 | **T7** | Sicurezza (dest sotto source, `.sync` senza chiavi di dest), logging, edge case, docs (questa SPEC) | `doctor`/`run`/`sync-once` escono con ≠ 0 su dest sotto source; `.sync` non attendibile gestito (info → warning + skip, debug → fatale); containment della dest (nessuna scrittura fuori); dedup senza perdita di eventi; errori I/O confinati al file; tabella edge case coperta da casi di test | ✅ fatto (`tests/test_matcher.py`, `tests/test_config.py`, `tests/test_copier.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
 | **T8** | Auto-discovery (`source` opzionale): scan di `$HOME` con pruning dedicato, watch root `$HOME` con exclude home, evento su `/.sync` → nuovo progetto, rescan al timer 24h, dedup watch roots (`safekeep/config.py`, `safekeep/daemon.py`) | config senza `source` valida (senza `dest` → errore con hint); `.sync` in `$HOME` scoperto, `Library`/nascoste potato, sotto-progetto annidato scoperto; watch root source invariata (backward compat); evento `.sync` → discover + reconcile; rescan 24h | ✅ fatto (`tests/test_config.py`, `tests/test_daemon.py`, `tests/test_cli.py`) |
@@ -871,7 +958,7 @@ girando su macOS. Consumatori: `daemon.fswatch_argv()` (§14.2) e `doctor` (§14
 ### 14.2 fswatch: monitor dichiarato per piattaforma
 
 ```
-fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
+fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>
 ```
 
 | `<monitor>` | Piattaforma | equivale a |
@@ -885,7 +972,8 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
 - I nomi sono quelli che `fswatch -M` (`--list-monitors`) stampa sulla piattaforma.
   Attenzione: su Linux il nome è **`inotify_monitor`**, *non* `inotify` — `-m inotify`
   non è un alias accettato e fswatch esce con errore.
-- **Invariato**: `-0` (NUL-delimitato), `-e`, `-r`, `-l 1.0`, le regex di esclusione e
+- **Invariato**: `-0` (NUL-delimitato), `-E` (ERE, §6.4 — requisito perché le `-e`
+  filtrino davvero), `-e`, `-r`, `-l 1.0`, le regex di esclusione e
   il resto del flusso di §6.
 
 ### 14.3 Init system: launchd (macOS) → systemd (Linux)
@@ -932,6 +1020,7 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
 | agent dell'init system | plist (se presente) | unit systemd (se presente), riga informativa |
 | limite inotify | — | `fs.inotify.max_user_watches` letto da `/proc/sys/fs/inotify/max_user_watches` |
 | errori di permesso recenti nel log | ✔/✗ | ✔/✗ |
+| exe del daemon ancora su disco (0.5.1) | ✔/✗/saltato | — |
 | linger (solo con unit installata) | — | ✔/✗ |
 
 - Il check sul limite inotify è **informativo e non fatale**: ✗ + hint
@@ -959,7 +1048,28 @@ fswatch -0 -m <monitor> -r -l 1.0 -e <regex> -- <roots>
   vederli era leggere il file a mano. Hint stampati col warning: `safekeep sync-once
   --dry-run` per vedere i pending, riconcedere i permessi al volume / FDA (Full Disk
   Access), path del log. Finestra e non-fatalità volute: è un sintomo recente, non
-  uno stato del sistema.
+  uno stato del sistema. **Throttle (0.5.1)**: le copie fallite ripetute per lo stesso
+  (path, errno) non scrivono più una riga ciascuna (§10.1) — prima riga come sempre,
+  poi al massimo una ogni 300s col suffisso `— ripetuto N volte`. Per non ingannare il
+  conteggio, `recent_permission_errors` somma **N + 1** per ogni riga con il suffisso
+  (la riga stessa + i N fallimenti compressi): `count_24h` resta il numero **vero** di
+  fallimenti nella finestra, sono solo le righe scritte sul file a essere di meno.
+  Riga senza suffisso → 1, come prima.
+- **exe del daemon ancora su disco (0.5.1, Darwin-only)**: se il job
+  `com.safekeep.agent` è caricato, `daemon_exe()` legge il `pid` da
+  `launchctl print gui/$UID/com.safekeep.agent` e l'eseguibile assoluto da
+  `ps -p <pid> -o comm=`; se quel path **non esiste più** su disco → warning **forte ma
+  non fatale** con hint `launchctl kickstart -k gui/$(id -u)/com.safekeep.agent`
+  (caso dell'incidente §8.4: upgrade Homebrew sotto un daemon vivo). Perché non fatale:
+  è un sintomo con rimedio manuale di una riga, e `doctor` deve restare eseguibile
+  proprio mentre diagnostica quello stato (diagnostica, non monitor: stessa
+  non-fatalità del check errori di permesso, che è il lato sintomo della stessa
+  medaglia). Lettura **solo** (`launchctl print` + `ps`): nessuna sessione utente
+  richiesta, niente scritture — coerente con "nessun check systemctl live" qui sotto.
+  Job non caricato, processo non trovato, `launchctl`/`ps` assenti o falliti,
+  non-Darwin → check **saltato** con riga ✔ (non determinabile ⇒ nessun allarme).
+  Funziona anche con un plist live renderizzato col vecchio default: guarda il
+  **processo**, non il file.
 - **linger (0.3.1, solo Linux con unit installata)**: se
   `~/.config/systemd/user/safekeep.service` esiste, `doctor` verifica che l'utente sia
   in `/var/lib/systemd/linger/` (fonte di verità di systemd, leggibile senza root —
@@ -1083,6 +1193,45 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   tre nuovi righe informative in `doctor` (rilevamento, hint systemd, info
   `/mnt/` drvfs) e `install.sh` gentile senza systemd. **Non verificato su WSL
   reale** (nessuna macchina WSL disponibile): test con env/kernel finto.
+- **0.5.0** — `doctor --json` (§9.1) + wrapper trend (§9.2): la diagnostica
+  esce come **un documento JSON su stdout** (stessi check, stesso exit code,
+  `permission_errors` strutturato) e `bin/safekeep-trend.sh` appende ogni ora
+  `timestamp,exit,count_24h,last` a
+  `~/.local/state/safekeep/permission-trend.csv` (header idempotente; agent
+  launchd `com.safekeep.trend` con `StartInterval` 3600, render+bootstrap di
+  `install.sh --trend` che **non tocca** il daemon principale). CI: step WSL
+  eseguito davvero (§14.6) e `actions/checkout@v7` + `actions/setup-python@v7`
+  (runtime `node24`, niente warning di deprecazione Node 20).
+- **0.5.1** — fix (PATCH) tre problemi reali dell'incidente EPERM (§8.4):
+  1. `install.sh` rende `__PYTHON__` = `/usr/bin/python3` (shim di sistema
+     stabile, validato ≥ 3.9 con fallback nel `PATH`) invece del path Cellar di
+     Homebrew — plist agent e trend non rompono più a ogni `brew upgrade`
+     (§8.4; (b) wrapper shell rifiutata, motivazione in §8.4);
+  2. nuovo check `doctor` **non fatale** (Darwin, se il job è caricato): il
+     processo deve girare su un eseguibile **ancora presente su disco** —
+     warning forte con hint `launchctl kickstart -k` se l'exe è stato
+     cancellato sotto un processo vivo (§14.4);
+  3. throttle delle righe `copia fallita` ripetute per (path, errno): una riga
+     + `— ripetuto N volte` ogni 300s, e `recent_permission_errors` somma N+1
+     così `count_24h` resta il conteggio vero (§10.1 e §14.4).
+- **0.5.2** — fix (PATCH) fswatch `-E` (§6.4): le `-e` venivano lette come **BRE
+  (Basic Regular Expressions)**, dove `(`/`|` sono letterali, e di conseguenza
+  **nessuna esclusione filtrava**: con un `.sync` in `$HOME` gli eventi
+  `Library/...`/`.local/...` arrivavano al matcher, `classify` rispondeva
+  `walk_dir` e il daemon saturava senza processare mai il reload della config
+  (5,5 minuti di reconcile per tornare vivo). L'argv di fswatch passa ora `-E`
+  (**ERE**, Extended Regular Expressions) con test di regressione, e §6.4/§14.2
+  documentano il requisito — le regex servono a descrivere gruppi/alternanze su
+  path reali, spazi compresi (`VAULT CLA/`).
+- **0.6.0** — destinazione **S3-compatible** (Simple Storage Service) — §18:
+  chiavi `s3_*` in `~/.safekeep` (almeno una `dest:` **oppure** `s3_bucket`),
+  client **botocore** via extra `safekeep[s3]` con import lazy (runtime
+  stdlib-only invariato), upload + `needs_copy` via metadata
+  (`x-amz-meta-mtime` ns, `x-amz-meta-mode`, symlink = object zero-byte con
+  `x-amz-meta-symlink`), errori di rete → pending/backoff §8.3, `status` e
+  `doctor` con righe dedicate (tutte non fatali), secret con enforcement
+  `chmod 600` + fallback `s3_secret_key_env`. **NO prune/cancellazioni su
+  S3, NO versioning**; `--prune` tocca solo le dest fs.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
@@ -1144,3 +1293,107 @@ Nessuno dei tre è fatale: `doctor` esce 0 anche su WSL1 senza systemd.
   E2E su WSL no.
 - Eventi su `/mnt/*` (drvfs/9p) e fswatch su WSL: non documentati qui, da
   verificare quando ci sarà una macchina WSL.
+
+---
+
+## 18. Destinazione S3-compatible (0.6.0)
+
+Una **sola** destinazione S3-compatible (S3 = Simple Storage Service),
+affiancata alle dest filesystem: le `dest:` restano come sono, le chiavi
+`s3_*` vivono **solo** in `~/.safekeep` (un `.sync` non può aggiungerle:
+`_KEY_SHAPE` le classifica righe invalide, §4.2/§11).
+
+### 18.1 Schema chiavi (`~/.safekeep`)
+
+| Chiave | Tipo | Default | Descrizione |
+|---|---|---|---|
+| `s3_endpoint` | URL `http(s)://host[:porta]` | endpoint AWS | endpoint del servizio; **obbligatorio di fatto** per servizi self-hosted |
+| `s3_bucket` | nome bucket | — | con `s3_bucket` presente serve **almeno una `dest:` oppure** `s3_bucket` (backward compat) |
+| `s3_prefix` | path piatto | vuoto | prefisso dentro il bucket, normalizzato (niente `/` iniziale/finali); **`..` → errore** |
+| `s3_region` | stringa | `us-east-1` | regione (MinIO/Silo: libera) |
+| `s3_access_key` | stringa | — | **obbligatorio** quando `s3_bucket` presente |
+| `s3_secret_key` | stringa | — | XOR con `s3_secret_key_env`; il file deve essere `chmod 600` (§18.4) |
+| `s3_secret_key_env` | nome variabile d'env | — | secret letto da una variabile d'ambiente; **assente → errore a parse-time** |
+| `s3_addressing` | `path` \| `virtual` | `path` | stile di indirizzamento; `path` per endpoint custom |
+| `s3_tls_check` | `true` \| `false` | `true` | `false` = accetta certificati self-signed (off topic: disabilita solo la verifica, `http://` resta cleartext) |
+
+Client: **botocore** (non boto3) tramite l'extra
+`pipx install "safekeep[s3]"` (`[project.optional-dependencies] s3 =
+["botocore>=1.31,<2"]`), import **lazy** in `safekeep/s3dest.py`: senza
+extra, una config `s3_*` produce `ConfigError` fail-fast con hint
+(`run`/`sync-once`/`status` escono ≠ 0; in `doctor` è una riga **non
+fatale**, §9.2). Il runtime senza `s3_*` resta stdlib-only.
+
+Validazioni fail-fast in `parse_config` (con numero di riga): bucket senza
+`s3_access_key`; `s3_secret_key` **e** `s3_secret_key_env` insieme; entrambi
+assenti; env richiamata ma inesistente; chiave `s3_*` ignota; `s3_prefix`
+con `..`; enum invalidi. Endpoint `http://` → **warning cleartext** (non
+fatale). In assenza di `s3_bucket` il requisito storico "almeno una `dest:`"
+resta invariato.
+
+### 18.2 Mapping semantica
+
+- **Key** = `s3_prefix` normalizzato + path dest calcolato col `layout`
+  globale (`relative`/`full`, §3) con separatori `/` — stesso identico
+  calcolo delle dest fs (`dest_path`), così un oggetto e il suo omologo su
+  disco stanno nello stesso "luogo" logico.
+- **`needs_copy`** = `HeadObject`: oggetto assente → copia; altrimenti
+  (size, mtime) — mtime salvato come `x-amz-meta-mtime` in **nanosecondi**,
+  tolleranza 1s (`MTIME_TOLERANCE`, §7.1) → stessa semantica idempotente
+  delle dest fs. Metadata `x-amz-meta-mode` = `oct(st_mode)`.
+- **Symlink** = object a **zero byte** con `x-amz-meta-symlink` = target
+  (mai seguito, §7.3): `needs_copy` confronta il target.
+- **Upload** = `put_object` con `Body` = file aperto in streaming e i
+  metadata; nessuna writer di destinazione: niente tmp, niente replace —
+  un PUT object è di per sé atomico (lo scritto parziale non diventa mai
+  l'oggetto "giusto" con metadata validi, e al prossimo reconcile
+  size/mtime divergenti rilanciano la copia).
+- **Stability check** invariato (§7.1): due stat prima dell'upload.
+- **Mai cancellare**: **nessuna DeleteObject**, nessuna list-then-prune:
+  `--prune` tocca **solo** le dest fs (§9). **Nessun versioning** del
+  bucket richiesto né gestito.
+
+### 18.3 Errori di rete → pending
+
+`safekeep/s3dest.py` rilancia gli errori botocore come `OSError`:
+
+| Eccezione botocore | errno | Effetto |
+|---|---|---|
+| timeout connessione/lettura, DNS (Domain Name System), endpoint irraggiungibile, 5xx, throttling/`SlowDown` | `ENODEV` | **pending + backoff** §8.3 (stesso percorso di un mount sparito) |
+| 403/400 (credenziali errate, richiesta malformata) | `EACCES` | solo log (throttled §10.1), **non** pending: al prossimo reconcile ritenta |
+
+`state()` = `HeadBucket` con **cache 30s** (`ok`/`offline`): `status` lo
+mostra, `doctor` lo usa come check non fatale, il retry dei pending lo usa
+come "il mount è tornato?".
+
+### 18.4 Sicurezza credenziali
+
+- `s3_secret_key` inline nel file: `Daemon.load_config()` controlla i
+  permessi; se > 0600 → **warning runtime una-tantum** (emesso dopo
+  l'init del logging) + riga `doctor` **non fatale** con remediation
+  `chmod 600 ~/.safekeep`.
+- Alternativa senza secret nel file: `s3_secret_key_env: NOME_VAR`
+  (la variabile va nell'ambiente dell'agent: `launchd`/`systemd`).
+- I log contengono solo endpoint/bucket/key mai la secret (§11).
+
+### 18.5 Vincoli dichiarati
+
+- **Single-process**: nessun thread propri — un PUT lento (o un HeadObject
+  lento) blocca il loop del daemon per la durata del transfer, con il timeout
+  botocore come tetto (connect 10s / read 60s, retry limitati). Accettabile
+  in v1; se non lo fosse, il rimedio è un processo dedicato (decisione
+  aperta, §15).
+- **Upload senza multipart**: un singolo `put_object` in streaming (botocore
+  legge il file a chunk, niente caricamento in RAM). Il multipart del
+  `TransferManager` **non** esiste in botocore puro (vive in `s3transfer`):
+  per non aggiungere dipendenze oltre a botocore l'extra resta
+  `safekeep[s3] = botocore` e il tetto dichiarato è il limite di un singolo
+  PUT (~5 GB su MinIO/Silo, 5 GB su AWS S3) — oltre, `EntityTooLarge` → log
+  non fatale. Se serviranno file più grossi: extra `s3transfer` col
+  TransferManager (i suoi thread vivono solo durante l'upload).
+- Una sola dest S3 per config.
+- **Silo** (endpoint self-hosted, hostname privato — mai in repo) è un
+  **fork di MinIO**: SigV4
+  (Signature Version 4), path-style, regione libera → nessun fallback o
+  workaround proprietario è necessario; lo stesso client copre anche MinIO
+  self-hosted, Ceph RGW, Wasabi, Backblaze B2 (compat S3) e AWS S3.

@@ -12,7 +12,8 @@
   plist principale (launchd/com.safekeep.agent.plist):
 
     __REPO__    radice del repo safekeep (la cartella che contiene bin/ e launchd/)
-    __PYTHON__  interprete Python ≥ 3.9 → env SAFEKEEP_PYTHON per lo script
+    __PYTHON__  interprete Python ≥ 3.9 (default: /usr/bin/python3 — shim di
+                sistema stabile, SPEC.md §8.4) → env SAFEKEEP_PYTHON per lo script
     __SCRIPT__  bin/safekeep-trend.sh (bash)
     __HOME__    $HOME dell'utente — launchd NON espande `~` negli StandardOut/ErrorPath
 

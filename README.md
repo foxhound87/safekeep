@@ -31,13 +31,19 @@ Documentation: https://foxhound87.github.io/safekeep/
   `.sync` file can neither add nor remove destinations (a `dest:` line is an
   invalid line), so a repo cloned from a third party can't redirect the backup
   somewhere else.
+- **S3-compatible destination** (optional `safekeep[s3]` extra): one
+  S3-compatible bucket alongside the filesystem destinations — same
+  size/mtime idempotency, metadata-based, and **never deletes anything**
+  (`--prune` only touches filesystem destinations).
 
 ## Installation
 
 ```bash
-pipx install safekeep     # recommended for a CLI
+pipx install safekeep        # recommended for a CLI
+pipx install "safekeep[s3]"  # + S3-compatible destination (botocore)
 # or
 pip install safekeep
+pip install "safekeep[s3]"
 ```
 
 **Requirements**: macOS or Linux (POSIX with systemd), Python >= 3.9 and
@@ -148,6 +154,66 @@ safekeep sync-once --dry-run   # prints what would be copied, copies nothing
 safekeep run                   # daemon: watch + copy (foreground)
 ```
 
+## S3-compatible destinations
+
+safekeep can push every project to **one S3-compatible bucket**
+(S3 = Simple Storage Service) in addition to (or instead of) the filesystem
+destinations. The client is [botocore](https://botocore.amazonaws.com/),
+installed via the optional extra — the core package stays stdlib-only:
+
+```bash
+pipx install "safekeep[s3]"      # or: pip install "safekeep[s3]"
+```
+
+Without the extra the config still parses, but any `s3_*` key fails fast with
+an install hint (`doctor` reports it as a **non-fatal** warning).
+
+`~/.safekeep` (the `s3_*` keys are valid **only** in this file — a `.sync`
+can't add them; keep the file at `chmod 600`):
+
+```ini
+s3_endpoint: https://s3.example.com:443   # http:// → cleartext warning
+s3_bucket: my-backup-bucket               # at least one dest: OR s3_bucket:
+s3_prefix: safekeep                       # optional, no '..'
+s3_region: us-east-1                      # default
+s3_access_key: REPLACEME_ACCESS_KEY       # required when s3_bucket is set
+s3_secret_key: REPLACEME_SECRET_KEY       # chmod 600 — or use s3_secret_key_env:
+# s3_secret_key_env: SAFEKEEP_S3_SECRET   # secret from env, never in the file
+s3_addressing: path                       # path (default) | virtual
+s3_tls_check: true                        # false = self-signed certificates
+```
+
+With `s3_secret_key_env:` the variable must be in the **agent's** environment
+(launchd `EnvironmentVariables`, systemd `Environment=`) — a shell `export`
+alone doesn't reach a daemon started at boot.
+
+Semantics (see [SPEC.md](SPEC.md) §18): upload-only with `needs_copy` based on
+object metadata (`x-amz-meta-mtime` in nanoseconds, `x-amz-meta-mode`,
+symlinks = zero-byte objects with `x-amz-meta-symlink`), same 1s mtime
+tolerance as filesystem destinations, network errors → `pending` with
+backoff, and **no deletions ever** — `--prune` never touches S3. A slow PUT
+blocks the single-process daemon until it times out (connect 10s / read 60s);
+that's an accepted v1 limitation.
+
+Compatible services:
+
+| Service | Example `s3_endpoint` | `s3_addressing` | `s3_region` | TLS |
+|---|---|---|---|---|
+| MinIO (self-hosted) | `https://minio.example.com:9000` | `path` | any (`us-east-1` default) | `https` + `s3_tls_check: false` if self-signed |
+| Silo (fork of MinIO) | `https://s3.example.com:443` | `path` | any (`us-east-1` default) | as the endpoint's own certificate |
+| Ceph RGW | `https://rgw.example.com` | `path` | any, must match the RGW zone (`us-east-1` default) | as configured on the RGW |
+| Wasabi | `https://s3.wasabisys.com` | `path` | **required**, must match the bucket (`us-east-1` on that endpoint) | `https` |
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | `virtual` or `path` | **required**, must match the bucket region | `https` only — cleartext rejected |
+| AWS S3 | *(omit `s3_endpoint`)* | `virtual` | must match the bucket (`us-east-1` default) | `https` |
+
+All of them speak SigV4 (Signature Version 4) with the same client — no
+service-specific code path. B2 wants an **Application Key** (not the Master
+Key) as `s3_access_key`/`s3_secret_key`.
+
+`safekeep status` shows the bucket as `[ok]`/`[offline]` (cached HeadBucket),
+and `safekeep doctor` reports credentials, file permissions and bucket
+reachability — all as **non-fatal** warnings.
+
 ## CLI commands
 
 ```
@@ -167,7 +233,7 @@ safekeep <command> [--config PATH] [-v]
 python3 -m unittest discover -s tests
 ```
 
-Stdlib (`unittest`) suite, zero dependencies: 206 tests covering the matcher,
+Stdlib (`unittest`) suite, zero dependencies: 287 tests covering the matcher,
 config, atomic copy, volumes, daemon, auto-discovery, CLI, the permission-trend
 wrapper and the POSIX portability layer (platform helper, per-OS fswatch
 monitor, systemd template, doctor log/linger checks, WSL detection,
@@ -176,6 +242,20 @@ monitor, systemd template, doctor log/linger checks, WSL detection,
 the real binary are skipped when it's missing — but CI installs it so every
 matrix leg (3.9 / 3.12 / 3.14) exercises the real `inotify` monitor and the
 live E2E daemon.
+
+The S3 integration test talks to a real bucket and is **skipped** unless every
+`SAFEKEEP_S3_TEST_*` variable is set (no credential is hard-coded; it uploads
+under a throwaway timestamped prefix and performs **no** DeleteObject):
+
+```bash
+export SAFEKEEP_S3_TEST_ENDPOINT=https://s3.example.com:443 \
+       SAFEKEEP_S3_TEST_BUCKET=my-backup-bucket \
+       SAFEKEEP_S3_TEST_ACCESS_KEY=REPLACEME_ACCESS_KEY \
+       SAFEKEEP_S3_TEST_SECRET_KEY=REPLACEME_SECRET_KEY \
+       SAFEKEEP_S3_TEST_REGION=us-east-1        # optional, default us-east-1
+       # SAFEKEEP_S3_TEST_PREFIX=safekeep       # optional, default safekeep-itest
+python3 -m unittest tests.test_s3_itest -v
+```
 
 ## Documentation
 
