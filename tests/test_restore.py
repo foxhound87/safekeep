@@ -125,6 +125,18 @@ class MatchingTest(BaseFs):
     def test_no_match(self):
         self.assertEqual(restore.select(self.entries, ['nope.md', '*.zzz']), [])
 
+    def test_path_assoluto_via_symlink_alias(self):
+        # path scritto via symlink (macOS /var → /private/var): deve matchare
+        # lo stesso — sia forma assoluta sia glob (prefisso risolto, §19.2)
+        alias = os.path.join(self.tmp, 'src-alias')
+        os.symlink(self.src, alias)
+        got = restore.select(self.entries,
+                             [os.path.join(alias, 'proj', 'docs', 'a.md')])
+        self.assertEqual([e.rel for e in got], ['docs/a.md'])
+        got = restore.select(self.entries,
+                             [os.path.join(alias, 'proj', 'docs', '*.md')])
+        self.assertEqual([e.rel for e in got], ['docs/a.md'])
+
 
 class PlanExecuteTest(BaseFs):
     def setUp(self):
