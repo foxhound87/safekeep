@@ -6,6 +6,7 @@ Tutti con client botocore MOCKkato: nessuna rete. Senza botocore (extra non
 installato, caso CI di default) la classe è interamente skip.
 """
 import errno
+import io
 import os
 import shutil
 import sys
@@ -337,6 +338,79 @@ class SecretPermsTest(unittest.TestCase):
         os.chmod(self.cfgfile, 0o644)
         cfg = make_cfg(secret_key='risolto', secret_env='VAR')
         self.assertFalse(secret_perms_insecure(self.cfgfile, cfg))
+
+
+@SKIP
+class IterKeysDownloadTest(unittest.TestCase):
+    """SPEC §19: iter_keys (list paginato + metadata) e download (tmp+replace,
+    chmod/utime da x-amz-meta-*, symlink da x-amz-meta-symlink)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_iter_keys_paginato_con_metadata(self):
+        dest = make_dest()
+        dest._client.list_objects_v2.side_effect = [
+            {'Contents': [{'Key': 'safekeep/a.md', 'Size': 3}],
+             'NextContinuationToken': 't1'},
+            {'Contents': [{'Key': 'safekeep/link.md', 'Size': 0}],
+             'IsTruncated': False},
+        ]
+        dest._client.head_object.side_effect = [
+            {'ContentLength': 3, 'Metadata': {'mtime': '1'}},
+            {'ContentLength': 0, 'Metadata': {'symlink': 'a.md'}},
+        ]
+        got = list(dest.iter_keys('safekeep/'))
+        self.assertEqual(got, [('safekeep/a.md', 3, {'mtime': '1'}),
+                               ('safekeep/link.md', 0, {'symlink': 'a.md'})])
+        self.assertEqual(dest._client.list_objects_v2.call_count, 2)
+        second = dest._client.list_objects_v2.call_args_list[1][1]
+        self.assertEqual(second['ContinuationToken'], 't1')
+
+    def test_iter_keys_key_sparito_saltata(self):
+        dest = make_dest()
+        dest._client.list_objects_v2.return_value = {
+            'Contents': [{'Key': 'safekeep/x.md', 'Size': 1}]}
+        dest._client.head_object.side_effect = client_error(404, 404)
+        self.assertEqual(list(dest.iter_keys('safekeep/')), [])
+
+    def test_download_file_contenuto_mtime_mode(self):
+        dest = make_dest()
+        ns = 1_700_000_000_123_456_789
+        dest._client.get_object.return_value = {
+            'Metadata': {'mtime': str(ns), 'mode': '0o100640'},
+            'Body': io.BytesIO(b'contenuto backup')}
+        dst = os.path.join(self.tmp, 'sub', 'a.md')
+        self.assertTrue(dest.download('safekeep/a.md', dst))
+        with open(dst, 'rb') as f:
+            self.assertEqual(f.read(), b'contenuto backup')
+        st = os.stat(dst)
+        self.assertEqual(st.st_mtime_ns, ns)
+        self.assertEqual(st.st_mode & 0o777, 0o640)
+        kwargs = dest._client.get_object.call_args[1]
+        self.assertEqual(kwargs, {'Bucket': 'bkt', 'Key': 'safekeep/a.md'})
+
+    def test_download_symlink_da_metadata(self):
+        dest = make_dest()
+        dest._client.get_object.return_value = {
+            'Metadata': {'symlink': 'a.md', 'mtime': '1', 'mode': '0o120777'},
+            'Body': io.BytesIO(b'')}
+        dst = os.path.join(self.tmp, 'link.md')
+        self.assertTrue(dest.download('safekeep/link.md', dst))
+        self.assertTrue(os.path.islink(dst))
+        self.assertEqual(os.readlink(dst), 'a.md')
+
+    def test_download_errore_rete_oserror_e_niente_residui(self):
+        dest = make_dest()
+        dest._client.get_object.side_effect = bce.EndpointConnectionError(
+            endpoint_url='https://x')
+        dst = os.path.join(self.tmp, 'y.md')
+        with self.assertRaises(OSError) as cm:
+            dest.download('safekeep/y.md', dst)
+        self.assertEqual(cm.exception.errno, errno.ENODEV)
+        self.assertFalse(os.path.exists(dst))
+        self.assertEqual(os.listdir(self.tmp), [])
 
 
 if __name__ == '__main__':
