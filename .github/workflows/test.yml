@@ -124,4 +124,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends samba cifs-utils
-          SAFEKEEP_E2E_SMB=1 bash tests/e2e_smb.sh
+          SAFEKEEP_E2E_SMB=1 bash tests/e2e_smb.sh || {
+            echo "--- dmesg CIFS/SMB (diagnostica mount) ---"
+            sudo dmesg | grep -iE "cifs|smb" | tail -25 || true
+            echo "--- mount table ---"
+            mount | grep -i cifs || true
+            exit 1
+          }
