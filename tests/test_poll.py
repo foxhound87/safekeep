@@ -238,6 +238,37 @@ class DaemonPollTest(TmpTestCase):
         daemon.step(0.05)
         self.assertEqual(len(batches), 1, 'nessuna modifica → zero dispatch')
 
+    def test_umount_reclassificazione_non_perde_lo_stato_poll(self):
+        daemon, _, target, _ = self.build()
+        daemon.step(0.05)                               # baseline
+        net_root = os.path.realpath(os.path.dirname(os.path.dirname(target)))
+        snap = daemon.poller.snapshots[net_root]
+        self.assertIsNotNone(snap)
+        # smontaggio: il mount sparisce e il path risolve al fs locale →
+        # is_network_fs torna False, ma la root resta sul poller (sticky)
+        with mock.patch('safekeep.daemon.is_network_fs', return_value=False):
+            daemon.load_projects()
+        self.assertTrue(
+            any(os.path.realpath(r) == net_root for r in daemon.net_roots),
+            'la root resta classificata di rete dopo lo smontaggio')
+        self.assertEqual(daemon.poller.snapshots.get(net_root), snap,
+                         'lo snapshot pre-smontaggio sopravvive: '
+                         'senza stato non c\'è catch-up al remount (§20.2)')
+
+    def test_catch_up_non_perso_se_la_discovery_scarta_la_root(self):
+        daemon, dest, target, _ = self.build()
+        daemon.step(0.05)                               # baseline
+        daemon.projects = []                            # smont: fuori dalla discovery
+        write(target, 'v3-durante-smont')
+        self.clock[0] += 6
+        daemon.step(0.05)                               # poll: diff → dispatch
+        dst = os.path.join(dest, 'proj/note.md')
+        self.assertTrue(os.path.exists(dst),
+                        'il catch-up scartato dalla discovery non deve '
+                        'andare perso: rescan prima di ignorare i path (§20.2)')
+        with open(dst) as fh:
+            self.assertEqual(fh.read(), 'v3-durante-smont')
+
     def test_root_sparita_pending_non_crasha_il_loop(self):
         daemon, dest, target, _ = self.build()
         daemon.step(0.05)                               # baseline

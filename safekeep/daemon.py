@@ -388,14 +388,20 @@ class Daemon:
     def classify_roots(self, roots, auto=False):
         """Split radici locali (fswatch) vs su volume di rete (polling, §20.1).
 
-        Eseguito a ogni avvio, rescan di discovery e reload della config:
-        `is_network_fs` legge il mount corrente, quindi un remount viene
-        agganciato al prossimo rescan — nel frattempo `poll_pending` gestisce
-        la root. Zero radici locali → fswatch non viene spawnato (§20.1).
+        Eseguito a ogni avvio, rescan di discovery e reload della config.
+        **Sticky**: una root già classificata di rete resta sul poller anche
+        se durante uno smontaggio il mount sparisce e il path risolve al fs
+        locale sottostante — a ri-classificarla locale si perderebbero
+        snapshot e pending, e con essi il catch-up post-remount (§20.2).
+        Zero radici locali → fswatch non viene spawnato (§20.1).
         """
+        prev_net = {os.path.realpath(r) for r in self.net_roots}
         self.watch_roots, self.net_roots = [], []
         for root in roots:
-            (self.net_roots if is_network_fs(root) else self.watch_roots).append(root)
+            if is_network_fs(root) or os.path.realpath(root) in prev_net:
+                self.net_roots.append(root)
+            else:
+                self.watch_roots.append(root)
         self.poller.sync_roots(self.net_roots, auto=auto)
         if self.net_roots:
             log.info('%d radice/i su volume di rete: polling ogni %ds (§20); '
@@ -703,6 +709,13 @@ class Daemon:
 
     def dispatch(self, paths):
         reloads, plan = plan_batch(paths, self.projects)
+        if paths and not reloads and not plan:
+            # batch interamente fuori da ogni progetto noto: durante uno
+            # smontaggio la discovery scarta la root e il catch-up del poll
+            # (§20.2) verrebbe perso per sempre — un rescan prima di buttare
+            # i path: la root è di nuovo raggiungibile al momento del diff
+            self.load_projects()
+            reloads, plan = plan_batch(paths, self.projects)
         for path in reloads:
             self.reload(path)
         for project, actions in plan.items():

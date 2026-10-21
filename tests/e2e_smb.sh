@@ -121,7 +121,9 @@ EOF
   # la share va a 777: smbd serve la root come uid guest (nobody) e safekeep
   # deve poter creare/scrivere file e directory nella radice della share
   chmod 777 "$SANDBOX" "$SHARE" || true
-  smbd --foreground --no-process-group --configfile="$SMBCFG" &
+  # setsid: smbd in una sessione propria — altrimenti condivide il pgid della
+  # shell e il suo shutdown manda segnali all'intero gruppo (e2e muore con 143)
+  setsid smbd --foreground --no-process-group --configfile="$SMBCFG" &
   SMBD_PID=$!
   if ! wait_for 10 bash -c 'exec 3<>/dev/tcp/127.0.0.1/445'; then
     fail "smbd non in ascolto su 127.0.0.1:445"
@@ -233,7 +235,9 @@ sleep 12                               # ≥ 2 turni di poll + margine
 
 if [[ "$MODE" == "--server" ]]; then
   note "fase 4: umount → modifiche via share → remount → catch-up (pending, no crash)"
-  sudo umount "$MNT"
+  if ! wait_for 10 sudo umount "$MNT"; then
+    fail "umount del mountpoint CIFS fallito (target is busy persistente)"
+  fi
   sleep 1                               # qualche walk fallisce → poll_pending + backoff
   printf 'nas v3-durante-smont\n' >"$SHARE/srcproj/note.md"
   printf 'perso\n' >"$SHARE/srcproj/durante.md"
