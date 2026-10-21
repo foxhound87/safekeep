@@ -8,6 +8,7 @@ safekeep <command> [--config PATH] [-v]
 |---|---|
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--prune] [--project PATH]` | one pass: walks the source and copies whatever differs, then exits |
+| `restore [--force] [--from {local,s3,nas}] [PATH\|GLOB ...]` | restore from the **latest copy** in a destination — always a dry-run unless `--force`; pick files by path/glob or with the interactive menu |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
 | `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist and daemon executable (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code |
 | `daemon {install,start,stop,status,uninstall}` | manage the boot agent — see below |
@@ -40,6 +41,38 @@ safekeep sync-once --prune                  # remove dest files no longer includ
   under the project prefix and only where the match is certain — a source that
   disappeared or became a directory is left untouched. Without `--prune`,
   nothing is ever removed.
+
+## `restore`
+
+```bash
+safekeep restore ~/Code/myapp/docs/note.md    # dry-run: prints the plan
+safekeep restore --force ~/Code/myapp         # actually restores
+safekeep restore --force 'myapp/docs/*.md'    # glob, relative to the source root
+safekeep restore --from s3 --force ~/Code/myapp
+safekeep restore --force                      # interactive menu (terminal only)
+```
+
+Restores files from the **latest copy** held by a destination (0.8.0). safekeep
+keeps no history — the destination holds the last synced state, and that is
+what you get back. Nothing is ever deleted.
+
+- **A dry-run is always the default.** Without `--force` the command only
+  prints `<backup> -> <target> (crea|sovrascrive)` rows and a summary; the
+  interactive menu writes nothing either. Add `--force` to actually copy.
+- **Arguments** are original paths: absolute, relative to the source root, or
+  an `fnmatch` glob. No match → exit 1. No arguments + no terminal → exit 1.
+- **No arguments on a terminal** opens a numbered menu: destination (only when
+  ambiguous) → project → top-level backup entries; `1 3` picks numbers,
+  `a` picks everything, `q` cancels.
+- **`--from`** picks the origin: `local` = first `dest:`, `nas` = second
+  `dest:`, `s3` = the S3 destination. Without it, a single configured
+  destination is auto-detected (and logged); several candidates → an error
+  listing them; a destination that isn't mounted → an error, never silently
+  skipped.
+- **Writes only inside the sources.** The target is always the original path —
+  there is no `--to` — and a reconstructed path outside the project's source
+  is refused (EACCES). Copies are atomic (temp file + `os.replace`) and
+  symlinks come back as symlinks. S3 credentials come from the config only.
 
 ## `status`
 
