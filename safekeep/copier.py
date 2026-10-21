@@ -20,6 +20,13 @@ MTIME_TOLERANCE = 1.0      # secondi: tolleranza mtime per volumi a risoluzione 
 TMP_INFIX = '.safekeep.tmp.'
 # errori che dicono "questa dest non è usabile adesso" → pending + backoff (§8.3)
 MOUNT_ERRNOS = (errno.ENODEV, errno.EBUSY, errno.ENOSPC)
+# 0.9.0 (§20.4): errori di RETE — una dest su NAS con server morto o rete
+# irraggiungibile dà questi errno: stesso trattamento dei MOUNT_ERRNOS
+# (pending + backoff), non una riga di log per evento (log-loop latente)
+NETWORK_ERRNOS = (errno.ENOTCONN, errno.EHOSTUNREACH, errno.ETIMEDOUT,
+                  errno.ENETUNREACH, errno.ENETDOWN, errno.ESTALE)
+# l'insieme controllato ai call-site: "dest non usabile adesso" (§8.3/§20.4)
+DEST_DOWN_ERRNOS = MOUNT_ERRNOS + NETWORK_ERRNOS
 # throttle delle copie fallite (SPEC.md §10.1, 0.5.1): stessa (path, errno) →
 # una riga + `— ripetuto N volte` ogni THROTTLE_INTERVAL, non una riga a fallimento
 THROTTLE_INTERVAL = 300.0       # secondi
@@ -220,8 +227,9 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
     per ogni dest), `skippati` = file già aggiornati, `errati` = copie fallite,
     `esclusi` = file con verdict escluso incontrati nel walk (indipendente
     dalla dest), `pianificati` = [(src, dst)] con `dry_run=True`, e
-    `dest_pendente` = True se un errore di mount (ENODEV/EBUSY/ENOSPC) ha
-    fermato la passata: il caller metta quella dest in pending (CR-05).
+    `dest_pendente` = True se un errore di mount o di rete
+    (`DEST_DOWN_ERRNOS`, §20.4) ha fermato la passata: il caller metta quella
+    dest in pending (CR-05).
     `dry_run`: conta ed elenca senza copiare.
 
     Seam destinazioni (SPEC.md §18.2): `copy_fn(src, dst)` e
@@ -248,12 +256,12 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
     plan = stats.setdefault('pianificati', []) if (stats is not None and dry_run) else None
 
     def failed(e, src, dst):
-        """Conteggia l'errore; True ⇒ errore di mount: la dest va in pending."""
+        """Conteggia l'errore; True ⇒ errore di mount/rete: la dest va in pending."""
         nonlocal errors, mount_error
         errors += 1
-        if e.errno in MOUNT_ERRNOS:
+        if e.errno in DEST_DOWN_ERRNOS:
             mount_error = e
-            log.error('errore di mount su %s → %s: %s: la dest va in pending',
+            log.error('errore di mount/rete su %s → %s: %s: la dest va in pending',
                       src, dst, e)
             return True
         log_copy_error(src, dst, e)

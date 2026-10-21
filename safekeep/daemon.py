@@ -1,11 +1,14 @@
 """Daemon fswatch: spawn, dispatch eventi, timer, anti-flood e pending
-(SPEC.md §6 flusso evento→sync, §8.3 pending/backoff, §10 anti-flood).
+(SPEC.md §6 flusso evento→sync, §8.3 pending/backoff, §10 anti-flood,
+§20 monitor a polling delle root su volume di rete).
 
 Un solo processo, nessun thread: `step()` fa `select` su stdout di fswatch con
 timeout pari alla scadenza più vicina (reconcile giornaliero, retry dest
-absent, respawn fswatch). Le regex `-e` sono un pre-filtro grezzo: la verità
-su cosa copiare resta al matcher Python (SPEC.md §6.4). Il monitor di fswatch
-viene da `safekeep.platform` (SPEC.md §14.1).
+absent, respawn fswatch, turni di poll). Le regex `-e` sono un pre-filtro
+grezzo: la verità su cosa copiare resta al matcher Python (SPEC.md §6.4). Il
+monitor di fswatch viene da `safekeep.platform` (SPEC.md §14.1); le root su
+SMB/CIFS/NFS vengono escluse dall'argv (fswatch non ne riceverebbe eventi) e
+passano al poller (§20.1/§20.2).
 """
 import logging
 import logging.handlers
@@ -26,7 +29,7 @@ from .config import (
     validate_dests,
 )
 from .copier import (
-    MOUNT_ERRNOS,
+    DEST_DOWN_ERRNOS,
     copy_one,
     log_copy_error,
     needs_copy,
@@ -34,7 +37,8 @@ from .copier import (
     reconcile_project,
 )
 from .matcher import BUILTIN_RULES, Matcher, _glob, parse_rule
-from .platform import LOG_PATH, fswatch_monitor, init_system
+from .poll import Poller
+from .platform import LOG_PATH, fswatch_monitor, init_system, is_network_fs
 from .s3dest import S3Destination, secret_perms_insecure
 from .volumes import backoff_schedule, dest_state, partition_dests
 
@@ -310,6 +314,9 @@ class Daemon:
         self.buf = b''                   # residuo del parser a metà path
         self.seen = {}                   # dedup: path → ultimo visto
         self.pending = {}                # dest → next/sched/projects (backoff)
+        self.watch_roots = []            # radici locali → argv fswatch (§20.1)
+        self.net_roots = []              # radici su volume di rete → polling (§20)
+        self.poller = Poller(clock=clock)    # monitor a polling (§20.2)
         self.deaths = []                 # timestamp delle morti di fswatch
         self.fatal = False
         self.spawn_at = 0.0
@@ -329,6 +336,8 @@ class Daemon:
             # il config globale è comunque un file letto da disco: fallisce pulito (CR-03)
             raise ConfigError(f'{self.config_path}: non è UTF-8 valido: {e}') from None
         self.cfg = parse_config(text, origin=self.config_path)
+        # polling root di rete (§20.3): l'intervallo viene dal config
+        self.poller.interval = self.cfg.poll_interval
         # dest S3 (SPEC §18): S3ExtraMissing(ConfigError) se manca l'extra,
         # e controllo chmod 600 del secret inline (§18.4 — il warning
         # runtime va emesso DOPO setup_logging, vedi log_s3_secret_perms)
@@ -369,11 +378,39 @@ class Daemon:
     def load_projects(self):
         self.projects = []
         roots, auto = self.discovery_roots()
+        self.classify_roots(roots, auto)
         for root in discover_projects(roots, auto=auto):
             project = load_project(root, self.cfg)
             if project is not None:
                 self.projects.append(project)
         return self.projects
+
+    def classify_roots(self, roots, auto=False):
+        """Split radici locali (fswatch) vs su volume di rete (polling, §20.1).
+
+        Eseguito a ogni avvio, rescan di discovery e reload della config.
+        **Sticky**: una root già classificata di rete resta sul poller anche
+        se durante uno smontaggio il mount sparisce e il path risolve al fs
+        locale sottostante — a ri-classificarla locale si perderebbero
+        snapshot e pending, e con essi il catch-up post-remount (§20.2).
+        Zero radici locali → fswatch non viene spawnato (§20.1).
+        """
+        prev_net = {os.path.realpath(r) for r in self.net_roots}
+        self.watch_roots, self.net_roots = [], []
+        for root in roots:
+            if is_network_fs(root) or os.path.realpath(root) in prev_net:
+                self.net_roots.append(root)
+            else:
+                self.watch_roots.append(root)
+        self.poller.sync_roots(self.net_roots, auto=auto)
+        if self.net_roots:
+            log.info('%d radice/i su volume di rete: polling ogni %ds (§20); '
+                     '%d radice/i locale/i per fswatch',
+                     len(self.net_roots), self.poller.interval,
+                     len(self.watch_roots))
+        if self.proc is not None and not self.watch_roots and not self.argv:
+            log.info('nessuna radice locale rimasta: fswatch viene fermato (§20.1)')
+            self.close_proc()
 
     def reconcile_all(self):
         total = sum(self.reconcile(p) for p in self.projects)
@@ -491,7 +528,9 @@ class Daemon:
         argv = ['fswatch', '-0', '-m', fswatch_monitor(), '-r', '-l', '1.0', '-E']
         for regex in self.exclude_regexes():
             argv += ['-e', regex]
-        return argv + ['--'] + self.discovery_roots()[0]
+        # solo le radici LOCALI: fswatch non riceve eventi da mount di rete
+        # (§20.1) — quelle di rete le segue il poller
+        return argv + ['--'] + self.watch_roots
 
     def exclude_regexes(self):
         rules = [r for p in self.projects for r in p.excludes]
@@ -568,10 +607,12 @@ class Daemon:
     def next_deadline(self):
         """Secondi fino alla scadenza più vicina (reconcile 24h, retry dest,
         respawn, scadenza dedup — CR-04: è ciò che fa svegliare il `select`
-        per emettere un path soppresso)."""
+        per emettere un path soppresso — e turni del polling, §20.2)."""
         now = self.clock()
         deadlines = [self.next_reconcile] + [e['next'] for e in self.pending.values()]
         deadlines += [d for _, d in self.seen.values() if d is not None]
+        deadlines += list(self.poller.next.values())
+        deadlines += [e['next'] for e in self.poller.pending.values()]
         if self.proc is None:
             deadlines.append(self.spawn_at)
         return max(0.0, min(deadlines) - now)
@@ -605,11 +646,17 @@ class Daemon:
                 failed['next'] = self.clock() + next(entry['sched'])
 
     def step(self, timeout=None):
-        """Un passo del loop: timer/pending, scadenze dedup, respawn, select
-        su fswatch, batch."""
+        """Un passo del loop: timer/pending, scadenze dedup, poll delle root di
+        rete, respawn, select su fswatch, batch.
+
+        Con `self.argv` (override dei test) il fswatch finto viene spawnato
+        anche senza radici locali; il daemon reale spawna fswatch **solo** se
+        c'è almeno una radice locale (§20.1) — altrimenti vive di soli timer.
+        """
         self.check_timers()
         self.flush_dedup()               # CR-04: emissione "di coda" alla scadenza
-        if self.proc is None:
+        self.poll_tick()                 # §20.2: walk/diff delle root su volume di rete
+        if self.proc is None and (self.watch_roots or self.argv):
             wait = self.next_deadline()         # include spawn_at + timer
             if wait > 0:
                 time.sleep(wait if timeout is None else min(wait, timeout))
@@ -617,6 +664,13 @@ class Daemon:
                     return                      # backoff respawn non scaduto
             if not self.spawn():
                 return                          # fswatch mancante → fatal
+        if self.proc is None:
+            # nessuna radice locale (§20.1): fswatch non serve — vivo di soli
+            # timer (poll/pending/reconcile), qui si dorme fino al prossimo
+            wait = self.next_deadline()
+            if wait > 0:
+                time.sleep(wait if timeout is None else min(wait, timeout))
+            return
         if timeout is None:
             timeout = self.next_deadline()
         ready, _, _ = select.select(
@@ -639,6 +693,15 @@ class Daemon:
             log.debug('%d path emessi alla scadenza della finestra di dedup', len(due))
             self.dispatch(due)
 
+    def poll_tick(self):
+        """Turno del monitor a polling (§20.2): le root di rete scadute vengono
+        camminate (snapshot/diff) e la diff passa allo stesso dispatch degli
+        eventi fswatch — zero logica di copia duplicata."""
+        paths = self.poller.tick()
+        if paths:
+            log.debug('poll: %d path cambiati su volumi di rete', len(paths))
+            self.run_batch(paths)
+
     def run_batch(self, paths):
         paths = dedup(self.seen, paths, now=self.clock())
         if paths:
@@ -646,6 +709,13 @@ class Daemon:
 
     def dispatch(self, paths):
         reloads, plan = plan_batch(paths, self.projects)
+        if paths and not reloads and not plan:
+            # batch interamente fuori da ogni progetto noto: durante uno
+            # smontaggio la discovery scarta la root e il catch-up del poll
+            # (§20.2) verrebbe perso per sempre — un rescan prima di buttare
+            # i path: la root è di nuovo raggiungibile al momento del diff
+            self.load_projects()
+            reloads, plan = plan_batch(paths, self.projects)
         for path in reloads:
             self.reload(path)
         for project, actions in plan.items():
@@ -699,8 +769,8 @@ class Daemon:
                 elif needs_copy(src, dst) and copy_one(src, dst, dest):
                     log.debug('copiato %s → %s', src, dst)
             except OSError as e:
-                if e.errno in MOUNT_ERRNOS:
-                    log.warning('errore di mount %s → %s: %s: dest in pending',
+                if e.errno in DEST_DOWN_ERRNOS:
+                    log.warning('errore di mount/rete %s → %s: %s: dest in pending',
                                 src, dst, e)
                     self.mark_pending(project, dest)
                 else:
@@ -719,7 +789,7 @@ class Daemon:
                 elif self.s3.needs_copy(src, dst) and self.s3.copy(src, dst):
                     log.debug('copiato %s → %s', src, dst)
             except OSError as e:
-                if e.errno in MOUNT_ERRNOS:
+                if e.errno in DEST_DOWN_ERRNOS:
                     log.warning('errore di rete %s → %s: %s: dest S3 in pending',
                                 src, dst, e)
                     self.mark_pending(project, self.s3.root)

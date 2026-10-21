@@ -20,6 +20,17 @@
 # the `apt-get install fswatch`, and a step-level failure already names the
 # phase that broke (GH = GitHub Actions).
 #
+# E2E SMB (0.9.0, SPEC §14.6/§20): tests/e2e_smb.sh mounts a guest CIFS
+# share (private smbd + mount.cifs) in a mktemp sandbox and drives the
+# network-volume path for real (dest on CIFS, source on CIFS under the
+# polling monitor, umount/remount catch-up). Gate is MANDATORY on the 3.12
+# leg only (SAFEKEEP_E2E_SMB=1, samba + cifs-utils installed): an identical
+# run on three legs covers nothing extra and costs three runners. Declared
+# divergence with .gitlab-ci.yml: the GitLab docker executor has no
+# SYS_ADMIN, mount.cifs cannot mount there — GitLab does NOT run this e2e
+# (same prassi as pgrep/procps: what the runner cannot do, the CI declares
+# and skips).
+#
 # Action majors: checkout@v7 + setup-python@v7 — both run on the node24 runtime
 # (`runs.using: node24`, verified against the upstream action.yml in 2026-10);
 # the old v4/v5 ran on node20, which GH now flags as deprecated.
@@ -102,3 +113,15 @@ jobs:
       # esercitato solo nei job senza systemd (GitLab -slim) e dai test unit.
       - name: Daemon install smoke (wheel + clean venv)
         run: bash tests/ci_daemon_install.sh
+      # E2E SMB/CIFS (0.9.0, SPEC §20): gate reale per i volumi di rete —
+      # smbd guest locale + mount.cifs dentro una sandbox mktemp. OBBLIGATORIO
+      # su questa gamba: se il mount fallisce il job va rosso. Una gamba basta
+      # (3.12): un identico test su tre gambe non copre nulla in più e costa
+      # tre runner. GitLab NON lo fa (docker executor senza SYS_ADMIN): la
+      # divergenza è dichiarata nei commenti di testa di entrambi i file.
+      - name: SMB e2e (samba + cifs-utils)
+        if: matrix.python-version == '3.12'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends samba cifs-utils
+          SAFEKEEP_E2E_SMB=1 bash tests/e2e_smb.sh

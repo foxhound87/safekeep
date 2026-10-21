@@ -122,6 +122,7 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 | `layout` | `relative` \| `full` | `relative` | layout dei path di destinazione (vedi nota sotto) |
 | `defaults` | lista regole | builtin | regole di default a **bassa priorità** (sotto le regole globali e sotto `.sync`) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | livello di log su stderr + file di log |
+| `poll_interval` | intero ≥ 1 | `60` | secondi fra due turni del monitor a **polling** per le root su volume di rete (§20): SMB/CIFS/NFS non emettono eventi a fswatch |
 
 Note:
 
@@ -348,7 +349,12 @@ ignorare (§4.2).
 
    - **radici watch**: le `source` del config (modalità source, deduplicate: una
      radice annidata sotto un'altra già coperta viene saltata — `fswatch -r`
-     copre già il sottoalbero), oppure `$HOME` (modalità auto-discovery);
+     copre già il sottoalbero), oppure `$HOME` (modalità auto-discovery). **Split
+     0.9.0 (§20.1)**: a ogni avvio/rescan/reload le radici vengono classificate
+     con `is_network_fs` — le **locali** passano a fswatch invariato, le **di
+     rete** vengono escluse dall'argv e passano al monitor a polling (fswatch
+     NON riceverebbe eventi da un mount di rete); **zero radici locali →
+     fswatch non viene spawnato**;
    - `-0`: separatore NUL (path con spazi/newline sicuri);
    - `-m <monitor>`: monitor nativo **dichiarato esplicitamente per piattaforma**
      (mai il default implicito di fswatch): `fsevents_monitor` su Darwin
@@ -578,6 +584,10 @@ Destinazioni su volumi esterni/reti:
    il mount non compare; al ritorno dello stato `mounted` → **reconcile del progetto**
    verso quelle dest (recupera tutto ciò che è cambiato durante la disconnessione — la
    semantica "mai cancellare" rende questo sicuro).
+   Dal **0.9.0** (§20.4) il pending si attiva anche per gli **errori di rete**
+   (`NETWORK_ERRNOS`: ENOTCONN/EHOSTUNREACH/ETIMEDOUT/ENETUNREACH/ENETDOWN/
+   ESTALE), oltre ai classici `MOUNT_ERRNOS` (ENODEV/EBUSY/ENOSPC): una dest su
+   NAS con il server morto va in pending/backoff, non in log-loop.
 3. `status` mostra le dest `pending` con l'ultimo errore e il prossimo retry.
 4. **Opzione plist `StartOnMount`**: aggiungendo `<key>StartOnMount</key><true/>` launchd
    riavvia il job al mount di un volume — utile se si preferisce un kick sincrono del sistema
@@ -946,6 +956,7 @@ illimitata della coda in memoria.
 | `git checkout` → decine di migliaia di eventi | >5000 path/progetto → collapse a reconcile del progetto |
 | File cancellato alla sorgente | resta nel backup (semantica confermata) |
 | Volume dest non montato | pending + backoff stat mountpoint; reconcile al remount |
+| Server SMB/CIFS morto o mount di rete perso | `NETWORK_ERRNOS` → dest in pending + backoff (§8.3/§20.4); sorgente su rete → `poll_pending` con catch-up al remount (§20.2) |
 | `.sync` malevolo in repo clonato | le dest vivono solo in `~/.safekeep`: `dest:` in un `.sync` è riga invalida (§4.2, §11) |
 | Dest dentro la sorgente (loop) | errore in `doctor`, `run` e `sync-once` → exit ≠ 0 (base = `source` o `$HOME` in auto-discovery, §11) |
 | Subdirectory senza `.sync` | non seguita (nessuna copia) |
@@ -1168,7 +1179,11 @@ Con Linux **non cambiano**:
 
 - **matcher / config / copier / volumes**: nessun file di codice dipende dalla
   piattaforma; `dest_state` resta `os.path.exists` (§8.3, niente parsing di
-  `/proc/mounts`);
+  `/proc/mounts`). Unica eccezione dichiarata: `platform.fs_fstype` /
+  `is_network_fs` (0.8.0) leggono `/proc/mounts` (Linux) o l'output di
+  `mount` (macOS) per **classificare le root** (§20.1) e etichettare le dest
+  in `status` — lo stato dest resta `os.path.exists`, il parsing dei mount non
+  lo tocca;
 - **auto-discovery** (§4.1): il pruning dedup già esclude tutte le directory
   **nascoste**, quindi su Linux copre `.config`, `.local`, `.cache`, `snap` senza
   cambi di codice; le cartelle TCC di §4.1 restano nella lista di esclusione — su
@@ -1235,6 +1250,21 @@ Gate = marker presente **e** exit 0: i tre check WSL sono non fatali (§17.2), q
 un check fatale qualsiasi (config, fswatch, monitor, python) rende comunque lo step
 rosso. Nessuna dipendenza nuova: solo python3 + `bash`/`grep`/`mktemp` e il `fswatch`
 che i job installano già.
+
+**E2E SMB (0.9.0, gate GitHub-only)**: `tests/e2e_smb.sh` monta uno share
+`guest` con `smbd` locale + `mount.cifs` (`vers=3.0`, fallback `2.1`) dentro una
+sandbox mktemp e verifica: dest su CIFS (sync-once + idempotenza, niente residui
+tmp), **sorgente su CIFS con `poll_interval: 5`** (gate vero: un `touch` sul
+mount deve raggiungere la dest locale entro ~20s — ibrido poll+fswatch), le
+esclusioni `.sync` sotto poll, smont/remount con `poll_pending` senza crash e
+catch-up, SIGTERM pulito senza fswatch orfani. Su GitHub gira **solo sulla
+gamba 3.12** (`SAFEKEEP_E2E_SMB=1` + `apt-get install samba cifs-utils`): un
+test identico su tre gambe non copre nulla in più e costa tre runner. Senza
+l'env lo script salta con messaggio (default locale gentile). **Divergenza
+dichiarata con GitLab**: il docker executor non ha `SYS_ADMIN` →
+`mount.cifs` non può montare → su GitLab **niente e2e SMB** (stessa prassi di
+`pgrep`/`procps`: ciò che il runner non può, la CI GitLab lo dichiara nei
+commenti di testa e lo salta).
 
 ### 14.7 Metadata release (`pyproject.toml`)
 
@@ -1346,6 +1376,18 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   **invertito** (scrive solo dentro le source, §11); adapter S3 `iter_keys`/
   `download` con credenziali solo dal config `s3_*`; `fs_fstype`/`is_network_fs`
   in `platform.py`; voci orfane della dest → warn + skip.
+- **0.9.0** — **volumi di rete (SMB/CIFS/NAS) e monitor a polling** — §20:
+  FSEvents/inotify **non emettono eventi** su mount di rete → le radici
+  discovery vengono classificate (`is_network_fs`) e quelle di rete passano da
+  fswatch a un monitor a polling nel loop single-process (`safekeep/poll.py`:
+  snapshot `lstat` + diff a `poll_interval`, catch-up al remount via
+  `poll_pending` con backoff §8.3); zero radici locali → fswatch non spawnato;
+  nuova chiave `poll_interval` (default 60s, §3); `NETWORK_ERRNOS` (6 errno di
+  rete) → dest in pending + backoff invece di log-loop (§20.4); `doctor`/
+  `status` con righe dedicate (sorgenti su rete N poll ogni Xs, root locali M,
+  dest `[nas]`/`[local]`, hint TCC `/Volumes`); CI: check drift SPEC↔`__version__`
+  (§14.6) e gate E2E SMB su GitHub (samba + `mount.cifs`, gamba 3.12; GitLab
+  dichiara la divergenza: docker executor senza `SYS_ADMIN`).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
@@ -1413,7 +1455,11 @@ Nessuno dei tre è fatale: `doctor` esce 0 anche su WSL1 senza systemd.
   / `install`, ex-`install.sh`) testati con env/kernel finto; un
   E2E su WSL no.
 - Eventi su `/mnt/*` (drvfs/9p) e fswatch su WSL: non documentati qui, da
-  verificare quando ci sarà una macchina WSL.
+  verificare quando ci sarà una macchina WSL. Con 0.9.0 (§20) si aggiunge: il
+  fstype `drvfs` è **locale** (non in `NETWORK_FSTYPES`) → le root sotto
+  `/mnt/` restano su fswatch, non sul polling; un mount CIFS esplicito sotto
+  WSL (`mount.cifs`) rientrerebbe nel polling di §20.1, ma WSL resta non
+  testato su macchina reale.
 
 ---
 
@@ -1599,3 +1645,111 @@ interattivo** (§11): il menu produce il piano, `--force` lo esegue.
   sotto nessun progetto scoperto) → warn + skip, mai toccata.
 - **mai delete**: restore non cancella né sovrascrive "verso il basso": copia
   solo ciò che il piano elenca.
+
+---
+
+## 20. Volumi di rete (SMB/CIFS, NAS) e monitor a polling (0.9.0)
+
+**Il fatto che rende necessaria questa sezione**: FSEvents (macOS) e inotify
+(Linux) **non emettono eventi** per i file che cambiano su un mount di rete —
+SMB/CIFS/NFS (fstype `cifs`, `smbfs`, `nfs`): il kernel non riceve notifiche
+dal server. Una `source` su NAS era quindi **silenziosamente non monitorata**
+da safekeep ≤ 0.8.0 (solo il reconcile giornaliero la copriva, con fino a 24h
+di latenza). È una **decisione nuova in 0.9.0**: le root di rete passano da
+fswatch a un **monitor a polling** dentro il loop single-process del daemon —
+niente thread, stesso dispatch degli eventi.
+
+### 20.1 Classificazione delle root
+
+- A ogni **avvio**, **rescan di discovery** (24h) e **reload della config**, le
+  radici discovery (`source:` oppure `$HOME`) vengono classificate con
+  `platform.is_network_fs` (fstype del mount: `/proc/mounts` su Linux, output
+  di `mount` su macOS — §14.1):
+  - radici **locali** → argv di fswatch, invariato (§6.4);
+  - radici **di rete** → **escluse dall'argv** di fswatch, monitorate dal
+    poller (§20.2).
+- **Zero radici locali → fswatch non viene spawnato**: il daemon vive di soli
+  timer (reconcile 24h, pending dest, scadenze poll).
+- **Limite dichiarato v1**: la classificazione è **a root** — un mount di rete
+  annidato *dentro* una root locale non viene polled (resta su fswatch, che non
+  ne vedrà gli eventi); classificare ogni singola directory annidata costa un
+  `mount` per directory ed è fuori scope per v1.
+
+### 20.2 Poller (`safekeep/poll.py`)
+
+- **Snapshot** per root polled: `{relpath: (st_mtime_ns, st_size)}` letto con
+  `os.lstat` (**mai** seguire i symlink: uno symlink rotto è un dato, §7.3),
+  con lo stesso pruning dello scan di discovery (nascoste, `Library`,
+  `node_modules`, `.git`, `venv`, … — §4.1): `.git`/`node_modules` su un NAS
+  non vengono camminati.
+- **Diff a ogni turno** (ogni `poll_interval` secondi, §3): path nuovi o con
+  (mtime_ns, size) cambiati → `daemon.run_batch(paths)` — lo **stesso** dispatch
+  degli eventi fswatch (dedup → plan → classify → copia): nessuna logica di
+  copia duplicata, le regole `.sync` valgono identiche. Path **rimossi** alla
+  sorgente → ignorati (semantica mai-cancellare, §1).
+- L'intervallo parte a **fine walk**: un walk lento non si sovrappone al turno
+  successivo.
+- Il **primo walk** di una root è una baseline senza dispatch (il reconcile
+  iniziale o del rescan ha già copiato tutto).
+- **Mount smontato / server morto**: un `OSError` nel walk (radice inclusa:
+  `os.walk(..., onerror=...)` propaga) → la root entra in `poll_pending` con
+  `backoff_schedule()` (§8.3, stessa curva 1→2→4→…→60s) e lo snapshot
+  **pre-smontaggio viene preservato**. Walk riuscito dopo il remount → diff
+  contro lo snapshot preservato → **catch-up automatico** di tutto ciò che è
+  cambiato mentre il mount era giù. L'errore resta **confinato alla propria
+  root** (CR-05): nessun crash del daemon, le altre root proseguono.
+- **Integrazione nel loop**: le scadenze del poll entrano in `next_deadline()`
+  (come reconcile, pending e dedup): il `select` del daemon si sveglia al turno
+  di poll — niente thread, niente sleep dedicati.
+
+### 20.3 Config: `poll_interval`
+
+`poll_interval:` nel config globale (§3): **intero ≥ 1** secondo, default
+`60`, fail-fast con numero di riga come ogni altra chiave del config. Un
+valore sotto al minuto ha senso solo su alberi piccoli: ogni turno è un walk
+ completo della root con I/O di rete sul NAS.
+
+### 20.4 Errori di rete sulla dest (`NETWORK_ERRNOS`)
+
+`copier.NETWORK_ERRNOS = (ENOTCONN, EHOSTUNREACH, ETIMEDOUT, ENETUNREACH,
+ENETDOWN, ESTALE)` — controllati **insieme** a `MOUNT_ERRNOS`
+(ENODEV/EBUSY/ENOSPC) ai call-site esistenti (`reconcile_project.failed`,
+`Daemon._copy`): una dest su NAS con il server morto dà quest'errno, e ora va
+in **pending + backoff** (§8.3) invece di produrre una riga `copia fallita`
+per evento (log-loop latente, chiuso in 0.9.0).
+
+### 20.5 Copia su filesystem di rete
+
+- **Atomicità**: il pattern tmp + `os.replace` nella cartella di dest (§7.2)
+  resta corretto su CIFS/SMB: il `rename` è atomico **lato server** (il client
+  lo vede come operazione singola) e il tmp vive sullo stesso filesystem della
+  dest.
+- **fsync best-effort** (§7.2): su CIFS può costare un round-trip extra per
+  file; resta best-effort — un fsync non riuscito non blocca la copia.
+- **Residuo di crash**: un crash a metà copia lascia `*.safekeep.tmp.*`
+  visibile sulla dest — `doctor` lo elenca già (§14.4); su un NAS è solo
+  rumore visibile, non un danno (alla prossima copia del file viene rimosso).
+- **I/O lento = tetto single-process** (§18.5): un walk o una copia lenta su
+  NAS blocca il loop del daemon per quella durata, come un PUT S3 lento. Il
+  polling non cambia l'architettura: se il tetto non basterà, il rimedio resta
+  un processo dedicato (decisione aperta, §15).
+
+### 20.6 Diagnostica (`doctor` / `status`)
+
+- `doctor`: due righe **non fatali** (con id slug per `--json`, SPEC §9.1):
+  `sorgenti su volume di rete: N (poll ogni Xs)` e `fswatch: root locali M`.
+- `status`: ogni dest viene etichettata con la fstype detect —
+  `dest <path> [ok|absent] [nas|local]`.
+- macOS: `EACCES` su un path sotto `/Volumes` → hint TCC "Interagisci con i
+  volumi rimovibili" (System Settings → Privacy & Security), warning non fatale.
+
+### 20.7 Limiti dichiarati (v1)
+
+- Classificazione **a root** (§20.1): un mount annidato dentro una root locale
+  non viene polled.
+- Latenza: un file che cambia senza altri eventi resta nel backup fino al
+  turno successivo (fino a `poll_interval` secondi); il reconcile a 24h e al
+  mount resta la rete di sicurezza.
+- **WSL non verificato** (§17.4): `drvfs` è fstype locale → sotto `/mnt/` si
+  resta su fswatch; un mount CIFS esplicito sotto WSL entrerebbe nel polling
+  ma non è testato su macchina reale.
