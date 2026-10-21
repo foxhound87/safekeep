@@ -121,12 +121,21 @@ EOF
   # la share va a 777: smbd serve la root come uid guest (nobody) e safekeep
   # deve poter creare/scrivere file e directory nella radice della share
   chmod 777 "$SANDBOX" "$SHARE" || true
+  # su Ubuntu `apt install samba` abilita e avvia smbd.service con la config
+  # di sistema (nessuna share [sk]): ruberebbe la445, il nostro smbd morirebbe
+  # al bind e il check tcp passerebbe verso quello sbagliato → BAD_NETWORK_NAME
+  sudo systemctl stop smbd nmbd 2>/dev/null || sudo service smbd stop 2>/dev/null || true
+  sleep 1
   # setsid: smbd in una sessione propria — altrimenti condivide il pgid della
   # shell e il suo shutdown manda segnali all'intero gruppo (e2e muore con 143)
   setsid smbd --foreground --no-process-group --configfile="$SMBCFG" &
   SMBD_PID=$!
   if ! wait_for 10 bash -c 'exec 3<>/dev/tcp/127.0.0.1/445'; then
     fail "smbd non in ascolto su 127.0.0.1:445"
+    exit "$STATUS"
+  fi
+  if ! kill -0 "$SMBD_PID" 2>/dev/null; then
+    fail "il nostro smbd (pid $SMBD_PID) è morto al bind:445 occupata da altro"
     exit "$STATUS"
   fi
   # smbd accetta TCP prima di aver completato l'init delle share: sul runner
@@ -143,6 +152,11 @@ EOF
     sleep 2
   done
   if [[ "$mounted" -ne 1 ]]; then
+    # diagnostica runner GH: chi ascolta davvero su445 e quale log smbd
+    { echo "smbd vivi:"; pgrep -a smbd || true
+      echo "porte445:"; ss -tlnp 2>/dev/null | grep 445 || true
+      echo "log smbd:"; tail -20 "$SANDBOX"/samba-state/log.* 2>/dev/null || true
+    } > /tmp/smb-debug.txt 2>&1 || true
     fail "mount.cifs fallito con entrambe le versioni"
     exit "$STATUS"
   fi
