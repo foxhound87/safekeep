@@ -89,7 +89,7 @@ fswatch_ours() { pgrep -P "$DAEMON_PID" -x fswatch >/dev/null 2>&1; }
 fswatch_ours_dead() { ! kill -0 "$FSWATCH_PID" 2>/dev/null; }
 daemon_alive() { kill -0 "$DAEMON_PID" 2>/dev/null; }
 
-mkdir -p "$SHARE" "$MNT" "$SRCLOCAL" "$DESTLOCAL" "$HOME"
+mkdir -p "$SHARE" "$MNT" "$SRCLOCAL" "$HOME"
 
 # ---------------------------------------------------------------- mount ----
 if [[ "$MODE" == "--server" ]]; then
@@ -101,7 +101,6 @@ if [[ "$MODE" == "--server" ]]; then
    bind interfaces only = yes
    interfaces = 127.0.0.1
    load printers = no
-   printing = no
    printcap name = /dev/null
    disable spoolss = yes
    state directory = $SANDBOX/samba-state
@@ -109,23 +108,28 @@ if [[ "$MODE" == "--server" ]]; then
    pid directory = $SANDBOX/samba-state
    private dir = $SANDBOX/samba-state
    lock directory = $SANDBOX/samba-state
-   logs directory = $SANDBOX/samba-state
+   ncalrpc dir = $SANDBOX/samba-state/ncalrpc
+   log file = $SANDBOX/samba-state/log.%m
+   max log size = 0
    usershare max shares = 0
 [sk]
    path = $SHARE
    guest ok = yes
    read only = no
 EOF
-  mkdir -p "$SANDBOX/samba-state"
+  mkdir -p "$SANDBOX/samba-state/ncalrpc" "$SHARE" "$MNT"
+  # la share va a 777: smbd serve la root come uid guest (nobody) e safekeep
+  # deve poter creare/scrivere file e directory nella radice della share
+  chmod 777 "$SANDBOX" "$SHARE" || true
   smbd --foreground --no-process-group --configfile="$SMBCFG" &
   SMBD_PID=$!
   if ! wait_for 10 bash -c 'exec 3<>/dev/tcp/127.0.0.1/445'; then
     fail "smbd non in ascolto su 127.0.0.1:445"
     exit "$STATUS"
   fi
-  if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=3.0 2>/dev/null; then
+  if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=3.0,file_mode=0777,dir_mode=0777 2>/dev/null; then
     note "vers=3.0 rifiutato, riprovo con vers=2.1"
-    if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=2.1; then
+    if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=2.1,file_mode=0777,dir_mode=0777; then
       fail "mount.cifs fallito con entrambe le versioni"
       exit "$STATUS"
     fi
@@ -146,13 +150,14 @@ fi
 # --------------------------------------------------- fase 1: dest su CIFS ----
 printf 'include: *.md\n' >"$SRCLOCAL/.sync"
 printf 'local v1\n' >"$SRCLOCAL/local.md"
+mkdir -p "$SHARE/destcifs" && chmod 777 "$SHARE/destcifs"
+DESTCIFS="$MNT/destcifs"    # dir creata lato server (share 777): montata è 777
 CFG_DEST="$SANDBOX/dest-cifs.conf"
 printf 'source: %s\ndest: %s\n' "$SRCLOCAL" "$DESTCIFS" >"$CFG_DEST"
 
 note "fase 1: dest su CIFS — sync-once + idempotenza + status [nas]"
-if ! out="$(python3 "$REPO/bin/safekeep.py" sync-once --config "$CFG_DEST")"; then
-  fail "sync-once verso dest CIFS uscito != 0"
-fi
+out="$(python3 "$REPO/bin/safekeep.py" sync-once --config "$CFG_DEST")" \
+  || fail "sync-once verso dest CIFS uscito != 0: $out"
 if ! wait_for 5 test -f "$DESTCIFS/local.md"; then
   fail "local.md non è mai arrivato sulla dest CIFS"
 fi
@@ -167,9 +172,18 @@ residue="$(find "$DESTCIFS" -name '*.safekeep.tmp.*' 2>/dev/null || true)"
 [[ -z "$residue" ]] || fail "residui tmp sulla dest CIFS: $residue"
 
 # ------------------------------------- fase 2-5: sorgente su CIFS + loop ----
-printf 'include: *.md\n!draft.md\n' >"$SRCNET/.sync"
-printf 'nas v1\n' >"$SRCNET/note.md"
+# ogni dir CIFS è creata lato $SHARE (filesystem reale, prima o indipendente dal
+# mount) con chmod 777: creata dal client montato sarebbe `nobody:755` e
+# safekeep non potrebbe scriverci dentro
+mkdir -p "$SHARE/srcproj" && chmod 777 "$SHARE/srcproj"
+printf 'include: *.md\n!draft.md\n' >"$SHARE/srcproj/.sync"
+printf 'nas v1\n' >"$SHARE/srcproj/note.md"
+# i file CIFS serviti dal guest finiscono `nobody:644` lato server: safekeep
+# deve poterli RISCRIVERE dal mount (i test di fase li riscrivono), quindi 777
+chmod 777 "$SHARE/srcproj/.sync" "$SHARE/srcproj/note.md"
 printf 'local v1\n' >"$SRCLOCAL/local.md"
+mkdir -p "$SHARE/destlocal" && chmod 777 "$SHARE/destlocal"
+DESTLOCAL="$MNT/destlocal"   # come DESTCIFS: creata lato server, montata 777
 printf 'source: %s\nsource: %s\ndest: %s\npoll_interval: 5\n' \
   "$SRCNET" "$SRCLOCAL" "$DESTLOCAL" >"$CFG"
 
@@ -208,7 +222,9 @@ if ! wait_for 15 grep -q 'local v2' "$DESTLOCAL/local.md" 2>/dev/null; then
 fi
 
 note "fase 3: esclusioni .sync sotto polling (draft.md, skip.txt)"
-touch "$SRCNET/draft.md" "$SRCNET/skip.txt"
+printf 'x\n' >"$SRCNET/draft.md" 2>/dev/null || printf 'x\n' >"$SHARE/srcproj/draft.md"
+printf 'x\n' >"$SRCNET/skip.txt" 2>/dev/null || printf 'x\n' >"$SHARE/srcproj/skip.txt"
+chmod 777 "$SHARE/srcproj/draft.md" "$SHARE/srcproj/skip.txt" 2>/dev/null || true
 sleep 12                               # ≥ 2 turni di poll + margine
 [[ ! -e "$DESTLOCAL/draft.md" ]] \
   || fail "draft.md copiato benché .sync lo escluda"
@@ -221,8 +237,8 @@ if [[ "$MODE" == "--server" ]]; then
   sleep 1                               # qualche walk fallisce → poll_pending + backoff
   printf 'nas v3-durante-smont\n' >"$SHARE/srcproj/note.md"
   printf 'perso\n' >"$SHARE/srcproj/durante.md"
-  if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=3.0 2>/dev/null \
-     && ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=2.1; then
+  if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=3.0,file_mode=0777,dir_mode=0777 2>/dev/null \
+     && ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=2.1,file_mode=0777,dir_mode=0777; then
     fail "remount fallito"
   fi
   if ! wait_for 45 grep -q 'nas v3-durante-smont' "$DESTLOCAL/note.md" 2>/dev/null; then
