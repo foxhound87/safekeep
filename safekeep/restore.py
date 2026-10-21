@@ -99,14 +99,22 @@ def inventory(projects, kind, origin, layout):
     return _inventory_fs(origin, projects, layout)
 
 
+def _key_prefix(uri):
+    """`s3://bkt/pre/proj` → `pre/proj/` (key prefix, §18.2); vuoto se il
+    bucket non ha prefix."""
+    rest = uri[len('s3://'):].partition('/')          # ('bkt', '/', 'pre/proj')
+    return rest[2].rstrip('/') + '/' if rest[2] else ''
+
+
 def _project_prefixes(projects, kind, origin, layout):
-    """[(prefisso, project)]: dir dest (fs) o key prefix (S3) di ogni progetto."""
+    """[(prefisso, project)]: dir dest (fs) o key prefix S3 (nudo, senza
+    `s3://bucket/`) di ogni progetto."""
     out = []
     for project in projects:
         if kind == 's3':
-            prefix = origin.dest_path(origin.root, project.source_root,
-                                      project.root, layout)
-            prefix = prefix.rstrip('/') + '/'
+            prefix = _key_prefix(origin.dest_path(origin.root,
+                                                  project.source_root,
+                                                  project.root, layout))
         else:
             prefix = os.path.realpath(fs_dest_path(
                 origin, project.source_root, project.root, layout))
@@ -132,7 +140,10 @@ def _inventory_fs(dest_root, projects, layout):
 
 
 def _place(path, prefixes, entries, orphans):
-    real = os.path.realpath(path)
+    # come `daemon.normalize`: realpath SOLO dei genitori — il componente
+    # finale symlink non va risolto (è la voce stessa: link.md ≠ il suo target)
+    real = os.path.join(os.path.realpath(os.path.dirname(path)),
+                        os.path.basename(path))
     for proj_dst, project in prefixes:
         if real == proj_dst or real.startswith(proj_dst + os.sep):
             rel = os.path.relpath(real, proj_dst).replace(os.sep, '/')
@@ -147,9 +158,7 @@ def _inventory_s3(s3, projects, layout):
     """Enumerazione S3 (`iter_keys`, §18/§19): key sotto il prefix del progetto
     → entry; altrove → orfano."""
     prefixes = _project_prefixes(projects, 's3', s3, layout)
-    rest = s3.root[len('s3://'):]            # 'bkt/pref' → key prefix 'pref/'
-    root_key = rest.partition('/')[2]
-    pfx = root_key.rstrip('/') + '/' if root_key else ''
+    pfx = _key_prefix(s3.root)
     entries, orphans = [], []
     for key, size, md in s3.iter_keys(pfx):
         for proj_pfx, project in prefixes:
@@ -201,14 +210,6 @@ def first_level(entries):
 
 def need_restore(entry):
     """True se il backup differisce dal target (o manca) — semantica §10.1."""
-    if os.path.islink(entry.backup):
-        # symlink: confronto del target del link (needs_copy seguirebbe il
-        # link e un backup rotto sembrerebbe "già aggiornato")
-        try:
-            return not (os.path.islink(entry.target)
-                        and os.readlink(entry.target) == os.readlink(entry.backup))
-        except OSError:
-            return True
     if entry.info is not None:               # S3: (size, metadata lowercase)
         size, md = entry.info
         if md.get('symlink') is not None:    # object zero-byte = symlink (§18.2)
@@ -225,6 +226,14 @@ def need_restore(entry):
         try:
             return abs(int(md.get('mtime')) - d.st_mtime_ns) > int(MTIME_TOLERANCE * 1e9)
         except (TypeError, ValueError):
+            return True
+    if os.path.islink(entry.backup):
+        # symlink fs: confronto del target del link (needs_copy seguirebbe il
+        # link e un backup rotto sembrerebbe "già aggiornato")
+        try:
+            return not (os.path.islink(entry.target)
+                        and os.readlink(entry.target) == os.readlink(entry.backup))
+        except OSError:
             return True
     return needs_copy(entry.backup, entry.target)
 
