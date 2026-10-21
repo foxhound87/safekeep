@@ -175,6 +175,22 @@ def _inventory_s3(s3, projects, layout):
 
 # ----------------------------------------------------------------- matching
 
+def _resolve_glob_prefix(p):
+    """Realpath del prefisso di `p` fino al primo segmento con meta-caratteri
+    fnmatch (i glob non si risolvono, il prefisso sì): copre i path scritti
+    via symlink (macOS `/var` → `/private/var`, SPEC §19.2). Solo per pattern
+    assoluti — i relativi matchano già la forma relativa."""
+    head, tail = p, []
+    while head:
+        base = os.path.basename(head)
+        if any(c in base for c in GLOB_CHARS):
+            tail.insert(0, base)
+            head = os.path.dirname(head)
+        else:
+            break
+    return os.path.join(os.path.realpath(head), *tail)
+
+
 def matches(target, source_root, patterns):
     """§19.2: ogni argomento è path assoluto, path relativo alla radice
     `source` del progetto, o glob `fnmatch` (su entrambe le forme)."""
@@ -184,9 +200,15 @@ def matches(target, source_root, patterns):
         if any(c in p for c in GLOB_CHARS):
             if fnmatch.fnmatch(target, p) or fnmatch.fnmatch(rel, p):
                 return True
+            if os.path.isabs(p) and fnmatch.fnmatch(target,
+                                                    _resolve_glob_prefix(p)):
+                return True
         else:
             n = os.path.normpath(p)
             if n == target or (not os.path.isabs(p) and n == rel):
+                return True
+            if os.path.isabs(n) and os.path.normpath(
+                    os.path.realpath(n)) == target:    # via symlink
                 return True
     return False
 
