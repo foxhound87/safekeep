@@ -11,7 +11,10 @@
 #   4. the `.sync` rules hold under live events: `!draft.md` and a non-`*.md`
 #      file are NOT copied (allow-list — SPEC §4.3);
 #   5. clean SIGTERM shutdown (exit 0), no orphan `fswatch`, no
-#      `*.safekeep.tmp.*` residue in dest.
+#      `*.safekeep.tmp.*` residue in dest;
+#   6. `restore` (SPEC §19): no-args + non-TTY exits != 0, dry-run shows the
+#      `(crea)` row without writing, `--force` brings the file back with the
+#      same content, a non-matching glob exits != 0.
 #
 # Sandbox: everything lives in a `mktemp -d` that is removed on exit, and
 # HOME is pointed at it too, so the daemon log and every doctor probe stay
@@ -97,7 +100,7 @@ FSWATCH_PID="$(pgrep -P "$DAEMON_PID" -x fswatch | head -n1)" || true
 sleep 2                               # lascia a fswatch il tempo di agganciare i watch
 
 note "live event: touch src/hello.md -> dest/hello.md"
-touch "$SRC/hello.md"
+printf 'hello safekeep\n' > "$SRC/hello.md"
 if ! wait_for 15 test -f "$DEST/hello.md"; then
   fail "hello.md did not reach dest within 15s"
 fi
@@ -125,7 +128,40 @@ if [[ -n "$FSWATCH_PID" ]] && ! wait_for 5 fswatch_ours_dead; then
   fail "fswatch (pid $FSWATCH_PID) outlived the daemon"
 fi
 
-residue="$(find "$DEST" -name '*.safekeep.tmp.*' 2>/dev/null || true)"
+# --- restore (SPEC §19) — live copy della sezione precedente come backup -----
+note "restore: no args + non-TTY exits != 0"
+if python3 "$REPO/bin/safekeep.py" restore --config "$CFG" </dev/null \
+    >/dev/null 2>&1; then
+  fail "restore without args on a pipe must exit != 0"
+fi
+
+note "restore dry-run: source removed, a (crea) row is shown, nothing written"
+rm -f "$SRC/hello.md"
+out="$(python3 "$REPO/bin/safekeep.py" restore --config "$CFG" "$SRC/hello.md")" \
+  || fail "restore dry-run exited != 0"
+if ! printf '%s\n' "$out" | grep -q 'hello.md -> .* (crea)'; then
+  fail "restore dry-run did not show a (crea) row for hello.md: $out"
+fi
+if [[ -e "$SRC/hello.md" ]]; then
+  fail "restore dry-run must not write"
+fi
+
+note "restore --force: hello.md comes back with the same content"
+if ! python3 "$REPO/bin/safekeep.py" restore --config "$CFG" --force \
+    "$SRC/hello.md"; then
+  fail "restore --force exited != 0"
+fi
+if ! grep -q 'hello safekeep' "$SRC/hello.md" 2>/dev/null; then
+  fail "restored hello.md content mismatch"
+fi
+
+note "restore glob no-match exits != 0"
+if python3 "$REPO/bin/safekeep.py" restore --config "$CFG" '*.nomatch' \
+    >/dev/null 2>&1; then
+  fail "restore with a non-matching glob must exit != 0"
+fi
+
+residue="$(find "$DEST" "$SRC" -name '*.safekeep.tmp.*' 2>/dev/null || true)"
 if [[ -n "$residue" ]]; then
   fail "tmp residue in dest: $residue"
 fi
