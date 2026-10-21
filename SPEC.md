@@ -1213,6 +1213,16 @@ gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
 Così i classifier Python di §14.7 (`3.9`, `3.12`, `3.14`) sono coperti **anche dalla
 CI**, non più solo dalla suite locale dell'utente.
 
+**Check drift SPEC ↔ `__version__` (0.9.0)**: entrambi i job `test` aggiungono uno
+step che estrae l'header `**Versione:**` da `SPEC.md` e `__version__` da
+`safekeep/__init__.py` e **fallisce se differiscono** (shell sola: `sed` + `test`,
+zero dipendenze). Obiettivo: mai più una release con header SPEC stale (a 0.8.0
+l'header era fermo a 0.5.2). Su GitHub gira su **una sola gamba**
+(`if: matrix.python-version == '3.12'` — il confronto è indipendente da Python);
+su GitLab è una riga all'inizio del job `test` (gira su tutte e tre le gambe, il
+costo è un `sed`). Il bump di release deve quindi toccare `__version__` **e** lo
+header della SPEC nello stesso commit, altrimenti la CI va rossa.
+
 **Ramo WSL eseguito in CI**: fin da 0.4.0 §17 dichiarava che WSL non era verificabile
 in locale (nessuna macchina WSL). Entrambi i job `test` aggiungono quindi uno step
 `WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only` → grep sul

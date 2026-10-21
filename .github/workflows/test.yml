@@ -39,6 +39,26 @@ jobs:
         python-version: ['3.9', '3.12', '3.14']
     steps:
       - uses: actions/checkout@v7
+      # SPEC drift (0.9.0): l'header `**Versione:**` di SPEC.md deve essere
+      # uguale a `__version__` di safekeep/__init__.py — shell sola (sed+test,
+      # zero dipendenze), una gamba basta, gira prima di ogni altro step
+      # (SPEC §14.6; accadeva che l'header restasse stale a più release di
+      # distanza dalla versione reale).
+      - name: SPEC version drift check
+        if: matrix.python-version == '3.12'
+        run: |
+          set -eu
+          spec_v="$(sed -n 's/^\*\*Versione:\*\* \([0-9][0-9.]*\).*/\1/p' SPEC.md | head -n1)"
+          pkg_v="$(sed -n "s/^__version__ = ['\"]\([^'\"]*\)['\"].*/\1/p" safekeep/__init__.py | head -n1)"
+          if [ -z "$spec_v" ] || [ -z "$pkg_v" ]; then
+            echo "SPEC drift check: header o __version__ non trovati (spec='$spec_v' pkg='$pkg_v')"
+            exit 1
+          fi
+          if [ "$spec_v" != "$pkg_v" ]; then
+            echo "SPEC drift: SPEC.md Versione=$spec_v ma __version__=$pkg_v"
+            exit 1
+          fi
+          echo "SPEC drift check ok: $spec_v"
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
