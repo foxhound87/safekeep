@@ -185,3 +185,73 @@ def systemd_user_available(path=None):
     if path is None:
         path = SYSTEMD_RUN_PATH
     return os.path.exists(path)
+
+
+# ------------------------------------------------------------------ filesystem
+
+NETWORK_FSTYPES = frozenset({'smbfs', 'cifs', 'nfs'})   # fs di rete (SPEC.md §19)
+PROC_MOUNTS = '/proc/mounts'
+# macOS `mount`: `/dev/disk1s4 on /Volumes/Data (smbfs, local, nodev, ...)`
+_MOUNT_RE = re.compile(r' on (\S+) \(([^,)]+)')
+
+
+def _unescape_mount(p):
+    """Escape di /proc/mounts: `\\040` spazio, `\\011` tab, `\\134` backslash."""
+    return p.replace('\\040', ' ').replace('\\011', '\t').replace('\\134', '\\')
+
+
+def parse_mounts(text):
+    """Output di `/proc/mounts` → [(mountpoint, fstype)] (Linux)."""
+    out = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            out.append((_unescape_mount(parts[1]), parts[2]))
+    return out
+
+
+def parse_mount_output(text):
+    """Output di `mount` (macOS) → [(mountpoint, fstype)]."""
+    return _MOUNT_RE.findall(text)
+
+
+def mount_point_of(path, mounts):
+    """Il mountpoint più lungo che contiene `path` (longest-prefix-match)."""
+    p = os.path.abspath(os.path.expanduser(path))
+    best = ''
+    for mp, _ in mounts:
+        if (p == mp or p.startswith(mp.rstrip('/') + '/')) and len(mp) > len(best):
+            best = mp
+    return best
+
+
+def fs_fstype(path, mounts_path=PROC_MOUNTS, mount_text=None):
+    """Filesystem type del mount che contiene `path`; '' se non determinabile.
+
+    Linux: parse di `/proc/mounts`; macOS: parse dell'output di `mount`
+    (SPEC.md §19). Solo lettura, nessun privilegio. `mounts_path`/`mount_text`
+    sono gli override per i test (prassi parametrizzata)."""
+    if is_darwin():
+        if mount_text is None:
+            try:
+                mount_text = subprocess.run(
+                    ['mount'], capture_output=True, text=True, timeout=10).stdout
+            except (OSError, subprocess.SubprocessError):
+                return ''
+        mounts = parse_mount_output(mount_text)
+    else:
+        try:
+            with open(mounts_path, encoding='utf-8', errors='replace') as fh:
+                mounts = parse_mounts(fh.read())
+        except OSError:
+            return ''
+    mp = mount_point_of(path, mounts)
+    for mpoint, fst in mounts:
+        if mpoint == mp:
+            return fst
+    return ''
+
+
+def is_network_fs(path):
+    """True se `path` sta su un filesystem di rete smbfs/cifs/nfs (SPEC.md §19)."""
+    return fs_fstype(path) in NETWORK_FSTYPES
