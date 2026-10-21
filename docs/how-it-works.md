@@ -94,6 +94,27 @@ event was lost during downtime) plus a reconcile of all projects. Other
 triggers: daemon start, remount of a pending destination, `sync-once`, and the
 >5000-path flood case.
 
+## Network volumes (SMB / CIFS)
+
+Local filesystems and NFS emit reliable events; **SMB/CIFS do not**. Roots
+classified as network volumes are therefore observed by a second mechanism,
+a **periodic poll** every `poll_interval` seconds (default 60, see
+[configuration](/configuration)):
+
+1. `classify_roots` splits the project's roots into `watch_roots`
+   (fswatch) and `poll_roots` (poller) by filesystem type;
+2. each poll walks the network roots, hashes files with SHA-256 and compares
+   them against the previous snapshot — **fail-open**: if the share is
+   unreachable or an access is denied (TCC, `EACCES`), the snapshot is kept
+   untouched and the project is `blocked` for that cycle;
+3. detected differences feed the same commit queue as real events, so a
+   change made on another host lands in the backup on the next tick.
+
+Watcher and poller share snapshots and queues: a polled change produces the
+same snapshot and follow-up window as an event. Deletion sweeps and root
+re-classification run from the daemon's background step, as for local roots.
+See [Network volumes](/network-volumes) for mount and diagnostics.
+
 ## TCC / FDA
 
 **TCC (Transparency, Consent and Control)** is the macOS framework that asks

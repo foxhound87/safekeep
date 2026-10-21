@@ -34,6 +34,7 @@ export default defineConfig({
           { text: 'Quickstart', link: '/quickstart' },
           { text: 'Install', link: '/install' },
           { text: 'Configuration', link: '/configuration' },
+          { text: 'Network volumes', link: '/network-volumes' },
           { text: 'Commands', link: '/commands' },
           { text: 'S3 destination', link: '/s3' }
         ]
@@ -49,6 +50,7 @@ export default defineConfig({
           { text: 'Quickstart', link: '/quickstart' },
           { text: 'Install', link: '/install' },
           { text: 'Configuration', link: '/configuration' },
+          { text: 'Network volumes', link: '/network-volumes' },
           { text: 'Commands', link: '/commands' },
           { text: 'S3 destination', link: '/s3' }
         ]

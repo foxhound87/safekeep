@@ -16,6 +16,7 @@ A single file in `$HOME` — no `~/.config/safekeep/…`. Syntax is
 | `defaults` | rule, repeatable | builtin | low-priority default rules |
 | `s3_*` | see [S3 destination](/s3) | absent | one optional S3-compatible bucket (needs the `safekeep[s3]` extra) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | log verbosity |
+| `poll_interval` | integer, seconds | `60` | how often roots on network volumes (SMB/CIFS) are scanned — see [Network volumes](/network-volumes) |
 
 This file is **fail-fast**: an unknown key or an invalid line is a
 `ConfigError` with a line number.
