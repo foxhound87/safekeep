@@ -106,7 +106,8 @@ a **periodic poll** every `poll_interval` seconds (default 60, see
 2. each poll walks the network roots, hashes files with SHA-256 and compares
    them against the previous snapshot — **fail-open**: if the share is
    unreachable or an access is denied (TCC, `EACCES`), the snapshot is kept
-   untouched and the project is `blocked` for that cycle;
+   untouched and the root waits in `poll_pending` with backoff until a walk
+   succeeds;
 3. detected differences feed the same commit queue as real events, so a
    change made on another host lands in the backup on the next tick.
 

@@ -28,7 +28,7 @@ No configuration is needed beyond mounting the share: the classification
 The daemon reads the share as the user that starts it. Grant Safekeep
 **Files and Folders → Removable Volumes** and **Local Network** access in
 **System Settings → Privacy & Security**, otherwise every read on the share
-is denied and the project stays `blocked`.
+is denied and the daemon logs the denied reads, retrying with a slow backoff.
 
 Check with `safekeep doctor`: the `TCC …` rows must report `ok: …`.
 :::
@@ -72,10 +72,12 @@ safekeep daemon install --interval 15
   events.
 - **Remote changes**: writes made from another host are picked up on the
   next tick, delayed only by the client's SMB caching.
-- **Unmount**: while the share is down, `safekeep status` and
-  `safekeep doctor` report `network volume unreachable` and every project on
-  that share is `blocked` with that note. Snapshots and pending state are
-  preserved.
+- **Unmount**: while the share is down every walk fails with an `OSError`,
+  so the root waits in `poll_pending` with exponential backoff and the
+  pre-unmount snapshot is preserved (discovery logs `source inesistente` for
+  the project while it cannot see it). `safekeep doctor` keeps listing the
+  network sources and their `poll_interval`; copies toward a destination on
+  the share go to **pending** like any unmounted destination.
 - **Remount**: the next tick reclassifies the roots and the poller resumes;
   changes made while the share was down are caught up on the first walk
   after remount.
@@ -83,14 +85,14 @@ safekeep daemon install --interval 15
 ## Diagnostics
 
 ```bash
-safekeep doctor   # mountpoint, mounted state, reachability, TCC
-safekeep status   # [network] rows / network volume unreachable
+safekeep doctor   # mountpoint, mounted state, network sources + poll_interval, TCC
+safekeep status   # destinations on a share are labelled [nas]
 ```
 
-Example with the share unmounted:
+Example of the `doctor` rows for network sources:
 
 ```
-  [network]  NAS /Volumes/backup  network volume unreachable
+✔ sorgenti su volume di rete: 1 (poll ogni 60s): /Volumes/backup
 ```
 
 ::: tip
