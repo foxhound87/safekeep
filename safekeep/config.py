@@ -47,6 +47,7 @@ class GlobalConfig:
         self.layout = 'relative'      # relative | full
         self.defaults = []            # regole a bassa priorità (list[Rule])
         self.log_level = 'info'       # debug | info | warn | error
+        self.poll_interval = 60       # secondi fra due turni di polling (§20.3)
 
 
 class SyncConfig:
@@ -187,6 +188,18 @@ def parse_config(text, origin='config'):
             if val not in ('debug', 'info', 'warn', 'error'):
                 raise ConfigError(f'{origin}:{lineno}: log_level non valido: {val!r}')
             cfg.log_level = val
+        elif key == 'poll_interval':
+            # intero ≥ 1: sotto il minuto un turno di polling su un NAS è solo
+            # I/O di rete (§20.3) — fail-fast con numero di riga, come ogni
+            # altra chiave del config
+            try:
+                seconds = int(val)
+            except ValueError:
+                seconds = 0
+            if seconds < 1:
+                raise ConfigError(f'{origin}:{lineno}: poll_interval non valido: '
+                                  f'{val!r} (intero ≥ 1)')
+            cfg.poll_interval = seconds
         else:
             raise ConfigError(f'{origin}:{lineno}: chiave sconosciuta: {key}')
     cfg.s3 = _build_s3(s3raw, origin)
@@ -342,6 +355,18 @@ def home_prune(rel):
     return name.startswith('.') or name in HOME_PRUNE_DIRS
 
 
+def discovery_prune(auto=False):
+    """Callable di pruning dello scan di discovery (SPEC.md §4.1/§20.2).
+
+    `auto=True` (auto-discovery dalla `$HOME`) → `home_prune`; `auto=False`
+    (modalità source) → verdict *esclusa* delle regole builtin. Una sola
+    fonte di verità: lo usa `discover_projects` E il poller delle root di
+    rete, così un `.git`/`node_modules` non viene camminato in nessuno dei due.
+    """
+    builtin = Matcher(BUILTIN_RULES)
+    return home_prune if auto else (lambda rel: not builtin.evaluate(rel, True))
+
+
 def discover_projects(sources, auto=False):
     """Directory che contengono `.sync` sotto ogni radice (scan con pruning).
 
@@ -355,8 +380,7 @@ def discover_projects(sources, auto=False):
     directory (`opendir`) solo quando ci si entra, così una dir potata — in
     particolare una cartella protetta da TCC — non viene mai nemmeno aperta.
     """
-    builtin = Matcher(BUILTIN_RULES)
-    prune = home_prune if auto else (lambda rel: not builtin.evaluate(rel, True))
+    prune = discovery_prune(auto)
     found = []
     for src in sources:
         root = os.path.abspath(os.path.expanduser(src))
