@@ -129,12 +129,22 @@ EOF
     fail "smbd non in ascolto su 127.0.0.1:445"
     exit "$STATUS"
   fi
-  if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=3.0,file_mode=0777,dir_mode=0777 2>/dev/null; then
-    note "vers=3.0 rifiutato, riprovo con vers=2.1"
-    if ! sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=2.1,file_mode=0777,dir_mode=0777; then
-      fail "mount.cifs fallito con entrambe le versioni"
-      exit "$STATUS"
+  # smbd accetta TCP prima di aver completato l'init delle share: sul runner
+  # GH il mount partiva a +200ms con ENOENT — sleep + retry copre il race
+  sleep 1
+  mounted=0
+  for attempt in 1 2 3; do
+    if sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=3.0,file_mode=0777,dir_mode=0777 2>/dev/null \
+       || sudo mount.cifs "//127.0.0.1/sk" "$MNT" -o guest,vers=2.1,file_mode=0777,dir_mode=0777 2>/dev/null; then
+      mounted=1
+      break
     fi
+    note "mount.cifs tentativo $attempt fallito, riprovo con 2s di attesa"
+    sleep 2
+  done
+  if [[ "$mounted" -ne 1 ]]; then
+    fail "mount.cifs fallito con entrambe le versioni"
+    exit "$STATUS"
   fi
 elif [[ "$MODE" == "--mounted" ]]; then
   if [[ -z "${SAFEKEEP_E2E_SMB_MOUNT:-}" ]]; then
