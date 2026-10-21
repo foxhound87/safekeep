@@ -71,7 +71,7 @@ cleanup() {
     sudo umount "$MNT" 2>/dev/null || true
     [[ -n "$SMBD_PID" ]] && kill "$SMBD_PID" 2>/dev/null || true
   fi
-  rm -rf "$SANDBOX"
+  sudo rm -rf "$SANDBOX"
 }
 trap cleanup EXIT
 
@@ -128,7 +128,8 @@ EOF
   sleep 1
   # setsid: smbd in una sessione propria — altrimenti condivide il pgid della
   # shell e il suo shutdown manda segnali all'intero gruppo (e2e muore con 143)
-  setsid smbd --foreground --no-process-group --configfile="$SMBCFG" &
+  # smbd serve va root (privilege separation; come uid runner abortisce)
+  sudo setsid smbd --foreground --no-process-group --configfile="$SMBCFG" &
   SMBD_PID=$!
   if ! wait_for 10 bash -c 'exec 3<>/dev/tcp/127.0.0.1/445'; then
     fail "smbd non in ascolto su 127.0.0.1:445"
@@ -155,7 +156,7 @@ EOF
     # diagnostica runner GH: chi ascolta davvero su445 e quale log smbd
     { echo "smbd vivi:"; pgrep -a smbd || true
       echo "porte445:"; ss -tlnp 2>/dev/null | grep 445 || true
-      echo "log smbd:"; tail -20 "$SANDBOX"/samba-state/log.* 2>/dev/null || true
+      echo "log smbd:"; sudo tail -20 "$SANDBOX"/samba-state/log.* 2>/dev/null || true
     } > /tmp/smb-debug.txt 2>&1 || true
     fail "mount.cifs fallito con entrambe le versioni"
     exit "$STATUS"
@@ -281,6 +282,10 @@ else
 fi
 
 note "fase 5: SIGTERM pulito, nessun fswatch orfano, nessun residuo tmp"
+# il reconcile "dest di nuovo pronta" (remount fase 4) potrebbe essere ancora
+# in corso: un kill a metà copia lascerebbe un residuo tmp legittimo — lascio
+# finire le copie in volo prima del TERM
+sleep 3
 kill -TERM "$DAEMON_PID"
 rc=0
 wait "$DAEMON_PID" || rc=$?
