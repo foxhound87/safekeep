@@ -376,5 +376,75 @@ class WslTest(unittest.TestCase):
 # vedi tests/test_daemonctl.py (PreflightTest / InstallTest).
 
 
+class FsFstypeTest(unittest.TestCase):
+    """fs_fstype/is_network_fs (SPEC.md §19): parse di /proc/mounts (Linux)
+    e dell'output di `mount` (macOS) con testi finti — nessun path reale."""
+
+    FAKE_MNT = (
+        'sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\n'
+        'tmpfs /private/var/vm tmpfs rw 0 0\n'
+        '/dev/disk3s1s1 / apfs rw,sealed,local 0 0\n'
+        '/dev/disk5s2 /Volumes/Data apfs rw,local 0 0\n'
+        '//nas.local\\040bk/backup /Volumes/Backup smbfs rw,local 0 0\n'
+    )
+    FAKE_MOUNT_OUT = (
+        '/dev/disk3s1s1 on / (apfs, local, journaled)\n'
+        '//nas.local/share on /Volumes/Backup (smbfs, local)\n'
+        'map auto_home on /System/Volumes/Data/home (autofs, ...)\n'
+    )
+
+    def test_parse_mounts_con_escape_spazio(self):
+        mounts = dict(plat.parse_mounts(self.FAKE_MNT))
+        self.assertEqual(mounts['/Volumes/Backup'], 'smbfs')
+        self.assertEqual(mounts['/'], 'apfs')
+
+    def test_parse_mount_output_darwin(self):
+        mounts = dict(plat.parse_mount_output(self.FAKE_MOUNT_OUT))
+        self.assertEqual(mounts['/Volumes/Backup'], 'smbfs')
+        self.assertEqual(mounts['/'], 'apfs')
+
+    def test_longest_prefix_match(self):
+        mounts = plat.parse_mounts(self.FAKE_MNT)
+        self.assertEqual(plat.mount_point_of('/Volumes/Backup/proj/a.md', mounts),
+                         '/Volumes/Backup')
+        self.assertEqual(plat.mount_point_of('/Volumes/Other/a.md', mounts), '/')
+        self.assertEqual(plat.mount_point_of('/Volumes/Backup', mounts),
+                         '/Volumes/Backup')
+
+    def test_fs_fstype_linux_da_file_finto(self):
+        with tempfile.NamedTemporaryFile('w', suffix='mnt', delete=False) as fh:
+            fh.write(self.FAKE_MNT)
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        with mock.patch('sys.platform', 'linux'):
+            self.assertEqual(plat.fs_fstype('/Volumes/Backup/p/a.md',
+                                            mounts_path=path), 'smbfs')
+            self.assertEqual(plat.fs_fstype('/altrove/a.md', mounts_path=path),
+                             'apfs')
+
+    def test_fs_fstype_darwin_da_output_finto(self):
+        with mock.patch('sys.platform', 'darwin'):
+            self.assertEqual(
+                plat.fs_fstype('/Volumes/Backup/p/a.md',
+                               mount_text=self.FAKE_MOUNT_OUT), 'smbfs')
+
+    def test_fs_fstype_indeterminabile(self):
+        with mock.patch('sys.platform', 'linux'):
+            self.assertEqual(plat.fs_fstype('/x', mounts_path='/non/esiste'), '')
+
+    def test_is_network_fs(self):
+        mounts = plat.parse_mounts(self.FAKE_MNT)
+        for path, expected in (('/Volumes/Backup/p/a.md', True),
+                               ('/private/var/vm/x', False),
+                               ('/Volumes/Backup', True)):
+            with self.subTest(path=path):
+                mp = plat.mount_point_of(path, mounts)
+                fst = dict(mounts).get(mp, '')
+                self.assertEqual(fst in plat.NETWORK_FSTYPES, expected)
+        self.assertIn('smbfs', plat.NETWORK_FSTYPES)
+        self.assertIn('cifs', plat.NETWORK_FSTYPES)
+        self.assertIn('nfs', plat.NETWORK_FSTYPES)
+
+
 if __name__ == '__main__':
     unittest.main()

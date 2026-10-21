@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.5.2 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.8.0 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -666,6 +666,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 |---|---|---|
 | `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
+| `restore` | ripristina dall'**ultima copia** in una dest (§19): dry-run **sempre** il default, `--force` per scrivere; selezione via `PATH`/`GLOB` o menu interattivo; `--from {local,s3,nas}` con auto-detect del candidato unico | 0 se tutto ok; 1 se la config è invalida, l'origine del ripristino non è determinabile o nessun argomento matcha |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
 | `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC, lint plist ed eseguibile del processo ancora su disco (solo macOS, §14.4), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
 | `daemon {install,start,stop,status,uninstall}` | gestione dell'agent di boot (§14.3): `install [--enable-linger] [--dry-run]` preflight + render della unit da template embedded (idempotente, non avvia); `start`/`stop` caricano/scaricano la unit; `status` = sola lettura; `uninstall [--purge]` rimuove la unit (`--purge` toglie anche `~/.safekeep` e i log) | 0 se tutto ok; 1 se il preflight fallisce, la unit non è installata (`start`/`status`) o l'agent non è in esecuzione (`status`) |
@@ -685,6 +686,20 @@ python3 bin/safekeep.py sync-once --dry-run
 
 # Sync reale di un singolo progetto
 python3 bin/safekeep.py sync-once --project ~/Code/myapp
+
+# Restore: dry-run di default (mostra le righe, NON scrive)
+python3 bin/safekeep.py restore ~/Code/myapp/docs/note.md
+
+# Restore reale: solo con --force (path assoluto, relativo o glob)
+python3 bin/safekeep.py restore --force ~/Code/myapp
+python3 bin/safekeep.py restore --force myapp/docs/note.md
+python3 bin/safekeep.py restore --force 'myapp/docs/*.md'
+
+# Origine esplicita (multi-dest oppure dest S3, credenziali solo dal config)
+python3 bin/safekeep.py restore --from s3 --force ~/Code/myapp
+
+# Menu interattivo (solo da terminale: niente argomenti + stdin è un TTY)
+python3 bin/safekeep.py restore --force
 
 # Stato leggibile / macchina-leggibile
 python3 bin/safekeep.py status
@@ -908,6 +923,12 @@ illimitata della coda in memoria.
   quindi un `.sync` malevolo incluso in un repo clonato da terzi non può far scrivere il
   backup altrove. Le righe `dest:`/`-dest:` in un `.sync` sono righe invalide e vengono
   rifiutate (warning con `log_level: info`, errore con `log_level: debug`).
+- **`restore` scrive solo dentro le source** (containment **invertito** rispetto al
+  CR-01 di §7.2): il target è sempre il path originale, niente `--to`, e un path
+  ricostruito che esce dalla source del progetto viene rifiutato (EACCES + skip).
+  **Nessuna scrittura senza `--force`** — il default è sempre il dry-run, anche in
+  interattivo; nessuna cancellazione; le credenziali S3 arrivano solo dal config
+  `s3_*` (§18.1), mai da flag a riga di comando (§19).
 - Nessuna esecuzione di codice dai file di config: la config è **dati**, non script (parse
   rigido, path normalizzati, nessun `eval`, nessun glob verso shell).
 - I log non contengono il contenuto dei file, solo path e conteggi.
@@ -937,6 +958,9 @@ illimitata della coda in memoria.
 | `.sync` creato dopo l'avvio (o perso per downtime) | evento su `<dir>/.sync` → discovery + reconcile del nuovo progetto; in più rescan di discovery ogni 24h (§6) |
 | Directory rumorose nella `$HOME` (auto-discovery) | pruning nello scan (nascoste + `Library`, `.Trash`, `.cache`, …) e regex `-e` dedicate di fswatch |
 | Omonimia di path tra due progetti | **risolto**: il path dest in `relative` è calcolato come relativo alla **radice `source`** che contiene il progetto (§3), quindi include il segmento del progetto — `projA/docs/note.md` e `projB/docs/note.md` non collidono. Resta solo l'omonia fra due *radici source diverse* con la stessa prima directory (prefisso col `name:` in futuro) |
+| `restore` da una dest non montata | errore con l'elenco dei candidati (§19.3): un'origine dichiarata non viene mai ignorata silenziosamente — monta il volume e riprova |
+| `restore` con PATH/GLOB senza match | exit ≠ 0 con messaggio (nessun file ripristinato, nessuna scrittura parziale decisa a partire da zero match) |
+| `restore` verso una cartella protetta TCC senza FDA | `EACCES`/`Operation not permitted` per-file, log + hint FDA (Full Disk Access, §11/§14.4) — il resto del piano prosegue |
 
 ---
 
@@ -1189,6 +1213,16 @@ gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
 Così i classifier Python di §14.7 (`3.9`, `3.12`, `3.14`) sono coperti **anche dalla
 CI**, non più solo dalla suite locale dell'utente.
 
+**Check drift SPEC ↔ `__version__` (0.9.0)**: entrambi i job `test` aggiungono uno
+step che estrae l'header `**Versione:**` da `SPEC.md` e `__version__` da
+`safekeep/__init__.py` e **fallisce se differiscono** (shell sola: `sed` + `test`,
+zero dipendenze). Obiettivo: mai più una release con header SPEC stale (a 0.8.0
+l'header era fermo a 0.5.2). Su GitHub gira su **una sola gamba**
+(`if: matrix.python-version == '3.12'` — il confronto è indipendente da Python);
+su GitLab è una riga all'inizio del job `test` (gira su tutte e tre le gambe, il
+costo è un `sed`). Il bump di release deve quindi toccare `__version__` **e** lo
+header della SPEC nello stesso commit, altrimenti la CI va rossa.
+
 **Ramo WSL eseguito in CI**: fin da 0.4.0 §17 dichiarava che WSL non era verificabile
 in locale (nessuna macchina WSL). Entrambi i job `test` aggiungono quindi uno step
 `WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only` → grep sul
@@ -1302,6 +1336,16 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   `__PYTHON__` nel plist principale, §8.4), linger con `--enable-linger`,
   `uninstall --purge`. `install.sh`/`uninstall.sh` deprecati (wrapper; il ramo
   `--trend` resta), CI con smoke di install standalone su wheel + venv pulito.
+- **0.8.0** — `safekeep restore` (§19): ripristino dall'**ultima copia** in una
+  dest — copy-only, niente storia, niente cancellazioni. Dry-run **sempre** il
+  default, `--force` per scrivere (anche in interattivo); selezione via
+  `PATH`/`GLOB` (assoluto, relativo alla radice `source`, fnmatch) o menu
+  interattivo per livelli (origine ambigua → progetto → voci di primo livello);
+  `--from {local,s3,nas}` con auto-detect del candidato unico (≥2 → errore con
+  elenco); mapping inverso dest→target per entrambi i layout; containment
+  **invertito** (scrive solo dentro le source, §11); adapter S3 `iter_keys`/
+  `download` con credenziali solo dal config `s3_*`; `fs_fstype`/`is_network_fs`
+  in `platform.py`; voci orfane della dest → warn + skip.
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
@@ -1474,3 +1518,84 @@ come "il mount è tornato?".
   (Signature Version 4), path-style, regione libera → nessun fallback o
   workaround proprietario è necessario; lo stesso client copre anche MinIO
   self-hosted, Ceph RGW, Wasabi, Backblaze B2 (compat S3) e AWS S3.
+
+---
+
+## 19. Ripristino `restore` (0.8.0)
+
+Ripristina dalla **ultima copia** presente in una destinazione. Semantica
+**copy-only**: safekeep non versiona (nessuna storia, §10.1/§18.2) — la dest
+contiene l'ultimo stato copiato ed è quello che viene ripristinato. **Niente
+cancellazioni** mai; le credenziali S3 arrivano **solo** dal config globale
+`~/.safekeep` (`s3_*`, §18.1): nessun flag di credenziali a riga di comando.
+
+### 19.1 Sintassi
+
+```
+safekeep restore [--config PATH] [-v] [--from {local,s3,nas}] [--force] [PATH|GLOB ...]
+```
+
+| Argomento | Significato |
+|---|---|
+| `PATH`/`GLOB` (uno o più) | path assoluto, path relativo alla radice `source` del progetto, o glob (`fnmatch`) sui path originali → modalità **non interattiva** |
+| `--from` | origine del ripristino: `local` = prima `dest:`, `nas` = seconda `dest:`, `s3` = dest S3 (§18) |
+| `--force` | esegue davvero le copie; **senza, il dry-run è SEMPRE il comportamento** (nessuna eccezione, §11) |
+| `-v` | log verboso (debug), come sugli altri comandi |
+
+### 19.2 Tabella casi (selezione)
+
+| Condizione | Comportamento |
+|---|---|
+| nargs ≥ 1 | non-interattivo: ogni argomento viene risolto sui **path originali** (target) — assoluto, relativo alla radice `source` o glob `fnmatch` |
+| nargs == 0 e stdin è un TTY | interattivo: menu numerati per livello (§19.4) |
+| nargs == 0 e stdin **non** è un TTY | errore (`serve un PATH/GLOB oppure un terminale interattivo`), exit ≠ 0 |
+| senza `--force` | **SEMPRE dry-run**: le righe vengono stampate e nessuna scrittura avviene — anche in interattivo |
+
+### 19.3 `--from` — origine del ripristino
+
+- **auto-detect** (default): i candidati sono le dest configurate, in ordine di
+  config — ogni `dest:` **montata**, poi la dest S3 se configurata. **Un solo
+  candidato** → viene usato e il log indica quale; **due o più** → errore con
+  l'elenco dei candidati (l'utente ripete con `--from`); **zero** → errore.
+- una `dest:` configurata ma **non montata** (volume assente, §8.3) → errore con
+  l'elenco: il ripristino non ignora silenziosamente un'origine dichiarata.
+- `--from s3` → **solo** la dest S3 del config (§18): extra `safekeep[s3]` e
+  credenziali `s3_*`, niente flag.
+- `--from local`/`nas` senza la corrispondente `dest:` → errore con l'elenco
+  dei candidati disponibili.
+
+### 19.4 Menu interattivo (livelli)
+
+1. **origine** — solo se l'origine è ambigua (≥2 candidati): elenco numerato.
+2. **progetto** — progetti scoperti (`.sync`, §4.1) con almeno una voce nella
+   origine scelta.
+3. **voci di primo livello** — voci del backup sotto il prefisso del progetto.
+
+Ogni livello: selezione per numero (anche multipla, es. `1 3`), `a` = tutto,
+`q` = annulla (exit ≠ 0). **Nessuna scrittura senza `--force`, nemmeno in
+interattivo** (§11): il menu produce il piano, `--force` lo esegue.
+
+### 19.5 Mapping inverso, inventario ed esecuzione
+
+- **target = solo il path originale**: niente `--to`. Containment **invertito**
+  rispetto al CR-01 (§7.2/§11): restore scrive **solo dentro le source** del
+  progetto — un path ricostruito che ne esce → `EACCES` + skip, mai scrittura.
+- mapping inverso dest→target per entrambi i layout (§3): `relative` → target =
+  radice `source` + relativo dest; `full` → target = `/` + relativo dest.
+- inventario: per ogni progetto scoperto → prefisso dest (`dest_path` / la
+  variante S3 di `S3Destination.dest_path`) → walk della dest con pruning come
+  `prune_project` (§9, solo sotto il prefisso) oppure `iter_keys` paginato per
+  S3 (§18).
+- **matching**: gli argomenti matchano i target (assoluto o relativo alla radice
+  `source`), `fnmatch` per i glob; **nessun match → exit ≠ 0** (§12).
+- **pianificazione**: `needs_copy(backup, target)` → righe
+  `<backup> -> <target> (sovrascrive)` oppure `(crea)` + sintesi (stile
+  `sync-once`).
+- **esecuzione** (solo `--force`): fs → `copy_one(backup, target,
+  dest_root=radice source del progetto)` — atomica tmp + `os.replace` (§7.2);
+  S3 → `download` (streaming → tmp + replace nella dir target, `chmod`/`utime`
+  da `x-amz-meta-*`, symlink ripristinato da `x-amz-meta-symlink`, §18.2).
+- **orfani**: una voce della dest senza progetto corrispondente (prefisso non
+  sotto nessun progetto scoperto) → warn + skip, mai toccata.
+- **mai delete**: restore non cancella né sovrascrive "verso il basso": copia
+  solo ciò che il piano elenca.

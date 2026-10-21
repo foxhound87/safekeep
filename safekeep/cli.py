@@ -5,6 +5,7 @@ shim che usano launchd/systemd e i test.
 """
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
@@ -12,8 +13,14 @@ import subprocess
 import sys
 from datetime import datetime
 
+try:
+    import readline          # editing delle frecce nei menu interattivi (opzionale)
+except ImportError:
+    pass
+
 from safekeep import __version__
 from safekeep import daemonctl
+from safekeep import restore
 from safekeep.config import ConfigError, discover_projects, parse_sync
 from safekeep.copier import TMP_INFIX
 from safekeep.daemon import Daemon, setup_logging
@@ -39,6 +46,8 @@ from safekeep.volumes import dest_state
 # embedded non fosse leggibile (install pip rotto — package data mancante).
 REPO_URL = 'https://github.com/foxhound87/safekeep'
 
+log = logging.getLogger('safekeep')
+
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
@@ -62,6 +71,21 @@ def build_parser():
                       help='rimuove dalla dest i file il cui sorgente esiste ancora ma '
                            'non è più incluso dal matcher (default: mai cancellare; '
                            'solo dest fs — la dest S3 non viene toccata, SPEC §18.2)')
+    res = sub.add_parser('restore', parents=[common],
+                         help="ripristina dall'ultima copia in una dest: dry-run di "
+                              'default, --force per scrivere; PATH/GLOB o menu '
+                              'interattivo (SPEC §19)')
+    res.add_argument('--from', dest='from_', choices=('local', 's3', 'nas'),
+                     help='origine del ripristino: local = prima dest:, nas = seconda '
+                          'dest:, s3 = dest S3 (default: auto-detect del candidato '
+                          'unico, SPEC §19.3)')
+    res.add_argument('--force', action='store_true',
+                     help='esegue le copie (default: dry-run — nessuna scrittura, '
+                          'nemmeno in interattivo)')
+    res.add_argument('targets', nargs='*', metavar='PATH|GLOB',
+                     help='path assoluto, relativo alla radice source o glob fnmatch '
+                          'sui path originali (niente argomenti → menu interattivo, '
+                          'solo da terminale)')
     sub.add_parser('status', parents=[common],
                    help='config, progetti e stato delle dest — sola lettura')
     doc = sub.add_parser('doctor', parents=[common],
@@ -135,6 +159,115 @@ def cmd_sync_once(args):
             line += f', {verb}: {stats.get("rimossi", 0)}'
         print(line)
     return 0
+
+
+def _menu(title, items):
+    """Menu numerati per livello (SPEC §19.4): numeri anche multipli (es. `1 3`),
+    `a` = tutto, `q` = annulla (→ None). Su EOF (pipe chiusa) → None."""
+    print(title)
+    for i, label in enumerate(items, 1):
+        print(f'  {i}. {label}')
+    while True:
+        try:
+            line = input('> ').strip()
+        except EOFError:
+            return None
+        if line == 'q':
+            return None
+        if line == 'a':
+            return list(range(len(items)))
+        try:
+            picked = [int(x) - 1 for x in line.split()]
+        except ValueError:
+            picked = []
+        if picked and all(0 <= i < len(items) for i in picked):
+            return picked
+        print('inserisci un numero (es. 1 3), a (tutto) o q (annulla)')
+
+
+def _interactive_select(entries):
+    """Menu per livelli (SPEC §19.4): progetto → voci di primo livello del
+    backup. Ritorna le entry selezionate, oppure None (q/annulla)."""
+    by_project = {}
+    for e in entries:
+        by_project.setdefault(e.project, []).append(e)
+    projects = sorted(by_project, key=lambda p: p.root)
+    picked = _menu('progetto:', [f'{p.name} — {p.root}' for p in projects])
+    if picked is None:
+        return None
+    pool = [e for i in picked for e in by_project[projects[i]]]
+    groups = restore.first_level(pool)
+    picked = _menu('voci di primo livello del backup:',
+                   [name for name, _ in groups])
+    if picked is None:
+        return None
+    return [e for i in picked for e in groups[i][1]]
+
+
+def cmd_restore(args):
+    """Ripristino dall'ultima copia (SPEC §19): dry-run di default, `--force`
+    per scrivere; PATH/GLOB non interattivo oppure menu per livelli da TTY."""
+    daemon = Daemon(args.config)
+    daemon.load_config()
+    setup_logging('debug' if args.v else daemon.cfg.log_level)
+    daemon.log_s3_secret_perms()
+    interactive = not args.targets and sys.stdin.isatty()
+    if not args.targets and not interactive:
+        print('restore: serve un PATH/GLOB oppure un terminale interattivo '
+              '(SPEC §19.2)', file=sys.stderr)
+        return 1
+    try:
+        from_ = args.from_
+        if from_ is None and interactive:
+            cands = restore.candidates(daemon.cfg, daemon.s3)
+            if len(cands) > 1:
+                # livello "origine" (§19.4): solo se ambigua (≥2 candidati)
+                labels = [f'{label} — {o.root if kind == "s3" else o}'
+                          for kind, o, label in cands]
+                picked = _menu('origine del ripristino:', labels)
+                if picked is None:
+                    print('restore: annullato', file=sys.stderr)
+                    return 1
+                from_ = cands[picked[0]][2]
+        kind, origin = restore.pick_source(daemon.cfg, daemon.s3, from_)
+    except restore.RestoreError as e:
+        print(f'restore: {e}', file=sys.stderr)
+        return 1
+    origin_label = origin.root if kind == 's3' else origin
+    daemon.load_projects()
+    entries, orphans = restore.inventory(daemon.projects, kind, origin,
+                                         daemon.cfg.layout)
+    for o in orphans:
+        log.warning('orfano (nessun progetto corrispondente): %s — saltato', o)
+    restore.warn_network_sources(daemon.projects)
+    if not entries:
+        print(f'restore: nessuna voce di backup in {origin_label}', file=sys.stderr)
+        return 1
+    if interactive:
+        matched = _interactive_select(entries)
+        if matched is None:
+            print('restore: annullato', file=sys.stderr)
+            return 1
+    else:
+        matched = restore.select(entries, args.targets)
+        if not matched:
+            print('restore: nessun file corrispondente: '
+                  + ', '.join(args.targets), file=sys.stderr)
+            return 1
+    rows, syn = restore.plan(matched)
+    for backup, target, nota in rows:
+        print(f'  {backup} -> {target} {nota}')
+    line = (f"ripristino: {syn['da_copiare']} "
+            f"{'da copiare' if not args.force else 'copie'}, "
+            f"{syn['aggiornati']} già aggiornati")
+    if not args.force:
+        line += ' — dry-run: nessuna scrittura (usa --force per ripristinare)'
+    print(line)
+    if not args.force:
+        return 0
+    ok, err = restore.execute(matched, origin if kind == 's3' else None)
+    print(f'ripristino: {ok} ripristinati, {err} errori')
+    return 0 if err == 0 else 1
 
 
 def cmd_status(args):
@@ -516,6 +649,8 @@ def main(argv=None):
             return cmd_status(args)
         if args.comando == 'doctor':
             return cmd_doctor(args)
+        if args.comando == 'restore':
+            return cmd_restore(args)
         return cmd_sync_once(args)
     except ConfigError as e:
         print(f'errore di config: {e}', file=sys.stderr)

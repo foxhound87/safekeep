@@ -85,6 +85,12 @@ test:
           - "python:3.12-slim"
           - "python:3.14-slim"
   script:
+    # SPEC drift (0.9.0): header SPEC.md == __version__, shell sola (SPEC §14.6)
+    - |
+      spec_v="$(sed -n 's/^\*\*Versione:\*\* \([0-9][0-9.]*\).*/\1/p' SPEC.md | head -n1)"
+      pkg_v="$(sed -n "s/^__version__ = ['\"]\([^'\"]*\)['\"].*/\1/p" safekeep/__init__.py | head -n1)"
+      [ -n "$spec_v" ] && [ -n "$pkg_v" ] && [ "$spec_v" = "$pkg_v" ] || { echo "SPEC drift: spec='$spec_v' pkg='$pkg_v'"; exit 1; }
+      echo "SPEC drift check ok: $spec_v"
     - python3 --version
     # procps: `-slim` non ha `pgrep`, che serve allo step E2E
     - apt-get update && apt-get install -y --no-install-recommends fswatch procps

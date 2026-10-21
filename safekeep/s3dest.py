@@ -1,10 +1,11 @@
 """Destinazione S3-compatible (SPEC.md §18): client botocore lazy, key
 mapping, metadata (mtime ns/mode/symlink) e mapping errori → pending.
 
-Solo upload + needs_copy: **nessuna cancellazione** (§18.2), nessun
-versioning, una sola dest S3. botocore arriva dall'extra `safekeep[s3]` e
-viene importato SOLO qui, alla prima costruzione di `S3Destination` — senza
-`s3_*` in config il runtime resta stdlib-only.
+Solo upload, needs_copy e — per restore (§19) — `iter_keys`/`download`:
+**nessuna cancellazione** (§18.2), nessun versioning, una sola dest S3.
+botocore arriva dall'extra `safekeep[s3]` e viene importato SOLO qui, alla
+prima costruzione di `S3Destination` — senza `s3_*` in config il runtime
+resta stdlib-only.
 """
 import errno
 import logging
@@ -12,7 +13,7 @@ import os
 import time
 
 from .config import ConfigError, S3Config
-from .copier import MTIME_TOLERANCE, _stable
+from .copier import MTIME_TOLERANCE, _remove, _stable, _tmp_path
 
 log = logging.getLogger('safekeep')
 
@@ -275,4 +276,70 @@ class S3Destination:
             self._put(bucket, key, fh,
                       {'mtime': str(s.st_mtime_ns), 'mode': oct(s.st_mode)})
         log.debug('copiato %s → s3://%s/%s', src, bucket, key)
+        return True
+
+    # --- restore: iterazione e download (SPEC.md §19) ----------------------
+
+    def iter_keys(self, prefix):
+        """`(key, size, metadata)` per ogni object sotto `prefix`.
+
+        Enumerazione con `list_objects_v2` paginato (`ContinuationToken`);
+        size+metadata (lowercase, come `_head_object`) da un HeadObject per
+        key — un list S3 non restituisce le metadata. Nessuna cancellazione.
+        """
+        kwargs = {'Bucket': self.cfg.bucket, 'Prefix': prefix}
+        while True:
+            r = self._call(self.client().list_objects_v2, **kwargs)
+            for obj in (r.get('Contents') or []):
+                key = obj['Key']
+                head = self._head_object(self.cfg.bucket, key)
+                if head is None:
+                    continue                   # sparito fra list e head
+                size, md = head
+                yield key, size, md
+            token = r.get('NextContinuationToken')
+            if not token:
+                return
+            kwargs['ContinuationToken'] = token
+
+    def download(self, key, dst):
+        """Scarica l'object `key` su `dst` (tmp nella dir target + `os.replace`).
+
+        - `x-amz-meta-symlink` → ricrea il symlink (mai seguito, §7.3);
+        - `x-amz-meta-mode`/`x-amz-meta-mtime` → chmod/utime (non fatali, §7.2);
+        - errori di rete/auth rilanciati come OSError via `_oserror` (§18.3).
+        """
+        r = self._call(self.client().get_object, Bucket=self.cfg.bucket, Key=key)
+        md = {k.lower(): v for k, v in (r.get('Metadata') or {}).items()}
+        dirname = os.path.dirname(dst)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        tmp = _tmp_path(dst)
+        _remove(tmp)                          # residuo di un crash precedente
+        try:
+            link = md.get('symlink')
+            if link is not None:
+                os.symlink(link, tmp)         # zero-byte + metadata (§18.2)
+            else:
+                with open(tmp, 'wb') as out, r['Body'] as body:
+                    while True:
+                        chunk = body.read(65536)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
+                try:
+                    if 'mode' in md:
+                        os.chmod(tmp, int(md['mode'], 8) & 0o7777)
+                    if 'mtime' in md:
+                        ns = int(md['mtime'])
+                        os.utime(tmp, ns=(ns, ns))
+                except (OSError, ValueError) as e:
+                    log.debug('chmod/utime non riuscito su %s: %s', tmp, e)
+            os.replace(tmp, dst)
+        except OSError:
+            _remove(tmp)
+            raise
+        log.debug('scaricato s3://%s/%s → %s', self.cfg.bucket, key, dst)
         return True
