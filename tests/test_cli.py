@@ -84,6 +84,19 @@ class StatusTest(CliTestCase):
         self.assertIn('[ok]', r.stdout)                   # dest_state
         self.assertEqual(os.listdir(self.dest), [], 'status è sola lettura')
 
+    def test_status_dest_nas_morto_unreachable(self):
+        """§20.6: mount c'è (dest_state ok) ma I/O di rete fallisce →
+        `[unreachable] [nas]`, non l'ingannevole `[ok]`."""
+        args = argparse.Namespace(config=self.cfg, v=False)
+        boom = OSError(107, 'Socket is not connected')     # ENOTCONN
+        buf = io.StringIO()
+        with mock.patch.object(cli, 'is_network_fs', return_value=True), \
+                mock.patch.object(cli, 'network_error', return_value=boom), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_status(args)
+        self.assertEqual(code, 0)
+        self.assertIn(f'{self.dest} [unreachable] [nas]', buf.getvalue())
+
 
 class DoctorTest(CliTestCase):
     def test_doctor_gira_tutti_i_check(self):
@@ -136,6 +149,23 @@ class DoctorTest(CliTestCase):
         self.assertIn('unit systemd', out)
         self.assertNotIn('TCC', out, 'TCC è un meccanismo di macOS')
         self.assertEqual(code, 0, out)
+
+    def test_doctor_volumi_rete_non_raggiungibili_warn(self):
+        """§20.6: dest su NAS montato ma morto → riga non fatale con hint."""
+        args = argparse.Namespace(config=self.cfg, v=False, json=False)
+        boom = OSError(107, 'Socket is not connected')     # ENOTCONN
+        buf = io.StringIO()
+        with mock.patch.object(cli, 'is_network_fs',
+                               side_effect=lambda p: p == self.dest), \
+                mock.patch.object(cli, 'network_error',
+                                  side_effect=lambda p: boom), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_doctor(args)
+        out = buf.getvalue()
+        self.assertEqual(code, 0, 'warning NON fatale: exit 0')
+        self.assertIn('volumi di rete non raggiungibili: 1', out)
+        self.assertIn(self.dest, out)
+        self.assertIn('warning non fatale', out)
 
     def test_doctor_config_invalido_esce_1(self):
         bad = write(os.path.join(self.tmp, 'bad.cfg'), 'riga nuda invalida\n')

@@ -678,6 +678,61 @@ class SmokeLoopTest(unittest.TestCase):
         self.assertIsNone(daemon.proc)
 
 
+class SyncReloadCacheTest(unittest.TestCase):
+    """`reload` con cache dei contenuti: `.sync` toccato ma invariato → niente
+    rescan/reconcile (hot loop: ogni evento rifaceva il discovery walk)."""
+
+    def setUp(self):
+        # realpath come fa dispatch (normalize) — su macOS /var → /private/var
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.proj = os.path.join(self.tmp, 'src', 'proj')
+        dest = os.path.join(self.tmp, 'dst')
+        os.makedirs(dest)
+        self.sync = write(os.path.join(self.proj, '.sync'), 'include: *.md\n')
+        cfg_path = write(os.path.join(self.tmp, 'safekeep.cfg'),
+                         f'source: {os.path.join(self.tmp, "src")}\n'
+                         f'dest: {dest}\nlayout: relative\n')
+        self.daemon = Daemon(cfg_path)
+        self.daemon.load_config()
+        self.daemon.load_projects()
+        self.calls = {'lp': 0, 'rc': 0}
+        lp, rc = self.daemon.load_projects, self.daemon.reconcile
+        self.daemon.load_projects = lambda *a, **k: (
+            self.calls.__setitem__('lp', self.calls['lp'] + 1) or lp(*a, **k))
+        self.daemon.reconcile = lambda *a, **k: (
+            self.calls.__setitem__('rc', self.calls['rc'] + 1) or rc(*a, **k))
+
+    def test_evento_con_contenuto_invariato_non_ricarica(self):
+        self.daemon.reload(self.sync)          # primo evento: reload reale
+        self.assertEqual((self.calls['lp'], self.calls['rc']), (1, 1))
+        self.daemon.reload(self.sync)          # tocco senza cambiare regole
+        self.assertEqual((self.calls['lp'], self.calls['rc']), (1, 1))
+
+    def test_contenuto_cambiato_ricarica(self):
+        self.daemon.reload(self.sync)
+        write(self.sync, 'include: *.txt\n')
+        self.daemon.reload(self.sync)
+        self.assertEqual((self.calls['lp'], self.calls['rc']), (2, 2))
+
+    def test_sync_rimosso_poi_tornato_ricarica(self):
+        self.daemon.reload(self.sync)
+        os.unlink(self.sync)
+        self.daemon.reload(self.sync)          # sparito → reload (progetto staccato)
+        self.assertEqual(self.calls['lp'], 2)
+        self.daemon.reload(self.sync)          # eventi ripetuti sul path morto
+        self.assertEqual(self.calls['lp'], 2)
+        write(self.sync, 'include: *.md\n')    # ricompare → reload di nuovo
+        self.daemon.reload(self.sync)
+        self.assertEqual(self.calls['lp'], 3)
+
+    def test_sync_sconosciuto_primo_evento_carica(self):
+        orphan = write(os.path.join(self.tmp, 'src', 'new', '.sync'),
+                       'include: *.md\n')
+        self.daemon.reload(orphan)
+        self.assertIn(os.path.dirname(orphan), [p.root for p in self.daemon.projects])
+
+
 class DedupRootsTest(unittest.TestCase):
     """Radici watch annidate → saltate (fswatch -r copre già il sottoalbero)."""
 

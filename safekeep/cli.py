@@ -41,7 +41,7 @@ from safekeep.platform import (
     wsl_distro,
 )
 from safekeep.s3dest import S3ExtraMissing, secret_perms_insecure
-from safekeep.volumes import dest_state
+from safekeep.volumes import dest_state, network_error
 
 # Repo upstream: solo nell'hint degradato di `cmd_doctor` quando l'esempio
 # embedded non fosse leggibile (install pip rotto — package data mancante).
@@ -293,7 +293,12 @@ def cmd_status(args):
         # etichetta `nas`/`local` dalla fstype detect (§20.6): solo lettura,
         # nessun processo figlio (fs_fstype legge /proc/mounts o `mount`)
         label = 'nas' if is_network_fs(dest) else 'local'
-        print(f'dest      {dest} [{dest_state(dest)}] [{label}]')
+        state = dest_state(dest)
+        # mount c'è ma il server è morto: il mountpoint risolve, ogni I/O dà
+        # ENOTCONN → `unreachable` invece dell'ingannevole `[ok]` (§20.6)
+        if state == 'ok' and network_error(dest) is not None:
+            state = 'unreachable'
+        print(f'dest      {dest} [{state}] [{label}]')
     if daemon.s3 is not None:
         # HeadBucket con cache 30s (§18.3): ok/offline, senza toccare la
         # config — `status` resta sola lettura
@@ -457,6 +462,18 @@ def cmd_doctor(args):
                       f'(poll ogni {daemon.cfg.poll_interval}s): ' + ', '.join(net))
         else:
             out(True, 'sorgenti su volume di rete: 0 (niente da pollare)')
+        # montate ma irraggiungibili (server morto): fstype dice "di rete" e
+        # il mountpoint esiste, ma ogni I/O dà ENOTCONN (§20.4/§20.6)
+        down = [r for r in net if network_error(r) is not None]
+        down += [d for d in cfg.dests
+                 if dest_state(d) == 'ok' and is_network_fs(d)
+                 and network_error(d) is not None]
+        if down:
+            out(False, f'volumi di rete non raggiungibili: {len(down)} '
+                       f'({", ".join(down)}) — montaggio/serve attivo? — '
+                       'warning non fatale')
+        else:
+            out(True, 'volumi di rete: tutti raggiungibili')
 
     exe = shutil.which('fswatch')
     if exe is None:

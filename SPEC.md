@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.9.0 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.9.1 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -1739,7 +1739,12 @@ per evento (log-loop latente, chiuso in 0.9.0).
 - `doctor`: due righe **non fatali** (con id slug per `--json`, SPEC §9.1):
   `sorgenti su volume di rete: N (poll ogni Xs)` e `fswatch: root locali M`.
 - `status`: ogni dest viene etichettata con la fstype detect —
-  `dest <path> [ok|absent] [nas|local]`.
+  `dest <path> [ok|absent|unreachable] [nas|local]`.
+- **0.9.1** — mount c'è ma il server è morto: `volumes.network_error` (un
+  `listdir`, `NETWORK_ERRNOS` §20.4) fa da probe; `status` marca la dest
+  `[unreachable]` (l'ingannevole `[ok]` del solo `dest_state`) e `doctor` ha
+  la riga non fatale `volumi di rete non raggiungibili: N (…)`. Probe solo
+  nei comandi one-shot, mai nel loop del daemon.
 - macOS: `EACCES` su un path sotto `/Volumes` → hint TCC "Interagisci con i
   volumi rimovibili" (System Settings → Privacy & Security), warning non fatale.
 

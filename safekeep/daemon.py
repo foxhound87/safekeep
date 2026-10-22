@@ -56,6 +56,8 @@ SYNC_FILE = 'sync-file'
 WALK_DIR = 'walk-dir'
 RELOAD_SYNC = 'reload-sync'
 
+_NO_ENTRY = object()          # sentinella: nessun `.sync` visto (≠ blob None = assente)
+
 # SPEC.md §4.1: il file `.sync` viene SEMPRE copiato nel backup (serve per
 # ricostruire la config sul destino) — layer più basso, esplicito, così non
 # dipende dalle regole del progetto (semantica allow-list, §4.3).
@@ -313,6 +315,7 @@ class Daemon:
         self.proc = None
         self.buf = b''                   # residuo del parser a metà path
         self.seen = {}                   # dedup: path → ultimo visto
+        self.sync_seen = {}              # reload: path .sync → blob (None = assente)
         self.pending = {}                # dest → next/sched/projects (backoff)
         self.watch_roots = []            # radici locali → argv fswatch (§20.1)
         self.net_roots = []              # radici su volume di rete → polling (§20)
@@ -741,7 +744,21 @@ class Daemon:
         evento su `<dir>/.sync` fuori da ogni progetto noto → discovery di quel
         progetto + reconcile): così l'auto-discovery aggancia un `.sync` creato
         dopo l'avvio istantaneamente.
+
+        Cache sui contenuti (`sync_seen`): editor e tool di sync toccano
+        `.sync` senza cambiarne le regole — a ogni evento il rescan di
+        discovery e il reconcile rifarebbero l'intero walk delle radici per
+        nulla. Il reload parte solo se il blob è nuovo/cambiato/sparito.
         """
+        try:
+            with open(sync_path, 'rb') as fh:
+                blob = fh.read()
+        except OSError:
+            blob = None               # `.sync` assente: reload solo la prima volta
+        if self.sync_seen.get(sync_path, _NO_ENTRY) == blob:
+            log.debug('.sync invariato in %s: reload saltato', sync_path)
+            return
+        self.sync_seen[sync_path] = blob
         self.load_projects()
         root = os.path.dirname(sync_path)
         for project in self.projects:
