@@ -1,5 +1,6 @@
 # safekeep
 
+[![tests](https://github.com/foxhound87/safekeep/actions/workflows/test.yml/badge.svg)](https://github.com/foxhound87/safekeep/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/safekeep)](https://pypi.org/project/safekeep/)
 [![Python](https://img.shields.io/pypi/pyversions/safekeep)](https://pypi.org/project/safekeep/)
 
