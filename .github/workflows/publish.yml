@@ -1,0 +1,48 @@
+# Publish to PyPI via Trusted Publishing (OIDC = OpenID Connect): no stored
+# credentials, no API token in the repo — GitHub mints an ID token, PyPI
+# verifies it and exchanges it for a short-lived upload token.
+#
+# Migration from GitLab CI (SPEC §14.6): the GitLab `publish` job did the same
+# with `id_tokens` (audience `pypi`) + `twine upload` — twine performs the OIDC
+# exchange itself, no credentials passed. Here the exchange is done by the
+# official `pypa/gh-action-pypi-publish` action. When the GitLab repo is
+# deleted that job dies with it — this workflow takes over from that moment.
+#
+# Gates: the GitLab publish had `needs: [test, install-smoke]`; here the test
+# gates are the `tests` workflow runs on main (test.yml: three Python legs +
+# E2E + install smoke). This job deliberately does NOT re-run the suite on the
+# tag: the suite already ran on the tagged commit when it landed on main.
+#
+# PyPI side (one-time, owner account): Settings → Publishing → add a pending
+# publisher (GitHub): owner `foxhound87`, repo `safekeep`, workflow
+# `publish.yml`, environment EMPTY (this workflow uses no GitHub environment).
+# The existing GitLab publisher keeps working until the GitLab repo is
+# deleted — keep it until then.
+#
+# Runs only on version tags (`v*`), same shape as the GitLab rules — never on
+# a branch push. No test publishing anywhere (the GitLab `publish-test` job
+# stays dormant on GitLab and dies with the repo).
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # OIDC: the ID token PyPI verifies
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          # same interpreter as the GitLab publish job (python:3.12-slim)
+          python-version: "3.12"
+      - run: python3 -m pip install -U build twine
+      - run: python3 -m build
+      - run: python3 -m twine check dist/*
+      # no credentials passed: the action performs the OIDC exchange itself
+      - uses: pypa/gh-action-pypi-publish@release/v1

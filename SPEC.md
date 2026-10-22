@@ -1228,6 +1228,16 @@ gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
 Così i classifier Python di §14.7 (`3.9`, `3.12`, `3.14`) sono coperti **anche dalla
 CI**, non più solo dalla suite locale dell'utente.
 
+**Publish su GitHub Actions (migrazione GitLab)**: `.github/workflows/publish.yml`
+pubblica su PyPI con Trusted Publishing OIDC (OpenID Connect — `id-token: write` +
+`pypa/gh-action-pypi-publish`) al push di un tag `v*`, replicando il job `publish`
+GitLab (`id_tokens` aud `pypi` + `twine` senza credenziali; il build resta
+`python -m build` + `twine check`). **Dopo l'eliminazione del repo GitLab** questa
+workflow è l'unico canale di release: i gate di test restano le run della
+workflow `tests` su `main` (il publish su tag non rifà la suite). I job GitLab
+(`test`/`install-smoke`/`publish`/`publish-test`) restano in vigore finché il repo
+esiste, poi `.gitlab-ci.yml` viene rimosso (§16, 1.0.0).
+
 **Check drift SPEC ↔ `__version__` (0.9.0)**: entrambi i job `test` aggiungono uno
 step che estrae l'header `**Versione:**` da `SPEC.md` e `__version__` da
 `safekeep/__init__.py` e **fallisce se differiscono** (shell sola: `sed` + `test`,
@@ -1388,6 +1398,9 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   dest `[nas]`/`[local]`, hint TCC `/Volumes`); CI: check drift SPEC↔`__version__`
   (§14.6) e gate E2E SMB su GitHub (samba + `mount.cifs`, gamba 3.12; GitLab
   dichiara la divergenza: docker executor senza `SYS_ADMIN`).
+- **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0)
+  e dismissione della CI GitLab (`.gitlab-ci.yml`) a seguito dell'eliminazione del
+  repo GitLab: il publish a PyPI vive su GitHub Actions OIDC (§14.6).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 
