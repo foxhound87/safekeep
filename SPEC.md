@@ -1194,62 +1194,65 @@ Con Linux **non cambiano**:
 
 ### 14.6 CI
 
-I job `test` di `.gitlab-ci.yml` e `.github/workflows/test.yml` installano **fswatch**
+Il job `test` di `.github/workflows/test.yml` installa **fswatch**
 (`apt-get update && apt-get install -y fswatch`): ora che `doctor` cerca il monitor
 della piattaforma giusta la suite gira con il binario reale su Linux — che era
 esattamente l'incompatibilità documentata nella vecchia nota di portabilità di
-`.gitlab-ci.yml` (nota **aggiornata**, non contraddetta). I job `publish` e
-`publish-test` restano invariati.
+`.gitlab-ci.yml` (nota storica: il file è stato **rimosso da `main`** con la
+dismissione della CI GitLab, vedi sotto). Il `publish` vive in
+`.github/workflows/publish.yml`; il job GitLab `publish-test` non ha mai avuto
+equivalente su GitHub (**mai** publish di test).
 
-**Install-smoke (0.7.0)**: un job dedicato (`install-smoke` su GitLab, step
-`Daemon install smoke` su GitHub) esegue `bash tests/ci_daemon_install.sh` —
+**Install-smoke (0.7.0)**: uno step dedicato (`Daemon install smoke` su GitHub;
+era il job `install-smoke` su GitLab) esegue `bash tests/ci_daemon_install.sh` —
 build della wheel da sorgenti, venv pulito + `$HOME` temporaneo →
 `safekeep daemon install` → unit presente, **nessun placeholder residuo**,
 config chmod 600, `doctor` best-effort. Nessuna operazione che avvii/fermi un
-agent (niente bootstrap/enable/start/stop/uninstall in CI). Su GitLab gira in
-un'immagine `-slim` **senza systemd**: si esercitano così il ramo errore WSL
-(`WSL_DISTRO_NAME` + systemd assente → exit ≠ 0 con istruzioni `/etc/wsl.conf`)
-e il ramo non-WSL-senza-systemd (warning + unit scritta, exit 0). Il job
-`publish` del tag aspetta **anche** `install-smoke` oltre a `test`.
+agent (niente bootstrap/enable/start/stop/uninstall in CI). Sul runner GitHub
+systemd **c'è**: il ramo errore WSL-senza-systemd (WSL_DISTRO_NAME + systemd
+assente → exit ≠ 0 con istruzioni `/etc/wsl.conf`) e il ramo
+non-WSL-senza-systemd (warning + unit scritta, exit 0) si esercitano ormai
+solo nei test unitari (su GitLab giravano nelle immagini `-slim`, job rimosso).
+Il publish su tag non rifà la suite: il gate è la run della workflow `tests`
+su `main`, che include questo step.
 
-**Matrix delle versioni di Python (0.3.1)**: entrambi i job `test` girano su **tre
+**Matrix delle versioni di Python (0.3.1)**: il job `test` gira su **tre
 gambe** — `3.9` (floor dichiarato da `requires-python`), `3.12` e `3.14`:
 
 - `.github/workflows/test.yml`: `strategy.matrix.python-version: ['3.9', '3.12',
   '3.14']` con `actions/setup-python` sulla gamba corrente; lo step E2E
   (`tests/e2e_linux.sh`, daemon live + fswatch reale) gira su **tutte** le gambe,
-  floor incluso.
-- `.gitlab-ci.yml`: `parallel: matrix` sulle stesse tre versioni con le immagini
-  `python:3.9-slim` / `python:3.12-slim` / `python:3.14-slim`, e lo step E2E
-  aggiunto al job `test`. Le immagini `-slim` non contengono `procps` (quindi niente
-  `pgrep`, che lo script E2E usa per il figlio del daemon): il job installa
-  `procps` insieme a `fswatch`.
+  floor incluso. (La controparte GitLab (`parallel: matrix` sulle stesse tre
+  versioni, immagini `python:3.x-slim` + install di `procps`) esisteva finché
+  `.gitlab-ci.yml` era su `main`: rimosso con la CI GitLab.)
 
 Così i classifier Python di §14.7 (`3.9`, `3.12`, `3.14`) sono coperti **anche dalla
 CI**, non più solo dalla suite locale dell'utente.
 
-**Publish su GitHub Actions (migrazione GitLab)**: `.github/workflows/publish.yml`
+**GitLab CI dismesso: publish su GitHub Actions OIDC**: `.gitlab-ci.yml` è stato
+**rimosso da `main`** con la dismissione della CI GitLab (a seguito
+dell'eliminazione del repo GitLab): da adesso GitHub Actions è l'unico pipeline.
+`.github/workflows/publish.yml`
 pubblica su PyPI con Trusted Publishing OIDC (OpenID Connect — `id-token: write` +
-`pypa/gh-action-pypi-publish`) al push di un tag `v*`, replicando il job `publish`
-GitLab (`id_tokens` aud `pypi` + `twine` senza credenziali; il build resta
-`python -m build` + `twine check`). **Dopo l'eliminazione del repo GitLab** questa
-workflow è l'unico canale di release: i gate di test restano le run della
-workflow `tests` su `main` (il publish su tag non rifà la suite). I job GitLab
-(`test`/`install-smoke`/`publish`/`publish-test`) restano in vigore finché il repo
-esiste, poi `.gitlab-ci.yml` viene rimosso (§16, 1.0.0).
+`pypa/gh-action-pypi-publish`) al push di un tag `v*`, replicando il vecchio job
+`publish` GitLab (`id_tokens` aud `pypi` + `twine` senza credenziali; il build resta
+`python -m build` + `twine check`). Questa workflow è l'unico canale di release: i
+gate di test restano le run della workflow `tests` su `main` (il publish su tag non
+rifà la suite). I job GitLab (`test`/`install-smoke`/`publish`/`publish-test`) sono
+storia: dal tag `v0.9.x` in poi il publish è GH Actions.
 
-**Check drift SPEC ↔ `__version__` (0.9.0)**: entrambi i job `test` aggiungono uno
+**Check drift SPEC ↔ `__version__` (0.9.0)**: il job `test` aggiunge uno
 step che estrae l'header `**Versione:**` da `SPEC.md` e `__version__` da
 `safekeep/__init__.py` e **fallisce se differiscono** (shell sola: `sed` + `test`,
 zero dipendenze). Obiettivo: mai più una release con header SPEC stale (a 0.8.0
 l'header era fermo a 0.5.2). Su GitHub gira su **una sola gamba**
-(`if: matrix.python-version == '3.12'` — il confronto è indipendente da Python);
-su GitLab è una riga all'inizio del job `test` (gira su tutte e tre le gambe, il
-costo è un `sed`). Il bump di release deve quindi toccare `__version__` **e** lo
+(`if: matrix.python-version == '3.12'` — il confronto è indipendente da Python;
+la controparte GitLab, una riga all'inizio del job `test`, è stata rimossa con
+il file). Il bump di release deve quindi toccare `__version__` **e** lo
 header della SPEC nello stesso commit, altrimenti la CI va rossa.
 
 **Ramo WSL eseguito in CI**: fin da 0.4.0 §17 dichiarava che WSL non era verificabile
-in locale (nessuna macchina WSL). Entrambi i job `test` aggiungono quindi uno step
+in locale (nessuna macchina WSL). Il job `test` aggiunge quindi uno step
 `WSL_DISTRO_NAME=SafekeepCITest bash tests/e2e_linux.sh --doctor-only` → grep sul
 marker `WSL rilevato: SafekeepCITest` → exit 0: sull'env del runner `is_wsl()` diventa
 `True` e `doctor` percorre **davvero** il blocco WSL (rilevamento + hint systemd +
@@ -1271,10 +1274,10 @@ catch-up, SIGTERM pulito senza fswatch orfani. Su GitHub gira **solo sulla
 gamba 3.12** (`SAFEKEEP_E2E_SMB=1` + `apt-get install samba cifs-utils`): un
 test identico su tre gambe non copre nulla in più e costa tre runner. Senza
 l'env lo script salta con messaggio (default locale gentile). **Divergenza
-dichiarata con GitLab**: il docker executor non ha `SYS_ADMIN` →
-`mount.cifs` non può montare → su GitLab **niente e2e SMB** (stessa prassi di
-`pgrep`/`procps`: ciò che il runner non può, la CI GitLab lo dichiara nei
-commenti di testa e lo salta).
+storica con GitLab** (CI dismessa, `.gitlab-ci.yml` rimosso): il docker
+executor non aveva `SYS_ADMIN` → `mount.cifs` non poteva montare → su GitLab
+**non girava l'e2e SMB** (stessa prassi di `pgrep`/`procps`: ciò che il runner
+non può, la CI lo dichiarava nei commenti di testa e lo saltava).
 
 ### 14.7 Metadata release (`pyproject.toml`)
 
@@ -1398,9 +1401,10 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   dest `[nas]`/`[local]`, hint TCC `/Volumes`); CI: check drift SPEC↔`__version__`
   (§14.6) e gate E2E SMB su GitHub (samba + `mount.cifs`, gamba 3.12; GitLab
   dichiara la divergenza: docker executor senza `SYS_ADMIN`).
-- **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0)
-  e dismissione della CI GitLab (`.gitlab-ci.yml`) a seguito dell'eliminazione del
-  repo GitLab: il publish a PyPI vive su GitHub Actions OIDC (§14.6).
+- **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0).
+  La dismissione della CI GitLab (`.gitlab-ci.yml`) è **già avvenuta** su `main`
+  durante 0.9.x, a seguito dell'eliminazione del repo GitLab: il publish a PyPI
+  vive su GitHub Actions OIDC (§14.6).
 - Ogni modifica successiva di `package`/manifest rispetta `MAJOR.MINOR.PATCH`
   (semver, https://semver.org).
 

@@ -28,8 +28,8 @@
 #
 # Gating (SPEC §14.6): without SAFEKEEP_E2E_SMB=1 the script prints a SKIP
 # message and exits 0 — the real gate runs in GitHub Actions (3.12 leg
-# only), where mount.cifs is possible; the GitLab docker executor has no
-# SYS_ADMIN and cannot mount, so GitLab deliberately does not run this.
+# only), where mount.cifs is possible; the GitLab docker executor had no
+# SYS_ADMIN and could not mount, so GitLab deliberately did not run this.
 #
 # Sandbox: everything (share dir, mountpoint, source, dest, config, HOME)
 # lives in a `mktemp -d` removed on exit; the daemon runs with HOME pointed

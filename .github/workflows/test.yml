@@ -1,8 +1,9 @@
-# Same contract as the `test` job in .gitlab-ci.yml: run the unittest suite on
+# Same contract as the `test` job in the retired `.gitlab-ci.yml`: run the unittest suite on
 # a stock Linux runner with Python. fswatch IS installed since 0.3.0 — `doctor`
 # looks for the platform monitor (`fsevents_monitor` on Darwin, `inotify_monitor`
 # on Linux) and its TCC/plist checks are Darwin-only, so the suite runs against
-# the real binary here too (see the portability note in .gitlab-ci.yml).
+# the real binary here too (the portability note lived in `.gitlab-ci.yml`,
+# removed with GitLab CI).
 #
 # Three legs since 0.3.1 (matrix, SPEC §14.6): 3.9 is the floor declared by
 # `requires-python`, 3.12 and 3.14 complete the classifier set of
@@ -25,9 +26,9 @@
 # network-volume path for real (dest on CIFS, source on CIFS under the
 # polling monitor, umount/remount catch-up). Gate is MANDATORY on the 3.12
 # leg only (SAFEKEEP_E2E_SMB=1, samba + cifs-utils installed): an identical
-# run on three legs covers nothing extra and costs three runners. Declared
-# divergence with .gitlab-ci.yml: the GitLab docker executor has no
-# SYS_ADMIN, mount.cifs cannot mount there — GitLab does NOT run this e2e
+# run on three legs covers nothing extra and costs three runners. Historic
+# divergence with GitLab (CI retired): the GitLab docker executor had no
+# SYS_ADMIN, mount.cifs could not mount there — GitLab did NOT run this e2e
 # (same prassi as pgrep/procps: what the runner cannot do, the CI declares
 # and skips).
 #
@@ -110,15 +111,16 @@ jobs:
       # nessun placeholder residuo, config chmod 600, doctor best-effort.
       # NESSUNA operazione che avvii/fermi un agent (vedi header di
       # tests/ci_daemon_install.sh). Su questo runner systemd c'è → ramo WSL
-      # esercitato solo nei job senza systemd (GitLab -slim) e dai test unit.
+      # senza systemd esercitato solo dai test unit (su GitLab girava nei job
+      # -slim, rimossi con la CI GitLab).
       - name: Daemon install smoke (wheel + clean venv)
         run: bash tests/ci_daemon_install.sh
       # E2E SMB/CIFS (0.9.0, SPEC §20): gate reale per i volumi di rete —
       # smbd guest locale + mount.cifs dentro una sandbox mktemp. OBBLIGATORIO
       # su questa gamba: se il mount fallisce il job va rosso. Una gamba basta
       # (3.12): un identico test su tre gambe non copre nulla in più e costa
-      # tre runner. GitLab NON lo fa (docker executor senza SYS_ADMIN): la
-      # divergenza è dichiarata nei commenti di testa di entrambi i file.
+      # tre runner. GitLab non lo faceva (docker executor senza SYS_ADMIN): la
+      # divergenza storica è dichiarata nei commenti di testa di entrambi i file.
       - name: SMB e2e (samba + cifs-utils)
         if: matrix.python-version == '3.12'
         run: |

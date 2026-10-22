@@ -5,8 +5,9 @@
 # Migration from GitLab CI (SPEC §14.6): the GitLab `publish` job did the same
 # with `id_tokens` (audience `pypi`) + `twine upload` — twine performs the OIDC
 # exchange itself, no credentials passed. Here the exchange is done by the
-# official `pypa/gh-action-pypi-publish` action. When the GitLab repo is
-# deleted that job dies with it — this workflow takes over from that moment.
+# official `pypa/gh-action-pypi-publish` action. The GitLab repo is being
+# deleted, so this workflow is the only publisher (the GitLab `publish` job
+# dies with it).
 #
 # Gates: the GitLab publish had `needs: [test, install-smoke]`; here the test
 # gates are the `tests` workflow runs on main (test.yml: three Python legs +
@@ -16,12 +17,11 @@
 # PyPI side (one-time, owner account): Settings → Publishing → add a pending
 # publisher (GitHub): owner `foxhound87`, repo `safekeep`, workflow
 # `publish.yml`, environment EMPTY (this workflow uses no GitHub environment).
-# The existing GitLab publisher keeps working until the GitLab repo is
-# deleted — keep it until then.
+# The GitLab-side publisher dies with the repo — nothing to keep.
 #
 # Runs only on version tags (`v*`), same shape as the GitLab rules — never on
 # a branch push. No test publishing anywhere (the GitLab `publish-test` job
-# stays dormant on GitLab and dies with the repo).
+# died with the repo).
 name: publish
 
 on:
