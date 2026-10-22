@@ -38,6 +38,7 @@ Check with `safekeep doctor`: the `TCC …` rows must report `ok: …`.
 ### macOS
 
 1. `Finder → Go → Connect to Server…` (⌘K) and pick `smb://host/share`
+   — or from the shell: `mkdir -p /Volumes/NAS && mount_smbfs //user@host/share /Volumes/NAS`
 2. The share appears in `/Volumes/<name>`
 3. `safekeep daemon install --interval 15`
 
@@ -64,6 +65,34 @@ wsl -u root apt-get install -y cifs-utils
 sudo mount -t cifs //host/share /mnt/share -o username=user,vers=3.0
 safekeep daemon install --interval 15
 ```
+
+## Configuration example
+
+Complete, copy-paste ready: the share is mounted (see
+[Mounting](#mounting) above), then the two files are all it takes.
+
+`~/.safekeep` — destinations live only here, the NAS one goes on the mount:
+
+```
+# NAS destination on the mounted share (+ a local one, repeatable key)
+dest: /Volumes/NAS/backup
+
+# seconds between scans of roots on network volumes (default 60)
+poll_interval: 60
+```
+
+`~/Code/myapp/.sync` — project rules only; a `.sync` can never add or
+redirect destinations:
+
+```
+name: myapp
+
+*.md
+docs/**
+!docs/vendor/CHANGELOG.md
+```
+
+Then (re)start the daemon: `safekeep daemon install --interval 15`.
 
 ## Expected behaviour
 
@@ -94,6 +123,25 @@ Example of the `doctor` rows for network sources:
 ```
 ✔ sorgenti su volume di rete: 1 (poll ogni 60s): /Volumes/backup
 ```
+
+Since 0.9.1 `status` also labels each destination with its filesystem type
+(`[nas]` / `[local]`) and probes it once per run. A mount that is still
+present but whose server is down reads `ENOTCONN` and shows
+`[unreachable] [nas]` instead of a misleading `[ok]`:
+
+```
+dest      /Volumes/NAS/backup [unreachable] [nas]
+```
+
+`doctor` reports the same condition as a **non-fatal** warning — the daemon
+keeps running, waiting for the share with backoff:
+
+```
+✗ volumi di rete non raggiungibili: 1 (/Volumes/NAS/backup) — montaggio/serve attivo? — warning non fatale
+```
+
+Hint: the mount point still resolves but every I/O fails — check that the
+share is still mounted (`mount` / `df`) and that the SMB/CIFS server is up.
 
 ::: tip
 `safekeep poll` is an internal module (`safekeep/poll.py`), not a CLI

@@ -72,7 +72,7 @@ export default defineConfig({
 
     socialLinks: [
       { icon: 'github', link: 'https://github.com/foxhound87/safekeep' },
-      { icon: 'gitlab', link: 'https://gitlab.com/foxhound87/safekeep' }
+      { icon: 'github', link: 'https://github.com/foxhound87/safekeep' }
     ],
 
     editLink: {

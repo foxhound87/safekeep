@@ -141,4 +141,4 @@ __pycache__/
 `.sync` itself is always copied — an implicit lowest-layer `include: .sync`, so
 the destination can reconstruct the config.
 
-Full commented example: [`examples/sync.example`](https://gitlab.com/foxhound87/safekeep/blob/main/examples/sync.example).
+Full commented example: [`examples/sync.example`](https://github.com/foxhound87/safekeep/blob/main/examples/sync.example).
