@@ -187,7 +187,7 @@ safekeep daemon uninstall --purge       # also remove ~/.safekeep and state/logs
 
 Manages the boot agent (launchd plist on macOS, systemd user unit on Linux —
 full reference in [Agent](/agent)). Since 0.7.0; the `install.sh` /
-`uninstall.sh` wrappers are deprecated (removal in 0.8.0) and just delegate
+`uninstall.sh` wrappers are deprecated (removal still pending) and just delegate
 here — their `--trend` branch is the one legacy piece that stays.
 
 - `install` is idempotent and **never starts the agent**: preflight first

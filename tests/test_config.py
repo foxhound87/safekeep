@@ -502,5 +502,24 @@ class S3ConfigTest(unittest.TestCase):
         return mock.patch.dict(os.environ, {name: value})
 
 
+class PollIntervalTest(unittest.TestCase):
+    """§20.3: `poll_interval` intero ≥ 1, default 60, fail-fast con riga."""
+
+    def test_default_60(self):
+        self.assertEqual(parse_config('dest: /d\n').poll_interval, 60)
+
+    def test_esplicito(self):
+        cfg = parse_config('dest: /d\npoll_interval: 5\n')
+        self.assertEqual(cfg.poll_interval, 5)
+
+    def test_invalido_fallisce_con_riga(self):
+        for bad in ('0', '-1', 'abc', '5.5', ''):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ConfigError) as cm:
+                    parse_config(f'dest: /d\npoll_interval: {bad}\n', origin='cfg')
+                self.assertIn('cfg:2:', str(cm.exception))
+                self.assertIn('poll_interval', str(cm.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

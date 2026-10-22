@@ -31,6 +31,13 @@
 #   (WSL_DISTRO_NAME + systemd assente → exit != 0 con /etc/wsl.conf) e il
 #   ramo non-WSL-senza-systemd (warning + unit scritta, exit 0).
 #
+# - e2e SMB (0.9.0, SPEC §14.6/§20): `tests/e2e_smb.sh` monta un share CIFS
+#   guest (smbd privato + mount.cifs) ed è il gate reale dei volumi di rete.
+#   DIVERGENZA DICHIARATA (stessa prassi di pgrep/procps): il docker executor
+#   di GitLab non ha SYS_ADMIN → mount.cifs NON può montare → su GitLab
+#   niente e2e SMB. Il gate vive su GitHub Actions, gamba 3.12, con
+#   `SAFEKEEP_E2E_SMB=1` (vedi header di `.github/workflows/test.yml`); qui
+#   lo script senza quell'env salta con messaggio ed esce 0.
 # - fswatch VIENE installato nel job (0.3.0): `doctor` ora cerca il monitor della
 #   piattaforma (`fsevents_monitor` su Darwin, `inotify_monitor` su Linux, SPEC
 #   §14.2) e i check TCC/plist sono Darwin-only (SPEC §14.4), quindi la suite

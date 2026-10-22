@@ -89,3 +89,11 @@ defaults: exclude: .cache/
 # debug | info | warn | error  (default: info)
 # debug rende fatale anche una riga invalida nei file di config.
 log_level: info
+
+# --- Volumi di rete (SMB/CIFS/NAS, SPEC §20) ------------------------
+# FSEvents/inotify non emettono eventi su mount di rete: le `source` su
+# NAS/SMB non riceverebbe mai notifiche. safekeep le rileva da sole
+# (fstype cifs/smbfs/nfs) e le monitora col POLLING: un walk completo
+# ogni `poll_interval` secondi (intero ≥ 1, default 60). Sulle root
+# locali questa chiave non cambia nulla.
+# poll_interval: 60

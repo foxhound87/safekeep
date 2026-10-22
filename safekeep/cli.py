@@ -33,6 +33,7 @@ from safekeep.platform import (
     install_hint,
     is_darwin,
     is_linux,
+    is_network_fs,
     is_wsl,
     linger_enabled,
     recent_permission_errors,
@@ -289,7 +290,10 @@ def cmd_status(args):
     if not daemon.projects:
         print('progetto  nessuno (.sync non trovato)')
     for dest in daemon.cfg.dests:
-        print(f'dest      {dest} [{dest_state(dest)}]')
+        # etichetta `nas`/`local` dalla fstype detect (§20.6): solo lettura,
+        # nessun processo figlio (fs_fstype legge /proc/mounts o `mount`)
+        label = 'nas' if is_network_fs(dest) else 'local'
+        print(f'dest      {dest} [{dest_state(dest)}] [{label}]')
     if daemon.s3 is not None:
         # HeadBucket con cache 30s (§18.3): ok/offline, senza toccare la
         # config — `status` resta sola lettura
@@ -441,6 +445,19 @@ def cmd_doctor(args):
         else:
             out(True, '.sync: nessun progetto scoperto (niente da validare)')
 
+    # Volumi di rete (SPEC §20.6): split radici locali (fswatch) vs radici su
+    # volume di rete (monitor a polling) — tutti NON fatali
+    if daemon is not None:
+        roots, _auto = daemon.discovery_roots()
+        net = [r for r in roots if is_network_fs(r)]
+        local = [r for r in roots if r not in net]
+        out(True, f'fswatch: root locali {len(local)}')
+        if net:
+            out(True, f'sorgenti su volume di rete: {len(net)} '
+                      f'(poll ogni {daemon.cfg.poll_interval}s): ' + ', '.join(net))
+        else:
+            out(True, 'sorgenti su volume di rete: 0 (niente da pollare)')
+
     exe = shutil.which('fswatch')
     if exe is None:
         out(False, f'fswatch non trovato — installa con: {install_hint()}',
@@ -486,6 +503,19 @@ def cmd_doctor(args):
                    'riconcedere i permessi al volume (FDA/Full Disk Access)')
     else:
         out(True, f'errori di permesso recenti: nessuno nelle ultime 24h — log: {log}')
+
+    # macOS + path sotto /Volumes (§20.6): EACCES recenti sui volumi
+    # rimovibili sono quasi sempre il permesso TCC "Interagisci con i volumi
+    # rimovibili" mancante — hint NON fatale, con rimedio di una riga
+    if is_darwin() and recent is not None and recent[0] > 0 and cfg is not None:
+        rimovibili = [p for p in list(cfg.sources) + list(cfg.dests)
+                      if p.startswith('/Volumes/')]
+        if rimovibili:
+            out(False, f'errori di permesso recenti con {len(rimovibili)} path '
+                       'sotto /Volumes — su macOS apri System Settings → '
+                       'Privacy & Security → «Interagisci con i volumi '
+                       'rimovibili» e aggiungi safekeep (launchd) — '
+                       'warning non fatale')
 
     # WSL (SPEC.md §17.2): tre righe informative — nessuna è mai fatale
     if is_wsl():

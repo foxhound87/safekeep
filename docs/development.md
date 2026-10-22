@@ -6,10 +6,12 @@
 python3 -m unittest discover -s tests
 ```
 
-Standard-library `unittest`, zero dependencies: 206 tests covering the
+Standard-library `unittest`, zero dependencies: 404 tests covering the
 matcher, config, atomic copy, volumes, daemon, auto-discovery, the CLI, the
 permission-trend wrapper (`tests/test_trend.py`, SPEC §9.2) and the POSIX
-portability layer.
+portability layer (platform helper, per-OS fswatch monitor, systemd template,
+doctor log/linger checks, WSL detection, `safekeep daemon install` without
+systemd).
 `fswatch` is **not** required — `tests/test_cli.py` tolerates its absence and
 the daemon loop uses a fake fswatch (a Python script), not the real binary.
 

@@ -1,3 +1,4 @@
+import errno
 import os
 import shutil
 import tempfile
@@ -397,6 +398,37 @@ class ThrottleLogTest(CopierTestCase):
             copier.log_copy_error('/s/b', '/d/b', self.err(1), now=now)
             copier.log_copy_error('/s/a', '/d/a', self.err(13), now=now)
         self.assertEqual(len(cm.output), 3, cm.output)      # (a,1) una + b + (a,13)
+
+
+class DestRetePendenteTest(CopierTestCase):
+    """§20.4: NETWORK_ERRNOS (server NAS morto, rete giù) → la passata esce
+    con `stats['dest_pendente']` (pending + backoff §8.3), non in log-loop."""
+
+    def test_enotconn_mette_dest_pendente(self):
+        src_root = os.path.join(self.tmp, 'src')
+        write(os.path.join(src_root, 'a.md'), 'A')
+        matcher = Matcher(BUILTIN_RULES, parse_rules(['include: *.md']))
+
+        def boom(src, dst):
+            raise OSError(errno.ENOTCONN, 'Socket is not connected')
+
+        stats = {}
+        copied = reconcile_project(source_root=src_root,
+                                   dest_root=os.path.join(self.tmp, 'dst'),
+                                   matcher=matcher, layout='relative',
+                                   dest_path_fn=dest_path, stats=stats,
+                                   copy_fn=boom, needs_copy_fn=lambda s, d: True)
+        self.assertEqual(copied, 0)
+        self.assertTrue(stats.get('dest_pendente'),
+                        'ENOTCONN deve comportarsi come ENODEV/EBUSY/ENOSPC')
+        self.assertEqual(stats['errati'], 1)
+
+    def test_errno_di_rete_inclusive_nell_insieme(self):
+        for num in (errno.ENOTCONN, errno.EHOSTUNREACH, errno.ETIMEDOUT,
+                    errno.ENETUNREACH, errno.ENETDOWN, errno.ESTALE):
+            self.assertIn(num, copier.DEST_DOWN_ERRNOS)
+        for num in (errno.EACCES, errno.EPERM, errno.ENOENT):
+            self.assertNotIn(num, copier.DEST_DOWN_ERRNOS)
 
 
 if __name__ == '__main__':

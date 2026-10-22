@@ -66,7 +66,7 @@ On Linux, to start at boot without a login session, add `--enable-linger`
 without a login).
 
 The old `bash install.sh` wrapper still works but is **deprecated since
-0.7.0** (removal in 0.8.0): it just delegates to `safekeep daemon install`.
+0.7.0** (removal still pending): it just delegates to `safekeep daemon install`.
 On Linux **without** systemd (WSL1, WSL2 with systemd off, containers) the
 preflight **fails with exit 1** and prints the fix (enable systemd in
 `/etc/wsl.conf`) or the manual-start alternative (`safekeep run`) — see

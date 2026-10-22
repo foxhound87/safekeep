@@ -3,7 +3,7 @@
 The daemon runs as a per-user agent: started at boot, restarted if it dies —
 a launchd agent on macOS, a systemd *user unit* on Linux. Since 0.7.0 it is
 installed and managed with the `safekeep daemon` command (0.7.0 deprecates the
-old `install.sh` / `uninstall.sh` wrappers; removal in 0.8.0).
+old `install.sh` / `uninstall.sh` wrappers; removal still pending).
 
 ## Install
 
