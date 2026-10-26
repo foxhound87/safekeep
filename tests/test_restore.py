@@ -166,8 +166,8 @@ class PlanExecuteTest(BaseFs):
     def test_force_scrive_contenuto_mtime_e_symlink(self):
         backup = os.path.join(self.dest, 'proj', 'docs', 'a.md')
         bstat = os.stat(backup)
-        ok, err = restore.execute(self.entries)
-        self.assertEqual((ok, err), (2, 0))
+        ok, err, skipped = restore.execute(self.entries)
+        self.assertEqual((ok, err, skipped), (2, 0, 0))
         with open(self.target) as f:
             self.assertEqual(f.read(), 'v1 backup')
         self.assertEqual(os.stat(self.target).st_mtime_ns, bstat.st_mtime_ns)
@@ -180,8 +180,8 @@ class PlanExecuteTest(BaseFs):
 
     def test_contenuto_diverso_sovrascritto(self):
         write(self.target, 'v2 sorgente')
-        ok, err = restore.execute(self.entries)
-        self.assertEqual((ok, err), (2, 0))
+        ok, err, skipped = restore.execute(self.entries)
+        self.assertEqual((ok, err, skipped), (2, 0, 0))
         with open(self.target) as f:
             self.assertEqual(f.read(), 'v1 backup')
 
@@ -189,8 +189,8 @@ class PlanExecuteTest(BaseFs):
         outside = os.path.join(self.tmp, 'outside.md')
         e = restore.Entry(os.path.join(self.dest, 'proj', 'docs', 'a.md'),
                           outside, self.project, 'docs/a.md', None)
-        ok, err = restore.execute([e])
-        self.assertEqual((ok, err), (0, 1))
+        ok, err, skipped = restore.execute([e])
+        self.assertEqual((ok, err, skipped), (0, 1, 0))
         self.assertFalse(os.path.exists(outside))
 
     def test_symlink_rotto_backup_vs_target_assente(self):
@@ -237,8 +237,8 @@ class RoundTripTest(unittest.TestCase):
         self.assertEqual(orphans, [])
         matched = restore.select(entries, [a, link])
         self.assertEqual(len(matched), 2)
-        ok, err = restore.execute(matched)
-        self.assertEqual((ok, err), (2, 0))
+        ok, err, skipped = restore.execute(matched)
+        self.assertEqual((ok, err, skipped), (2, 0, 0))
         with open(a) as f:
             self.assertEqual(f.read(), 'contenuto v1')
         self.assertEqual(os.stat(a).st_mtime_ns, expected)
@@ -386,8 +386,8 @@ class InventoryS3Test(BaseFs):
         s3 = self.fake_s3()
         os.remove(os.path.join(self.proj_root, 'docs', 'a.md'))
         entries, _ = restore.inventory([self.project], 's3', s3, 'relative')
-        ok, err = restore.execute(entries, s3=s3)
-        self.assertEqual((ok, err), (2, 0))
+        ok, err, skipped = restore.execute(entries, s3=s3)
+        self.assertEqual((ok, err, skipped), (2, 0, 0))
         self.assertEqual(sorted(s3.downloaded),
                          ['pre/proj/docs/a.md', 'pre/proj/link.md'])
         with open(os.path.join(self.proj_root, 'docs', 'a.md')) as f:
@@ -396,7 +396,7 @@ class InventoryS3Test(BaseFs):
         outside = restore.Entry('pre/proj/docs/a.md',
                                 os.path.join(self.tmp, 'no.md'),
                                 self.project, 'docs/a.md', None)
-        self.assertEqual(restore.execute([outside], s3=s3), (0, 1))
+        self.assertEqual(restore.execute([outside], s3=s3), (0, 1, 0))
 
 
 class CliRestoreTest(unittest.TestCase):
@@ -510,6 +510,95 @@ class CliRestoreTest(unittest.TestCase):
         self.assertIn('nas', out.getvalue())            # livello origine
         with open(self.target) as f:
             self.assertEqual(f.read(), 'v1 backup2')    # seconda dest scelta
+
+    def _nested_backup(self):
+        """Backup `proj/sub/b.md` la cui source+parent `proj/sub/` non esiste."""
+        write(os.path.join(self.dest, 'proj', 'sub', 'b.md'), 'v1 backup b')
+        write(os.path.join(self.src, 'proj', 'sub', 'b.md'), 'b')
+        shutil.rmtree(os.path.join(self.src, 'proj', 'sub'))
+        return os.path.join(self.src, 'proj', 'sub', 'b.md')
+
+    def test_if_dir_exists_skip_dry_run_e_sintesi(self):
+        target = self._nested_backup()
+        code, out, _ = self.run_cli('--if-dir-exists', target)
+        self.assertEqual(code, 0)
+        self.assertIn('directory destinazione assente', out)
+        self.assertIn('0 da copiare, 1 saltati', out)
+        self.assertIn('0 già aggiornati', out)
+        self.assertFalse(os.path.exists(os.path.dirname(target)))
+
+    def test_if_dir_exists_tutti_saltati_exit0(self):
+        target = self._nested_backup()
+        code, out, _ = self.run_cli('--force', '--if-dir-exists', target)
+        self.assertEqual(code, 0)
+        self.assertIn('0 ripristinati, 0 errori', out)
+        self.assertIn('1 saltati (directory destinazione assente)', out)
+        self.assertFalse(os.path.exists(target))
+
+    def test_if_dir_exists_interattivo_skip_nel_piano(self):
+        target = self._nested_backup()
+        code, out, _ = self.run_cli('--if-dir-exists', tty=True,
+                                    inputs=['1', 'a'])
+        self.assertEqual(code, 0)
+        self.assertIn('directory destinazione assente', out)
+        self.assertFalse(os.path.exists(target))
+
+
+class IfDirExistsTest(BaseFs):
+    """`--if-dir-exists` (§19.6): skip se il parent del target manca."""
+
+    def setUp(self):
+        super().setUp()
+        self.entries, _ = self.inventory()
+        self.target = os.path.join(self.proj_root, 'docs', 'a.md')
+        os.remove(self.target)
+        os.remove(os.path.join(self.proj_root, 'link.md'))
+
+    def test_flag_assente_comportamento_invariato(self):
+        # niente flag: la parent `docs/` mancante viene creata come prima
+        shutil.rmtree(os.path.join(self.proj_root, 'docs'))
+        ok, err, skipped = restore.execute(self.entries)
+        self.assertEqual((ok, err, skipped), (2, 0, 0))
+        with open(self.target) as f:
+            self.assertEqual(f.read(), 'v1 backup')
+
+    def test_parent_esistente_copia(self):
+        ok, err, skipped = restore.execute(self.entries, if_dir_exists=True)
+        self.assertEqual((ok, err, skipped), (2, 0, 0))   # docs/ e proj/ esistono
+        with open(self.target) as f:
+            self.assertEqual(f.read(), 'v1 backup')
+
+    def test_parent_mancante_skip_e_niente_dir(self):
+        shutil.rmtree(os.path.join(self.proj_root, 'docs'))
+        rows, syn = restore.plan(self.entries, if_dir_exists=True)
+        nota = {t: n for _, t, n in rows}
+        self.assertEqual(nota[self.target], restore.SKIP_NO_PARENT)
+        self.assertEqual(syn['saltati'], 1)                # solo docs/a.md
+        self.assertEqual(syn['da_copiare'], 1)             # link.md in proj/
+        ok, err, skipped = restore.execute(self.entries, if_dir_exists=True)
+        self.assertEqual((ok, err, skipped), (1, 0, 1))
+        self.assertFalse(os.path.exists(os.path.dirname(self.target)))
+        self.assertTrue(os.path.islink(os.path.join(self.proj_root, 'link.md')))
+
+    def test_dry_run_mostra_skip(self):
+        shutil.rmtree(os.path.join(self.proj_root, 'docs'))
+        rows, syn = restore.plan(self.entries, if_dir_exists=True)
+        self.assertTrue(any('directory destinazione assente' in n
+                            for _, _, n in rows))
+        self.assertEqual(syn['saltati'], 1)
+
+    def test_s3_stessa_semantica(self):
+        ns = 1_700_000_000_000_000_000
+        keys = {'pre/proj/docs/a.md': (3, {'mtime': str(ns), 'mode': '0o100644'},
+                                       'v1 backup'),
+                'pre/proj/link.md': (0, {'symlink': 'docs/a.md'}, '')}
+        s3 = FakeS3('s3://bkt/pre', keys)
+        shutil.rmtree(os.path.join(self.proj_root, 'docs'))
+        entries, _ = restore.inventory([self.project], 's3', s3, 'relative')
+        ok, err, skipped = restore.execute(entries, s3=s3, if_dir_exists=True)
+        self.assertEqual((ok, err, skipped), (1, 0, 1))
+        self.assertEqual(s3.downloaded, ['pre/proj/link.md'])   # a.md non scaricato
+        self.assertFalse(os.path.exists(os.path.dirname(self.target)))
 
 
 if __name__ == '__main__':

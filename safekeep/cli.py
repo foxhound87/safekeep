@@ -83,6 +83,11 @@ def build_parser():
     res.add_argument('--force', action='store_true',
                      help='esegue le copie (default: dry-run — nessuna scrittura, '
                           'nemmeno in interattivo)')
+    res.add_argument('--if-dir-exists', action='store_true',
+                     help='ripristina un file solo se la sua directory di '
+                          'destinazione immediata esiste già: altrimenti salta, '
+                          'senza creare cartelle mancanti (default: le parent '
+                          'vengono create, SPEC §19.6)')
     res.add_argument('targets', nargs='*', metavar='PATH|GLOB',
                      help='path assoluto, relativo alla radice source o glob fnmatch '
                           'sui path originali (niente argomenti → menu interattivo, '
@@ -255,19 +260,27 @@ def cmd_restore(args):
             print('restore: nessun file corrispondente: '
                   + ', '.join(args.targets), file=sys.stderr)
             return 1
-    rows, syn = restore.plan(matched)
+    rows, syn = restore.plan(matched, if_dir_exists=args.if_dir_exists)
     for backup, target, nota in rows:
         print(f'  {backup} -> {target} {nota}')
     line = (f"ripristino: {syn['da_copiare']} "
-            f"{'da copiare' if not args.force else 'copie'}, "
-            f"{syn['aggiornati']} già aggiornati")
+            f"{'da copiare' if not args.force else 'copie'}")
+    if syn['saltati']:
+        line += (f", {syn['saltati']} saltati "
+                 '(directory destinazione assente)')
+    line += f", {syn['aggiornati']} già aggiornati"
     if not args.force:
         line += ' — dry-run: nessuna scrittura (usa --force per ripristinare)'
     print(line)
     if not args.force:
         return 0
-    ok, err = restore.execute(matched, origin if kind == 's3' else None)
-    print(f'ripristino: {ok} ripristinati, {err} errori')
+    ok, err, skipped = restore.execute(matched,
+                                       origin if kind == 's3' else None,
+                                       if_dir_exists=args.if_dir_exists)
+    line = f'ripristino: {ok} ripristinati, {err} errori'
+    if skipped:
+        line += f', {skipped} saltati (directory destinazione assente)'
+    print(line)
     return 0 if err == 0 else 1
 
 

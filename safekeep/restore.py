@@ -28,6 +28,9 @@ GLOB_CHARS = '*?['
 # None per fs
 Entry = namedtuple('Entry', 'backup target project rel info')
 
+# nota del piano (§19.6) per un file saltato da `--if-dir-exists`
+SKIP_NO_PARENT = '(salta: directory destinazione assente)'
+
 
 class RestoreError(ValueError):
     """Errore di restore non-I/O (origine non determinabile, config, usage):
@@ -260,13 +263,24 @@ def need_restore(entry):
     return needs_copy(entry.backup, entry.target)
 
 
-def plan(entries):
+def _parent_missing(entry):
+    """§19.6: True se la directory di destinazione immediata (parent del
+    target assoluto) non esiste — `--if-dir-exists` salta il file."""
+    return not os.path.isdir(os.path.dirname(os.path.abspath(entry.target)))
+
+
+def plan(entries, if_dir_exists=False):
     """→ (righe, sintesi): `<backup> -> <target> (crea|sovrascrive)` per le
-    entry che differiscono; già identiche → conteggiate in `aggiornati`."""
-    rows, created, overwritten, updated = [], 0, 0, 0
+    entry che differiscono; già identiche → conteggiate in `aggiornati`;
+    con `if_dir_exists` (§19.6) il cui parent manca → `saltati`."""
+    rows, created, overwritten, updated, skipped = [], 0, 0, 0, 0
     for e in entries:
         if not need_restore(e):
             updated += 1
+            continue
+        if if_dir_exists and _parent_missing(e):
+            rows.append((e.backup, e.target, SKIP_NO_PARENT))
+            skipped += 1
             continue
         if os.path.lexists(e.target):
             rows.append((e.backup, e.target, '(sovrascrive)'))
@@ -275,25 +289,31 @@ def plan(entries):
             rows.append((e.backup, e.target, '(crea)'))
             created += 1
     return rows, {'da_copiare': created + overwritten, 'crea': created,
-                  'sovrascrive': overwritten, 'aggiornati': updated}
+                  'sovrascrive': overwritten, 'aggiornati': updated,
+                  'saltati': skipped}
 
 
 # ---------------------------------------------------------------- esecuzione
 
-def execute(entries, s3=None):
+def execute(entries, s3=None, if_dir_exists=False):
     """Copia i backup sui target — chiamata SOLO con `--force` (§19.1).
 
     Containment invertito (§11/§19.5): il parent (realpath) del target deve
     stare dentro la (realpath) della source del progetto, altrimenti EACCES +
     skip. fs → `copy_one` (atomico tmp + `os.replace`, §7.2); S3 → `download`.
-    Mai delete. Ritorna (ok, errati)."""
-    ok = err = 0
+    Con `if_dir_exists` (§19.6) il parent mancante → skip (prima della
+    download anche su S3). Mai delete. Ritorna (ok, errati, saltati)."""
+    ok = err = skipped = 0
     for e in entries:
         src_root = os.path.realpath(e.project.source_root)
         parent = os.path.realpath(os.path.dirname(os.path.abspath(e.target)))
         if not (parent == src_root or parent.startswith(src_root + os.sep)):
             log.error('scrittura fuori dalle source bloccata: %s', e.target)
             err += 1
+            continue
+        if if_dir_exists and _parent_missing(e):
+            log.info('saltato (directory destinazione assente): %s', e.target)
+            skipped += 1
             continue
         try:
             if s3 is not None:
@@ -309,7 +329,7 @@ def execute(entries, s3=None):
             err += 1
             continue
         ok += 1
-    return ok, err
+    return ok, err, skipped
 
 
 def warn_network_sources(projects):
