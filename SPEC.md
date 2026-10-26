@@ -1401,6 +1401,12 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   dest `[nas]`/`[local]`, hint TCC `/Volumes`); CI: check drift SPEC↔`__version__`
   (§14.6) e gate E2E SMB su GitHub (samba + `mount.cifs`, gamba 3.12; GitLab
   dichiara la divergenza: docker executor senza `SYS_ADMIN`).
+- **0.10.0** — flag `--if-dir-exists` per `restore` (§19.6, MINOR
+  retrocompatibile): default inattivo (le parent vengono create come prima);
+  con il flag un file viene ripristinato solo se la sua directory di
+  destinazione immediata esiste già, altrimenti saltato — niente creazione di
+  alberi di progetto non clonati sul disco. Skip visibili nel piano dry-run e
+  nel conteggio dell'esecuzione, per tutte le origini (`fs` e `S3`).
 - **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0).
   La dismissione della CI GitLab (`.gitlab-ci.yml`) è **già avvenuta** su `main`
   durante 0.9.x, a seguito dell'eliminazione del repo GitLab: il publish a PyPI
@@ -1595,7 +1601,7 @@ cancellazioni** mai; le credenziali S3 arrivano **solo** dal config globale
 ### 19.1 Sintassi
 
 ```
-safekeep restore [--config PATH] [-v] [--from {local,s3,nas}] [--force] [PATH|GLOB ...]
+safekeep restore [--config PATH] [-v] [--from {local,s3,nas}] [--force] [--if-dir-exists] [PATH|GLOB ...]
 ```
 
 | Argomento | Significato |
@@ -1603,6 +1609,7 @@ safekeep restore [--config PATH] [-v] [--from {local,s3,nas}] [--force] [PATH|GL
 | `PATH`/`GLOB` (uno o più) | path assoluto, path relativo alla radice `source` del progetto, o glob (`fnmatch`) sui path originali → modalità **non interattiva** |
 | `--from` | origine del ripristino: `local` = prima `dest:`, `nas` = seconda `dest:`, `s3` = dest S3 (§18) |
 | `--force` | esegue davvero le copie; **senza, il dry-run è SEMPRE il comportamento** (nessuna eccezione, §11) |
+| `--if-dir-exists` | ripristina un file **solo se la sua directory di destinazione immediata esiste già** (0.10.0, §19.6); default inattivo |
 | `-v` | log verboso (debug), come sugli altri comandi |
 
 ### 19.2 Tabella casi (selezione)
@@ -1662,6 +1669,21 @@ interattivo** (§11): il menu produce il piano, `--force` lo esegue.
   sotto nessun progetto scoperto) → warn + skip, mai toccata.
 - **mai delete**: restore non cancella né sovrascrive "verso il basso": copia
   solo ciò che il piano elenca.
+
+### 19.6 `--if-dir-exists` — salta se la directory di destinazione manca (0.10.0)
+
+Flag **default inattivo** (comportamento invariato: le parent vengono create).
+Quando presente, un file viene ripristinato **solo se la directory di
+destinazione immediata (parent = `dirname` del target assoluto) esiste già**:
+altrimenti il file viene **saltato** — niente creazione di cartelle mancanti
+(utente che non clona più un albero di progetto sul disco). Vale per tutte le
+origini (`--from local|nas` fs e `--from s3`, dove il controllo sul target
+locale precede la download), sia nel piano dry-run (riga con nota
+`(salta: directory destinazione assente)` e conteggio `saltati` nella sintesi)
+sia nell'esecuzione con `--force` (skip + motivo nel log, `saltati` nel
+riepilogo). In interattivo il flag vale ugualmente: gli skip compaiono nel
+piano. Tutti i match saltati → exit 0 con sintesi `0 da copiare, N saltati
+(directory destinazione assente)`.
 
 ---
 
