@@ -8,7 +8,7 @@ safekeep <command> [--config PATH] [-v]
 |---|---|
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--prune] [--project PATH]` | one pass: walks the source and copies whatever differs, then exits |
-| `restore [--force] [--from {local,s3,nas}] [PATH\|GLOB ...]` | restore from the **latest copy** in a destination — always a dry-run unless `--force`; pick files by path/glob or with the interactive menu |
+| `restore [--force] [--from {local,s3,nas}] [--if-dir-exists] [PATH\|GLOB ...]` | restore from the **latest copy** in a destination — always a dry-run unless `--force`; pick files by path/glob or with the interactive menu; `--if-dir-exists` only restores files whose destination directory already exists |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
 | `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist and daemon executable (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code |
 | `daemon {install,start,stop,status,uninstall}` | manage the boot agent — see below |
@@ -73,6 +73,14 @@ what you get back. Nothing is ever deleted.
   there is no `--to` — and a reconstructed path outside the project's source
   is refused (EACCES). Copies are atomic (temp file + `os.replace`) and
   symlinks come back as symlinks. S3 credentials come from the config only.
+- **`--if-dir-exists`** (0.10.0) restores a file only if its destination
+  directory already exists — missing parent directories are never created;
+  those files are skipped and counted as `saltati` (works with every origin,
+  including `--from s3`, where the check runs before the download):
+
+  ```bash
+  safekeep restore --force --if-dir-exists ~/Code/myapp
+  ```
 
 ## `status`
 
