@@ -396,27 +396,35 @@ class Daemon:
         self.warn_unused_routes()
         return self.projects
 
+    def unused_routes(self):
+        """Route che non matchano NESSUNA root nota (SPEC.md §12) → list[Route].
+
+        Radici note = le `source` del config (o `$HOME` in auto-discovery) più
+        le source root E le project root (dir del `.sync`) dei progetti
+        scoperti — stesso doppio livello del match (§21.3). La usano
+        `warn_unused_routes` (warning di log, una-tantum per riga per daemon)
+        e `doctor` (riga di check): stessa logica, mai duplicata due volte.
+        """
+        if not self.cfg.routes:
+            return []
+        roots = {os.path.realpath(os.path.abspath(os.path.expanduser(r)))
+                 for r in (self.cfg.sources or [os.path.expanduser('~')])}
+        roots |= {p.source_root for p in self.projects}
+        roots |= {p.root for p in self.projects}
+        return [r for r in self.cfg.routes
+                if not any(route_matches(os.path.realpath(r.src), root)
+                           for root in roots)]
+
     def warn_unused_routes(self):
         """SPEC.md §12: una route che non matcha NESSUNA root nota avvisa
         (warning non fatale): in auto-discovery la root può non essere ancora
         agganciata e al rescan 24h la route può diventare attiva.
 
-        Radici note = le `source` del config (o `$HOME` in auto-discovery) più
-        le source root E le project root (dir del `.sync`) dei progetti
-        scoperti — stesso doppio livello del match (§21.3). Warning una-tantum
-        per riga per daemon: `load_projects` gira anche a ogni reload di
-        `.sync`.
+        Warning una-tantum per riga per daemon: `load_projects` gira anche a
+        ogni reload di `.sync`.
         """
-        if not self.cfg.routes:
-            return
-        roots = {os.path.realpath(os.path.abspath(os.path.expanduser(r)))
-                 for r in (self.cfg.sources or [os.path.expanduser('~')])}
-        roots |= {p.source_root for p in self.projects}
-        roots |= {p.root for p in self.projects}
-        for r in self.cfg.routes:
+        for r in self.unused_routes():
             src = os.path.realpath(r.src)
-            if any(route_matches(src, root) for root in roots):
-                continue
             if (src, r.lineno) not in self._routes_warned:
                 self._routes_warned.add((src, r.lineno))
                 log.warning('route %s (riga %d) non corrisponde ad alcuna root '

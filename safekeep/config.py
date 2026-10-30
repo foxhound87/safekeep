@@ -372,34 +372,23 @@ def route_matches(src, root):
     return root == src or src == os.sep or root.startswith(src + os.sep)
 
 
-def dests_for_source(root, cfg, project_root=None):
-    """`(dest_fs, dest_s3)` per la sorgente `root` (SPEC.md §21.3).
+def matching_route(root, cfg, project_root=None):
+    """La route che vince per `root` (SPEC.md §21.3), oppure **None**.
 
-    - `dest_fs`: path delle destinazioni filesystem **in ordine di config**;
-    - `dest_s3`: target S3 come `(bucket, prefix)` in ordine di config.
+    Matching *longest-prefix-wins* su **DUE LIVELLI**: la route matcha se il
+    suo sorgente è prefisso della source root `root` **O** della project root
+    `project_root` (directory del `.sync`, opzionale), e fra tutti i match —
+    su entrambi i livelli — vince il sorgente più lungo. Confronto per
+    SEGMENTI (`route_matches`). Normalizzazione: entrambi i lati confrontati
+    dopo **realpath + abspath + expanduser** (il daemon passa radici già
+    realpathizzate, la route arriva col path come scritto — es. `/tmp`, che su
+    macOS è un symlink per `/private/tmp`).
 
-    Matching *longest-prefix-wins* su **DUE LIVELLI** (§21.3): la route
-    matcha se il suo sorgente è prefisso della source root `root` **O** della
-    project root `project_root` (directory del `.sync`, opzionale), e fra
-    tutti i match — su entrambi i livelli — vince il sorgente più lungo. Il
-    secondo livello serve in auto-discovery, dove la source root di ogni
-    progetto è `$HOME` e il routing per-progetto (`route ~/code: nas`) può
-    agganciare solo le project root. Confronto per SEGMENTI (`/a/bc` non
-    matcha `/a/b`), prefisso più lungo vincente. Nessuna route che matcha →
-    TUTTE le destinazioni (anonime + nominate + S3 globale): retrocompat
-    identica a 0.10.0, il routing è opt-in.
-
-    Normalizzazione: `root`, `project_root` E il sorgente di ogni route
-    vengono confrontati dopo **realpath + abspath + expanduser** su ENTRAMBI
-    i lati. Il daemon passa le radici già realpathizzate (`Project.source_root`
-    e `Project.root`), mentre la route arriva dal config col path come
-    scritto (es. `/tmp`, che su macOS è un symlink per `/private/tmp`): con
-    l'abspath di sola fase 1 il match falliva SILENTIOSAMENTE e il progetto
-    andava in broadcast.
-
-    Funzione pura solo per la logica (nessuna esistenza richiesta: realpath
-    risolve i symlink esistenti e tiene il resto); il caller (daemon) passa
-    le radici scoperte; la scoperta resta fuori da qui.
+    Nessuna route che matcha → None: il caller va in broadcast (tutte le dest,
+    retrocompat §21.1). Funzione pura solo per la logica (nessuna esistenza
+    richiesta); la scoperta resta fuori da qui. La usano `dests_for_source`
+    (daemon) e `status`/`doctor` per etichettare le destinazioni di ogni
+    progetto: una sola implementazione del match, mai divergenze (§21.3).
     """
     def canon(p):
         return os.path.realpath(os.path.abspath(os.path.expanduser(p)))
@@ -415,6 +404,20 @@ def dests_for_source(root, cfg, project_root=None):
         if (any(route_matches(src, c) for c in candidates)
                 and (best_src is None or len(src) > len(best_src))):
             best, best_src = r, src
+    return best
+
+
+def dests_for_source(root, cfg, project_root=None):
+    """`(dest_fs, dest_s3)` per la sorgente `root` (SPEC.md §21.3).
+
+    - `dest_fs`: path delle destinazioni filesystem **in ordine di config**;
+    - `dest_s3`: target S3 come `(bucket, prefix)` in ordine di config.
+
+    Il match è quello di `matching_route` (DUE livelli, §21.3): nessuna route
+    che matcha → TUTTE le destinazioni (anonime + nominate + S3 globale):
+    retrocompat identica a 0.10.0, il routing è opt-in.
+    """
+    best = matching_route(root, cfg, project_root)
     if best is None:
         return (list(cfg.dests),
                 [(cfg.s3.bucket, cfg.s3.prefix)] if cfg.s3 else [])
