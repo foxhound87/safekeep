@@ -43,6 +43,7 @@ class GlobalConfig:
     def __init__(self):
         self.sources = []             # radici osservate (ripetibili, opzionali)
         self.dests = []               # destinazioni globali (ripetibili) — le UNICHE
+        self.dest_names = {}          # nome → path (dest <name>:, §21.2)
         self.s3 = None                # S3Config | None (una sola dest S3, §18)
         self.layout = 'relative'      # relative | full
         self.defaults = []            # regole a bassa priorità (list[Rule])
@@ -64,6 +65,14 @@ _SYNC_KEY = re.compile(r'(name|defaults|include|exclude)\s*:\s*(.*)')
 _CONF_KEY = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)')
 # Riga a forma di chiave (`dest:`, `-dest:`, `foo:`): NON è una riga nuda.
 _KEY_SHAPE = re.compile(r'[A-Za-z_-][A-Za-z0-9_-]*\s*:')
+# `dest <name>: <path>` (SPEC.md §21.2): il ramo dedicato deve matchare
+# PRIMA di _CONF_KEY, che di questa riga non cattura nemmeno il `:` (c'è un
+# nome dopo la chiave) e la respingerebbe come riga invalida. Il `\s+` dopo
+# la chiave tiene fuori `dest:`/`dest5:` — gestite da _CONF_KEY come sempre
+# (le forme legacy restano invariate).
+_DEST_NAMED = re.compile(r'dest\s+(.*)')
+# nome di una destinazione nominata: token semplice, niente spazi/coloni
+_DEST_NAME = re.compile(r'[A-Za-z0-9_-]+$')
 
 # Chiavi del blocco S3 (SPEC.md §18.1): `s3_*` fuori da questo insieme è
 # errore fail-fast, come ogni altra chiave ignota del config globale.
@@ -152,6 +161,10 @@ def parse_config(text, origin='config'):
         line = strip_comment(raw).strip()
         if not line:
             continue
+        m = _DEST_NAMED.match(line)
+        if m and not m.group(1).lstrip().startswith(':'):
+            _parse_named_dest(cfg, m.group(1), lineno, origin, raw)
+            continue
         m = _CONF_KEY.match(line)
         if not m:
             raise ConfigError(f'{origin}:{lineno}: riga non valida: {raw.strip()}')
@@ -208,6 +221,32 @@ def parse_config(text, origin='config'):
                           f'`dest: <path>` oppure `s3_bucket: <nome>` '
                           f'(esempio: examples/safekeep.example)')
     return cfg
+
+
+def _parse_named_dest(cfg, rest, lineno, origin, raw):
+    """`dest <name>: <path>` → destinazione nominata (SPEC.md §21.2).
+
+    Il nome la rende citabile nelle route; il path (con `~` espanso) finisce
+    in `cfg.dests` esattamente come una `dest:` anonima. Fail-fast con riga.
+    """
+    if '\0' in rest:
+        raise ConfigError(f'{origin}:{lineno}: valore con carattere NUL: dest')
+    name, colon, path = rest.partition(':')
+    if not colon:
+        raise ConfigError(f'{origin}:{lineno}: destinazione nominata malformata '
+                          f'(serve `dest <nome>: <path>`): {raw.strip()}')
+    name = name.strip()
+    if not _DEST_NAME.match(name):
+        raise ConfigError(f'{origin}:{lineno}: nome dest non valido: {name!r} '
+                          f'(ammissibili: A-Za-z0-9_-)')
+    path = path.strip()
+    if not path:
+        raise ConfigError(f'{origin}:{lineno}: dest {name!r} senza percorso')
+    path = os.path.expanduser(path)
+    if name in cfg.dest_names:
+        raise ConfigError(f'{origin}:{lineno}: dest {name!r} già dichiarata')
+    cfg.dest_names[name] = path
+    cfg.dests.append(path)
 
 
 def _build_s3(raw, origin):
