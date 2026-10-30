@@ -3,6 +3,7 @@
 [![tests](https://github.com/foxhound87/safekeep/actions/workflows/test.yml/badge.svg)](https://github.com/foxhound87/safekeep/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/safekeep)](https://pypi.org/project/safekeep/)
 [![Python](https://img.shields.io/pypi/pyversions/safekeep)](https://pypi.org/project/safekeep/)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pT39e6cP3V)
 
 **Selective always-on backups for macOS and Linux**: watches source folders with
 [fswatch](https://github.com/emcrisostomo/fswatch) and copies only the files you
