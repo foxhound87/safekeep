@@ -120,7 +120,7 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 | `source` | path (ripetibile) | **opzionale** | radici da osservare; ogni radice è una "sorgente"; assente → **modalità auto-discovery** da `$HOME` (vedi §6); dir senza `.sync` = **non seguita** (vedi §4.1) |
 | `dest` | path (ripetibile) | **obbligatoria\*** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11); \* serve **almeno una `dest:` oppure `s3_bucket:`** (dest S3-compatible, §18). Forma nominata `dest <name>: <path>` (0.11.0): la dest è citabile nelle `route` (§21) e in `restore --dest <nome>` |
 | `dest <name>` | path (ripetibile) | opzionale | (0.11.0) destinazione **nominata**: stessa semantica della `dest:` anonima, ma il `<name>` la rende referenziabile nelle route (§21.2) e nei comandi; le dest anonime restano valide ma non sono citabili in route |
-| `route` | `src: dest-list` (ripetibile) | opzionale | (0.11.0) instrada la sorgente `src` su una o più destinazioni (nomi e/o target S3 `s3:<prefix>` / `s3://<bucket>/<prefix>`); **longest-prefix-wins** sulla source root; sorgente senza route: tutte le dest (default retrocompat); vedi §21 |
+| `route` | `src: dest-list` (ripetibile) | opzionale | (0.11.0) instrada la sorgente `src` su una o più destinazioni (nomi e/o target S3 `s3:<prefix>` / `s3://<bucket>/<prefix>`); **longest-prefix-wins** sulla source root O sulla project root (dir del `.sync`, §21.3); sorgente senza route: tutte le dest (default retrocompat); vedi §21 |
 | `layout` | `relative` \| `full` | `relative` | layout dei path di destinazione (vedi nota sotto) |
 | `defaults` | lista regole | builtin | regole di default a **bassa priorità** (sotto le regole globali e sotto `.sync`) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | livello di log su stderr + file di log |
@@ -1451,7 +1451,8 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   chiavi `dest <name>:` (destinazione **nominata**) e `route <src>: <dest-list>`
   in `~/.safekeep` (mai nel `.sync`, §4.2/§11) per instradare una sorgente su
   una o più destinazioni scelte, invece che su tutte. Matching **longest-prefix-wins**
-  sulla source root; route ambigua o verso destinazione inesistente: **fail-fast**
+  sulla source root O sulla project root (dir del `.sync`, §21.3); route ambigua
+  o verso destinazione inesistente: **fail-fast**
   al parse; **sorgente senza route: tutte le dest** (default retrocompat, zero
   breaking). Route S3 per-route: `s3:<prefix>` (bucket = `s3_bucket` globale) e
   `s3://<bucket>/<prefix>` (bucket esplicito), con client S3 già cached per-bucket
