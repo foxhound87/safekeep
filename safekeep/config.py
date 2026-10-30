@@ -362,6 +362,33 @@ def _resolve_routes(cfg, raw_routes, origin):
         cfg.routes.append(route)
 
 
+def dests_for_source(root, cfg):
+    """`(dest_fs, dest_s3)` per la sorgente `root` (SPEC.md §21.3).
+
+    - `dest_fs`: path delle destinazioni filesystem **in ordine di config**;
+    - `dest_s3`: target S3 come `(bucket, prefix)` in ordine di config.
+
+    Matching *longest-prefix-wins* sulla route: `root` va confrontato per
+    SEGMENTI (`/a/bc` non matcha `/a/b`), prefisso più lungo vincente. Nessuna
+    route che matcha `root` → TUTTE le destinazioni (anonime + nominate +
+    S3 globale): retrocompat identico a 0.10.0, il routing è opt-in.
+
+    Funzione pura (nessun accesso al filesystem): `root` e le route sono
+    normalizzati con expanduser + abspath. Il caller (daemon) passa la source
+    root scoperta; la scoperta resta fuori da qui.
+    """
+    p = os.path.abspath(os.path.expanduser(root))
+    best = None
+    for r in cfg.routes:
+        if p == r.src or r.src == os.sep or p.startswith(r.src + os.sep):
+            if best is None or len(r.src) > len(best.src):
+                best = r
+    if best is None:
+        return (list(cfg.dests),
+                [(cfg.s3.bucket, cfg.s3.prefix)] if cfg.s3 else [])
+    return list(best.dests), list(best.s3)
+
+
 def _build_s3(raw, origin):
     """Validazione fail-fast del blocco `s3_*` → S3Config (SPEC.md §18.1).
 
