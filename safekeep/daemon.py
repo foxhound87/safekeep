@@ -18,10 +18,12 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 
 from .config import (
     ConfigError,
     dest_path,
+    dests_for_source,
     discover_projects,
     parse_config,
     parse_sync,
@@ -309,6 +311,8 @@ class Daemon:
         self.clock = clock
         self.cfg = None
         self.s3 = None                  # S3Destination | None (SPEC.md §18)
+        self._s3_cache = {}             # s3://bucket/prefisso → S3Destination (§21.5)
+        self._routes_warned = set()     # route inutilizzate già avvisate (§12)
         self.s3_secret_perms_bad = False    # secret inline con perms > 0600
         self._s3_perms_warned = False       # warning una-tantum già emesso
         self.projects = []
@@ -345,6 +349,8 @@ class Daemon:
         # e controllo chmod 600 del secret inline (§18.4 — il warning
         # runtime va emesso DOPO setup_logging, vedi log_s3_secret_perms)
         self.s3 = S3Destination(self.cfg.s3) if self.cfg.s3 else None
+        if self.s3 is not None:
+            self._s3_cache[self.s3.root] = self.s3   # globale = prima entry cache (§21.5)
         self.s3_secret_perms_bad = (
             self.s3 is not None
             and secret_perms_insecure(self.config_path, self.cfg.s3))
@@ -386,7 +392,34 @@ class Daemon:
             project = load_project(root, self.cfg)
             if project is not None:
                 self.projects.append(project)
+        self.warn_unused_routes()
         return self.projects
+
+    def warn_unused_routes(self):
+        """SPEC.md §12: una route che non matcha NESSUNA radice nota avvisa
+        (warning non fatale): in auto-discovery la source root può non essere
+        ancora agganciata e al rescan 24h la route può diventare attiva.
+
+        Radici note = le `source` del config (o `$HOME` in auto-discovery) più
+        le source root dei progetti scoperti. Warning una-tantum per riga per
+        daemon: `load_projects` gira anche a ogni reload di `.sync`.
+        """
+        if not self.cfg.routes:
+            return
+        roots = {os.path.realpath(os.path.abspath(os.path.expanduser(r)))
+                 for r in (self.cfg.sources or [os.path.expanduser('~')])}
+        roots |= {p.source_root for p in self.projects}
+        for r in self.cfg.routes:
+            src = os.path.realpath(r.src)
+            if any(root == src or root.startswith(src + os.sep)
+                   for root in roots):
+                continue
+            if (src, r.lineno) not in self._routes_warned:
+                self._routes_warned.add((src, r.lineno))
+                log.warning('route %s (riga %d) non corrisponde ad alcuna source '
+                            'root nota: nessun progetto la usa — al prossimo '
+                            'rescan potrebbe agganciarsi (SPEC.md §12)',
+                            r.src, r.lineno)
 
     def classify_roots(self, roots, auto=False):
         """Split radici locali (fswatch) vs su volume di rete (polling, §20.1).
@@ -415,16 +448,57 @@ class Daemon:
             log.info('nessuna radice locale rimasta: fswatch viene fermato (§20.1)')
             self.close_proc()
 
+    # --- destinazioni per progetto (routing §21) -------------------------
+
+    def s3_for_root(self, root):
+        """La S3Destination con quell'etichetta `s3://bucket/prefisso`, o None."""
+        d = self._s3_cache.get(root)
+        if d is None and self.s3 is not None and getattr(self.s3, 'root', None) == root:
+            d = self._s3_cache[root] = self.s3
+        return d
+
+    def s3_dest(self, bucket, prefix):
+        """S3Destination per (bucket, prefix), cached per-route (§21.5).
+
+        Il client botocore è condiviso per bucket con la dest globale (credenziali
+        ed endpoint sono unici per config, §21.6): un bucket diverso da
+        `s3_bucket` crea il proprio client lazily — mai client multipli per lo
+        stesso bucket. Senza extra `safekeep[s3]` → S3ExtraMissing fail-fast,
+        come da sempre (§18.1).
+        """
+        root = 's3://' + bucket + ('/' + prefix if prefix else '')
+        d = self.s3_for_root(root)
+        if d is None:
+            shared = None
+            scfg = getattr(self.s3, 'cfg', None)
+            if scfg is not None and scfg.bucket == bucket:
+                shared = self.s3.client()          # stesso client per bucket
+            d = S3Destination(replace(self.cfg.s3, bucket=bucket, prefix=prefix),
+                              client=shared)
+            self._s3_cache[root] = d
+        return d
+
+    def project_targets(self, project):
+        """`(dest_fs, dest_s3)` del progetto (SPEC.md §21.3): solo le dest della
+        route che vince sulla sua source root (longest-prefix-wins); nessuna
+        route → TUTTE le destinazioni (default retrocompat 0.10.0). `dest_s3`
+        è la lista di destinazioni S3 (cached per bucket/prefix, §21.5)."""
+        fs, s3specs = dests_for_source(project.source_root, self.cfg)
+        return fs, [self.s3_dest(bucket, prefix) for bucket, prefix in s3specs]
+
     def reconcile_all(self):
         total = sum(self.reconcile(p) for p in self.projects)
         log.info('reconcile: %d copie su %d progetto/i', total, len(self.projects))
         return total
 
     def reconcile(self, project):
-        """Walk + copie su ogni dest pronta (§10.1); dest assente o con errore
-        di mount → pending con backoff (§8.3, CR-05). La dest S3 (§18) segue
-        lo stesso percorso: HeadBucket offline o errore di rete → pending."""
-        ready, absent = partition_dests(self.cfg.dests)
+        """Walk + copie su ogni dest pronta del PROGETTO (§10.1/§21.3: solo le
+        dest della sua route, o tutte se senza route); dest assente o con errore
+        di mount → pending con backoff (§8.3, CR-05). Le dest S3 del progetto
+        (§18/§21.5) seguono lo stesso percorso: HeadBucket offline o errore di
+        rete → pending."""
+        dests, s3dests = self.project_targets(project)
+        ready, absent = partition_dests(dests)
         for dest in absent:
             self.mark_pending(project, dest)
         copied = 0
@@ -443,26 +517,26 @@ class Daemon:
                 # ENODEV/EBUSY/ENOSPC: questa dest va in pending, le altre
                 # proseguono (il detail è già stato loggato dal copier)
                 self.mark_pending(project, dest)
-        if self.s3 is not None:
-            if self.s3.state() != 'ok':
-                self.mark_pending(project, self.s3.root)   # offline → §8.3
+        for s3 in s3dests:
+            if s3.state() != 'ok':
+                self.mark_pending(project, s3.root)   # offline → §8.3
+                continue
+            stats = {}
+            try:
+                copied += reconcile_project(
+                    project.root, s3.root, project.matcher,
+                    self.cfg.layout, s3.dest_path, stats=stats,
+                    dest_base=project.source_root,
+                    copy_fn=s3.copy, needs_copy_fn=s3.needs_copy)
+            except OSError as e:
+                # errore di rete nato a metà walk (ENODEV → pending) oppure
+                # auth/richiesta (EACCES → solo log): mai crash del daemon
+                log.warning('reconcile %s → %s fallito: %s',
+                            project.name, s3.root, e)
+                self.mark_pending(project, s3.root)
             else:
-                stats = {}
-                try:
-                    copied += reconcile_project(
-                        project.root, self.s3.root, project.matcher,
-                        self.cfg.layout, self.s3.dest_path, stats=stats,
-                        dest_base=project.source_root,
-                        copy_fn=self.s3.copy, needs_copy_fn=self.s3.needs_copy)
-                except OSError as e:
-                    # errore di rete nato a metà walk (ENODEV → pending) oppure
-                    # auth/richiesta (EACCES → solo log): mai crash del daemon
-                    log.warning('reconcile %s → %s fallito: %s',
-                                project.name, self.s3.root, e)
-                    self.mark_pending(project, self.s3.root)
-                else:
-                    if stats.get('dest_pendente'):
-                        self.mark_pending(project, self.s3.root)
+                if stats.get('dest_pendente'):
+                    self.mark_pending(project, s3.root)
         return copied
 
     def sync_once(self, dry_run=False, only=None, prune=False):
@@ -475,7 +549,8 @@ class Daemon:
         for project in self.projects:
             if only and project.root != only_abs and project.name != only:
                 continue
-            ready, absent = partition_dests(self.cfg.dests)
+            dests, s3dests = self.project_targets(project)
+            ready, absent = partition_dests(dests)
             stats = {}
             for dest in ready:
                 try:
@@ -489,17 +564,17 @@ class Daemon:
                     stats['rimossi'] = stats.get('rimossi', 0) + prune_project(
                         project.root, dest, project.matcher, self.cfg.layout,
                         dest_path, dest_base=project.source_root, dry_run=dry_run)
-            if self.s3 is not None:
+            for s3 in s3dests:
                 try:
                     reconcile_project(
-                        project.root, self.s3.root, project.matcher,
-                        self.cfg.layout, self.s3.dest_path,
+                        project.root, s3.root, project.matcher,
+                        self.cfg.layout, s3.dest_path,
                         stats=stats, dry_run=dry_run,
                         dest_base=project.source_root,
-                        copy_fn=self.s3.copy, needs_copy_fn=self.s3.needs_copy)
+                        copy_fn=s3.copy, needs_copy_fn=s3.needs_copy)
                 except OSError as e:
                     log.warning('reconcile %s → %s fallito: %s',
-                                project.name, self.s3.root, e)
+                                project.name, s3.root, e)
                 # nessun prune su S3 (SPEC §18.2): `--prune` tocca solo le dest fs
             rows.append((project, stats, len(absent)))
         return rows
@@ -514,9 +589,11 @@ class Daemon:
 
     def dest_ready(self, dest) -> bool:
         """Stato di una dest ai fini del retry pending (SPEC.md §8.3/§18.3):
-        fs → stat del mountpoint (`dest_state`), S3 → HeadBucket con cache 30s."""
-        if self.s3 is not None and dest == self.s3.root:
-            return self.s3.state() == 'ok'
+        fs → stat del mountpoint (`dest_state`), S3 → HeadBucket con cache 30s
+        (l'etichetta `s3://bucket/prefisso` risale la cache per-route, §21.5)."""
+        s3 = self.s3_for_root(dest)
+        if s3 is not None:
+            return s3.state() == 'ok'
         return dest_state(dest) == 'ok'
 
     # --- fswatch ---------------------------------------------------------
@@ -769,13 +846,16 @@ class Daemon:
         log.info('nessun progetto seguito in %s (.sync rimosso o nuovo)', root)
 
     def _copy(self, src, project, is_link_dir=False):
-        """Copia su ogni dest pronta; dest assente o errore di mount → pending
-        (§8.3); altri errori I/O → solo log (l'evento non deve mettere la dest
-        in pending: al prossimo reconcile il file viene ritentato, CR-05)."""
+        """Copia su ogni dest pronta del PROGETTO (routing §21.3: solo le dest
+        della sua route, o tutte se senza route); dest assente o errore di
+        mount → pending (§8.3); altri errori I/O → solo log (l'evento non deve
+        mettere la dest in pending: al prossimo reconcile il file viene
+        ritentato, CR-05)."""
         # rel rispetto alla radice `source` (non del progetto): il path dest
         # include il segmento del progetto, come in reconcile (SPEC.md §4.3)
         rel = os.path.relpath(normalize(src), project.source_root)
-        for dest in self.cfg.dests:
+        dests, s3dests = self.project_targets(project)
+        for dest in dests:
             if dest_state(dest) != 'ok':
                 self.mark_pending(project, dest)
                 continue
@@ -792,24 +872,23 @@ class Daemon:
                     self.mark_pending(project, dest)
                 else:
                     log_copy_error(src, dst, e)
-        if self.s3 is not None:
+        for s3 in s3dests:
             # HeadBucket con cache 30s: offline → pending senza toccare la rete
             # a ogni evento (SPEC §18.3)
-            if self.s3.state() != 'ok':
-                self.mark_pending(project, self.s3.root)
-                return
-            dst = self.s3.dest_path(self.s3.root, project.source_root, rel,
-                                    self.cfg.layout)
+            if s3.state() != 'ok':
+                self.mark_pending(project, s3.root)
+                continue
+            dst = s3.dest_path(s3.root, project.source_root, rel, self.cfg.layout)
             try:
                 if is_link_dir:
-                    self.s3.copy(src, dst)      # symlink: object zero-byte
-                elif self.s3.needs_copy(src, dst) and self.s3.copy(src, dst):
+                    s3.copy(src, dst)            # symlink: object zero-byte
+                elif s3.needs_copy(src, dst) and s3.copy(src, dst):
                     log.debug('copiato %s → %s', src, dst)
             except OSError as e:
                 if e.errno in DEST_DOWN_ERRNOS:
                     log.warning('errore di rete %s → %s: %s: dest S3 in pending',
                                 src, dst, e)
-                    self.mark_pending(project, self.s3.root)
+                    self.mark_pending(project, s3.root)
                 else:
                     log_copy_error(src, dst, e)
 
