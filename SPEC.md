@@ -120,7 +120,7 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 | `source` | path (ripetibile) | **opzionale** | radici da osservare; ogni radice è una "sorgente"; assente → **modalità auto-discovery** da `$HOME` (vedi §6); dir senza `.sync` = **non seguita** (vedi §4.1) |
 | `dest` | path (ripetibile) | **obbligatoria\*** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11); \* serve **almeno una `dest:` oppure `s3_bucket:`** (dest S3-compatible, §18). Forma nominata `dest <name>: <path>` (0.11.0): la dest è citabile nelle `route` (§21) e in `restore --dest <nome>` |
 | `dest <name>` | path (ripetibile) | opzionale | (0.11.0) destinazione **nominata**: stessa semantica della `dest:` anonima, ma il `<name>` la rende referenziabile nelle route (§21.2) e nei comandi; le dest anonime restano valide ma non sono citabili in route |
-| `route` | `src → dest-list` (ripetibile) | opzionale | (0.11.0) instrada la sorgente `src` su una o più destinazioni (nomi e/o target S3 `s3:<prefix>` / `s3://<bucket>/<prefix>`); **longest-prefix-wins** sulla source root; sorgente senza route → tutte le dest (default retrocompat); vedi §21 |
+| `route` | `src: dest-list` (ripetibile) | opzionale | (0.11.0) instrada la sorgente `src` su una o più destinazioni (nomi e/o target S3 `s3:<prefix>` / `s3://<bucket>/<prefix>`); **longest-prefix-wins** sulla source root; sorgente senza route: tutte le dest (default retrocompat); vedi §21 |
 | `layout` | `relative` \| `full` | `relative` | layout dei path di destinazione (vedi nota sotto) |
 | `defaults` | lista regole | builtin | regole di default a **bassa priorità** (sotto le regole globali e sotto `.sync`) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | livello di log su stderr + file di log |
@@ -158,7 +158,7 @@ Note:
     `~/Code/myapp/docs/a.md` → `<dest>/Users/<user>/Code/myapp/docs/a.md`.
 - **Routing destinazioni** (0.11.0, §21): le chiavi `dest <name>:` e `route`
   controllano **quale** destinazione riceve **quale** sorgente. Sorgente
-  senza route → tutte le destinazioni (anonime + nominate + S3), identico a
+  senza route: tutte le destinazioni (anonime + nominate + S3), identico a
   0.10.0. Il routing vive **solo** qui, mai nel `.sync` (§4.2/§11).
 
 Esempio completo di routing (copy-paste — destinazioni nominate, anonime,
@@ -177,11 +177,11 @@ s3_access_key: AKIA...
 s3_secret_key_env: SAFEKEEP_S3_SECRET
 
 # routing sorgente → destinazioni (longest-prefix-wins, §21.3)
-route ~/projects → nas
-route ~/Documents/notes → ext, nas
-route ~/code → s3:backup/code              # bucket my-bucket, prefisso backup/code
-route ~/archive → s3://other-bucket/old    # bucket ESPlicito diverso da s3_bucket
-route ~ → nas                              # default per tutto ciò che non ha route più specifica
+route ~/projects: nas
+route ~/Documents/notes: ext, nas
+route ~/code: s3:backup/code              # bucket my-bucket, prefisso backup/code
+route ~/archive: s3://other-bucket/old    # bucket ESPlicito diverso da s3_bucket
+route ~: nas                              # default per tutto ciò che non ha route più specifica
 ```
 
 Esempio commentato completo: [`examples/safekeep.example`](examples/safekeep.example).
@@ -1010,7 +1010,7 @@ illimitata della coda in memoria.
 | Route ambigua (stessa source root o stesso prefisso dichiarati due volte) | **fail-fast** al parse con numero di riga + elenco righe in conflitto (§21.3): nessuna precedenza implicita, l'utente deve rendere la route univoca |
 | Route verso destinazione inesistente (nome non dichiarato con `dest <name>:`) | **fail-fast** al parse con numero di riga + nome mancante (§21.3), come ogni chiave invalida di §3 |
 | Route su source root mai scoperta (prefisso che non corrisponde ad alcuna radice nota) | **warning non fatale** (route inutilizzata): in auto-discovery la source root può non essere ancora agganciata; al rescan 24h (§6) può diventare attiva — non è un errore |
-| `route ~ → x` in auto-discovery che matcherebbe TUTTO | **consentito** (§21.3): è il modo di esprimere il default per tutto ciò che non ha route più specifiche; il *longest-prefix-wins* fa vincere le route mirate (`route ~/code → …`) sui progetti pertinenti |
+| `route ~: x` in auto-discovery che matcherebbe TUTTO | **consentito** (§21.3): è il modo di esprimere il default per tutto ciò che non ha route più specifiche; il *longest-prefix-wins* fa vincere le route mirate (`route ~/code: …`) sui progetti pertinenti |
 | Sorgente senza route | va su **tutte** le destinazioni (anonime + nominate + S3) — default retrocompat, zero breaking (§21.1) |
 
 ---
@@ -1448,11 +1448,11 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   alberi di progetto non clonati sul disco. Skip visibili nel piano dry-run e
   nel conteggio dell'esecuzione, per tutte le origini (`fs` e `S3`).
 - **0.11.0** — **routing destinazioni** (§21, MINOR retrocompatibile): nuove
-  chiavi `dest <name>:` (destinazione **nominata**) e `route <src> → <dest-list>`
+  chiavi `dest <name>:` (destinazione **nominata**) e `route <src>: <dest-list>`
   in `~/.safekeep` (mai nel `.sync`, §4.2/§11) per instradare una sorgente su
   una o più destinazioni scelte, invece che su tutte. Matching **longest-prefix-wins**
-  sulla source root; route ambigua o verso destinazione inesistente → **fail-fast**
-  al parse; **sorgente senza route → tutte le dest** (default retrocompat, zero
+  sulla source root; route ambigua o verso destinazione inesistente: **fail-fast**
+  al parse; **sorgente senza route: tutte le dest** (default retrocompat, zero
   breaking). Route S3 per-route: `s3:<prefix>` (bucket = `s3_bucket` globale) e
   `s3://<bucket>/<prefix>` (bucket esplicito), con client S3 già cached per-bucket
   (§18). Niente rewriting path per-route: il layout dest globale resta invariato.
@@ -1889,24 +1889,30 @@ dest ext: /Volumes/EXFIT/safekeep-backup
 dest: /legacy/anonymous/path         # destinazione anonima (legacy, ancora valida)
 s3_bucket: my-bucket                 # legacy, ancora valido (§18)
 
-route ~/projects → nas               # sorgente su una sola destinazione
-route ~/Documents/notes → ext, nas   # sorgente su più destinazioni
-route ~/code → s3:backup/code        # sorgente su S3: bucket = s3_bucket, prefisso backup/code
+route ~/projects: nas               # sorgente su una sola destinazione
+route ~/Documents/notes: ext, nas   # sorgente su più destinazioni
+route ~/code: s3:backup/code        # sorgente su S3: bucket = s3_bucket, prefisso backup/code
 ```
 
 | Forma | Significato |
 |---|---|
 | `dest <name>: <path>` | destinazione filesystem **nominata**; `<name>` serve da riferimento nelle route, in `status`/`doctor`/`restore --dest` |
 | `dest: <path>` | destinazione **anonima** (legacy, §3): ancora valida, mai citabile in una route (non ha nome) |
-| `route <src> → <dest-list>` | instrada la sorgente `<src>` su **tutte** le destinazioni elencate in `<dest-list>` (nomi filesystem separati da virgola, e/o target S3) |
-| `route <src> → s3:<prefix>` | target S3 con **bucket = `s3_bucket` globale** (§18) e prefisso proprio `<prefix>` |
-| `route <src> → s3://<bucket>/<prefix>` | target S3 con **bucket esplicito** diverso da `s3_bucket`, prefisso `<prefix>` |
+| `route <src>: <dest-list>` | instrada la sorgente `<src>` su **tutte** le destinazioni elencate in `<dest-list>` (nomi filesystem separati da virgola, e/o target S3) |
+| `route <src>: s3:<prefix>` | target S3 con **bucket = `s3_bucket` globale** (§18) e prefisso proprio `<prefix>` |
+| `route <src>: s3://<bucket>/<prefix>` | target S3 con **bucket esplicito** diverso da `s3_bucket`, prefisso `<prefix>` |
 
 **Target S3 nelle route — due forme (decisioni §21.7):**
 
 - `s3:<prefix>` (senza bucket): usa il **bucket globale `s3_bucket`** + il
   prefisso `<prefix>`. Forma **minimale** raccomandata nella maggior parte
   dei casi: un solo bucket, route che differenziano solo il prefisso.
+  Il bucket **non si deduce dal path**: è per definizione quello di
+  `s3_bucket:` (una route S3 senza `s3_bucket:` nel file → `ConfigError`
+  con riga, fail-fast). Il prefisso della route è **letterale e completo**:
+  `s3_prefix` globale (§18) **non** si applica alle route — vale solo per la
+  dest S3 legacy senza route (`route <src>: s3:backup/code` → oggetti sotto
+  `backup/code/…` nel bucket, punto).
 - `s3://<bucket>/<prefix>` (bucket **esplicito**): forma **assoluta** che
   ricorda l'URI S3 standard e non collide con la forma breve. Serve quando la
   route deve finire su un bucket **diverso** da `s3_bucket`. La forma è
@@ -1930,12 +1936,12 @@ route ~/code → s3:backup/code        # sorgente su S3: bucket = s3_bucket, pre
 - **Route verso una destinazione inesistente** (nome non dichiarato con
   `dest <name>:`) → **errore fail-fast** al parse con **numero di riga** e
   nome della destinazione mancante (stessa filosofia di ogni chiave di §3).
-- **Sorgente senza route** → **tutte** le destinazioni (anonime + nominate +
+- **Sorgente senza route**: **tutte** le destinazioni (anonime + nominate +
   S3 globale): identico a 0.10.0, zero breaking (§21.1).
-- `route ~ → x` in auto-discovery `$HOME` matcherebbe **tutto**: è
+- `route ~: x` in auto-discovery `$HOME` matcherebbe **tutto**: è
   **consentito** ed è il modo di esprimere un "default per tutto ciò che non
   ha una route più specifica" — il *longest-prefix-wins* fa sì che una route
-  più mirata (`route ~/code → s3:backup/code`) vinca su `route ~ → nas` per
+  più mirata (`route ~/code: s3:backup/code`) vinca su `route ~: nas` per
   quei progetti. Una route su `$HOME` non è dunque un errore: è la regola di
   default che le route specifiche overrideano.
 

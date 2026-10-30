@@ -63,21 +63,25 @@ dest: /Volumes/NAS/generale
 # Le dest anonime (senza nome) restano valide e non sono citabili.
 # dest nas: /Volumes/NAS/generale
 #
-# Sintassi:  route <sorgente> → <dest>[, <dest>…]
+# Sintassi:  route <sorgente>: <dest>[, <dest>…]
 # La sorgente è una radice progetto (source esplicita o auto-discovery);
 # il match è longest-prefix sulla radice: la route più specifica vince.
 # Più route che matchano la stessa radice = errore fail-fast (no ambiguità);
 # una route verso una dest inesistente = errore con numero di riga.
 #
-# route /Users/REPLACEME/Code → nas                # solo sulla dest "nas"
-# route /Users/REPLACEME/Documents/notes → nas, ext  # mirror su due dest
+# route /Users/REPLACEME/Code: nas                # solo sulla dest "nas"
+# route /Users/REPLACEME/Documents/notes: nas, ext  # mirror su due dest
 #
-# Dest S3 in route — forma breve (prefisso sul bucket globale s3_bucket):
-# route /Users/REPLACEME/Code/secrets → s3:private/secrets
-# oppure bucket/URI esplicito (bucket diverso dal globale):
-# route /Users/REPLACEME/Code → s3://other-bucket/code
+# Dest S3 in route — forma breve: il bucket è PER DEFINIZIONE quello di
+# `s3_bucket:` globale (non si deduce dal path; route s3: senza s3_bucket:
+# nel file = errore fail-fast), il prefisso è letterale e completo
+# (`s3_prefix` globale NON si applica alle route):
+# route /Users/REPLACEME/Code/secrets: s3:private/secrets
+#   → oggetti sotto  my-backup-bucket/private/secrets/…
+# oppure bucket/URI esplicito (diverso dal globale):
+# route /Users/REPLACEME/Code: s3://other-bucket/code
 #
-# ATTENZIONE: una route su ~ (es. `route /Users/REPLACEME → nas`) è
+# ATTENZIONE: una route su ~ (es. `route /Users/REPLACEME: nas`) è
 # LEGITTIMA ed è il modo di dire "tutto ciò che non ha route più
 # specifiche va su nas" — le route più specifiche vincono comunque.
 
