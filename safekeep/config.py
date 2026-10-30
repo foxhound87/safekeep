@@ -10,7 +10,7 @@ Una riga a forma di chiave non nota (`dest:`, `-dest:`, …) resta invalida: con
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .matcher import BUILTIN_RULES, Matcher, parse_rule, strip_comment
 
@@ -39,10 +39,26 @@ class S3Config:
     tls_check: bool = True
 
 
+@dataclass
+class Route:
+    """Riga `route <src>: <dest-list>` già validata (SPEC.md §21.2/§21.3).
+
+    `dests` e `s3` sono i target risolti in ordine di config: path fs (con
+    `~` espanso) e `(bucket, prefix)` S3. `lineno` serve alla diagnostica
+    (route inutilizzata, §12).
+    """
+    src: str                        # sorgente normalizzata (abspath, no fs)
+    dests: list = field(default_factory=list)   # path fs (str), ordine config
+    s3: list = field(default_factory=list)      # (bucket, prefix), ordine config
+    lineno: int = 0
+
+
 class GlobalConfig:
     def __init__(self):
         self.sources = []             # radici osservate (ripetibili, opzionali)
         self.dests = []               # destinazioni globali (ripetibili) — le UNICHE
+        self.dest_names = {}          # nome → path (dest <name>:, §21.2)
+        self.routes = []              # list[Route] (§21), ordine di config
         self.s3 = None                # S3Config | None (una sola dest S3, §18)
         self.layout = 'relative'      # relative | full
         self.defaults = []            # regole a bassa priorità (list[Rule])
@@ -64,6 +80,15 @@ _SYNC_KEY = re.compile(r'(name|defaults|include|exclude)\s*:\s*(.*)')
 _CONF_KEY = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)')
 # Riga a forma di chiave (`dest:`, `-dest:`, `foo:`): NON è una riga nuda.
 _KEY_SHAPE = re.compile(r'[A-Za-z_-][A-Za-z0-9_-]*\s*:')
+# `dest <name>: <path>` e `route <src>: <dest-list>` (SPEC.md §21.2): il ramo
+# dedicato deve matchare PRIMA di _CONF_KEY, che di queste righe non cattura
+# nemmeno il `:` (c'è un nome/`~` dopo la chiave) e le respingerebbe come
+# righe invalide. Il `\s+` dopo la chiave tiene fuori `dest:`/`dest5:` —
+# gestite da _CONF_KEY come sempre (le forme legacy restano invariate).
+_DEST_NAMED = re.compile(r'dest\s+(.*)')
+_ROUTE_LINE = re.compile(r'route\s+(.*)')
+# nome di una destinazione nominata: token semplice, niente spazi/coloni
+_DEST_NAME = re.compile(r'[A-Za-z0-9_-]+$')
 
 # Chiavi del blocco S3 (SPEC.md §18.1): `s3_*` fuori da questo insieme è
 # errore fail-fast, come ogni altra chiave ignota del config globale.
@@ -148,9 +173,20 @@ def parse_config(text, origin='config'):
     S3-compatible, SPEC.md §18 — backward compat: senza `s3_*` nulla cambia)."""
     cfg = GlobalConfig()
     s3raw = {}                      # chiave → (valore, riga) del blocco s3_*
+    routes_raw = []                 # (riga, resto) delle righe `route` (§21.2)
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = strip_comment(raw).strip()
         if not line:
+            continue
+        m = _ROUTE_LINE.match(line)
+        if m:
+            # risoluzione differita (dopo il ciclo): nomi dest e `s3_bucket`
+            # possono essere dichiarati DOPO la route (forward reference)
+            routes_raw.append((lineno, m.group(1)))
+            continue
+        m = _DEST_NAMED.match(line)
+        if m and not m.group(1).lstrip().startswith(':'):
+            _parse_named_dest(cfg, m.group(1), lineno, origin, raw)
             continue
         m = _CONF_KEY.match(line)
         if not m:
@@ -168,6 +204,11 @@ def parse_config(text, origin='config'):
             if not val:
                 raise ConfigError(f'{origin}:{lineno}: dest vuota')
             cfg.dests.append(os.path.expanduser(val))
+        elif key == 'route':
+            # `route: <dest-list>` senza sorgente: la forma corretta ha uno
+            # spazio dopo la chiave ed è gestita da _ROUTE_LINE sopra
+            raise ConfigError(f'{origin}:{lineno}: route senza sorgente '
+                              f'(serve `route <src>: <dest-list>`)')
         elif key.startswith('s3_'):
             if key not in _S3_KEYS:
                 raise ConfigError(f'{origin}:{lineno}: chiave s3 sconosciuta: {key}')
@@ -203,11 +244,149 @@ def parse_config(text, origin='config'):
         else:
             raise ConfigError(f'{origin}:{lineno}: chiave sconosciuta: {key}')
     cfg.s3 = _build_s3(s3raw, origin)
+    _resolve_routes(cfg, routes_raw, origin)
     if not cfg.dests and (cfg.s3 is None or not cfg.s3.bucket):
         raise ConfigError(f'{origin}: nessuna dest: serve almeno una riga '
                           f'`dest: <path>` oppure `s3_bucket: <nome>` '
                           f'(esempio: examples/safekeep.example)')
     return cfg
+
+
+def _parse_named_dest(cfg, rest, lineno, origin, raw):
+    """`dest <name>: <path>` → destinazione nominata (SPEC.md §21.2).
+
+    Il nome la rende citabile nelle route; il path (con `~` espanso) finisce
+    in `cfg.dests` esattamente come una `dest:` anonima. Fail-fast con riga.
+    """
+    if '\0' in rest:
+        raise ConfigError(f'{origin}:{lineno}: valore con carattere NUL: dest')
+    name, colon, path = rest.partition(':')
+    if not colon:
+        raise ConfigError(f'{origin}:{lineno}: destinazione nominata malformata '
+                          f'(serve `dest <nome>: <path>`): {raw.strip()}')
+    name = name.strip()
+    if not _DEST_NAME.match(name):
+        raise ConfigError(f'{origin}:{lineno}: nome dest non valido: {name!r} '
+                          f'(ammissibili: A-Za-z0-9_-)')
+    path = path.strip()
+    if not path:
+        raise ConfigError(f'{origin}:{lineno}: dest {name!r} senza percorso')
+    path = os.path.expanduser(path)
+    if name in cfg.dest_names:
+        raise ConfigError(f'{origin}:{lineno}: dest {name!r} già dichiarata')
+    cfg.dest_names[name] = path
+    cfg.dests.append(path)
+
+
+def _s3_route_prefix(raw, lineno, origin):
+    """Prefisso S3 di una route: LETTERALE (SPEC.md §21.2) — `s3_prefix`
+    globale NON si applica — normalizzato come §18.1 (niente `/` ai bordi)."""
+    prefix = raw.strip().strip('/')
+    if not prefix:
+        raise ConfigError(f'{origin}:{lineno}: prefisso S3 vuoto nella route')
+    if '..' in prefix.split('/'):
+        raise ConfigError(f'{origin}:{lineno}: prefisso S3 con "..": '
+                          f'{raw!r} non è ammesso (SPEC.md §21.2)')
+    return prefix
+
+
+def _resolve_routes(cfg, raw_routes, origin):
+    """Valida e risolve le righe `route` → `cfg.routes` (SPEC.md §21.3).
+
+    Va DOPO il ciclo principale di `parse_config` (e dopo `_build_s3`): i
+    nomi dest e `s3_bucket` possono essere dichiarati dopo la route.
+    Ogni errore riporta origine e riga, come tutto il config globale.
+    """
+    if not raw_routes:
+        return
+    seen = {}                       # sorgente normalizzata → riga di dichiarazione
+    for lineno, rest in raw_routes:
+        if '\0' in rest:
+            raise ConfigError(f'{origin}:{lineno}: valore con carattere NUL: route')
+        src_raw, colon, destlist = rest.partition(':')
+        if not colon:
+            raise ConfigError(f'{origin}:{lineno}: route malformata '
+                              f'(serve `route <src>: <dest-list>`)')
+        src_raw = src_raw.strip()
+        if not src_raw:
+            raise ConfigError(f'{origin}:{lineno}: route senza sorgente')
+        src = os.path.expanduser(src_raw)
+        if not os.path.isabs(src):
+            raise ConfigError(f'{origin}:{lineno}: route sorgente non assoluta: '
+                              f'{src_raw!r}')
+        src = os.path.abspath(src)
+        if src in seen:
+            # stessa sorgente dichiarata due volte → ambiguità (§21.3); due
+            # route che si SOVRAPPONGONO ma non coincidono restano legittime
+            # (longest-prefix-wins, §21.3) — solo l'uguaglianza è errore
+            raise ConfigError(f'{origin}:{lineno}: route duplicata per {src!r} '
+                              f'(già a riga {seen[src]}): nessuna ambiguità '
+                              f'tollerata (SPEC.md §21.3)')
+        seen[src] = lineno
+        if not destlist.strip():
+            raise ConfigError(f'{origin}:{lineno}: route {src!r} senza destinazioni')
+        route = Route(src=src, lineno=lineno)
+        seen_tok = set()             # duplicati nella lista → set, ordine config
+        for tok in (t.strip() for t in destlist.split(',')):
+            if not tok:
+                raise ConfigError(f'{origin}:{lineno}: route con destinazione vuota')
+            if tok in seen_tok:
+                continue
+            seen_tok.add(tok)
+            if tok.startswith('s3://'):
+                bucket, slash, prefix = tok[len('s3://'):].partition('/')
+                if not bucket or not slash:
+                    raise ConfigError(f'{origin}:{lineno}: route s3:// malformata: '
+                                      f'{tok!r} (serve `s3://<bucket>/<prefisso>`)')
+                if cfg.s3 is None:
+                    # §21.2: s3_access_key obbligatorio se esiste una route S3
+                    raise ConfigError(f'{origin}:{lineno}: route S3 senza '
+                                      f'credenziali: serve il blocco s3_* con '
+                                      f's3_access_key (SPEC.md §18.1/§21.2)')
+                route.s3.append((bucket, _s3_route_prefix(prefix, lineno, origin)))
+            elif tok.startswith('s3:'):
+                if cfg.s3 is None:
+                    # forma breve: il bucket è PER DEFINIZIONE il globale (§21.7b)
+                    raise ConfigError(f'{origin}:{lineno}: route {tok!r} senza '
+                                      f's3_bucket: serve `s3_bucket: <nome>` nel '
+                                      f'config (SPEC.md §21.2)')
+                route.s3.append((cfg.s3.bucket,
+                                 _s3_route_prefix(tok[3:], lineno, origin)))
+            else:
+                if tok not in cfg.dest_names:
+                    raise ConfigError(f'{origin}:{lineno}: route verso '
+                                      f'destinazione inesistente: {tok!r} — '
+                                      f'dichiarala con `dest {tok}: <path>` '
+                                      f'(SPEC.md §21.3)')
+                route.dests.append(cfg.dest_names[tok])
+        cfg.routes.append(route)
+
+
+def dests_for_source(root, cfg):
+    """`(dest_fs, dest_s3)` per la sorgente `root` (SPEC.md §21.3).
+
+    - `dest_fs`: path delle destinazioni filesystem **in ordine di config**;
+    - `dest_s3`: target S3 come `(bucket, prefix)` in ordine di config.
+
+    Matching *longest-prefix-wins* sulla route: `root` va confrontato per
+    SEGMENTI (`/a/bc` non matcha `/a/b`), prefisso più lungo vincente. Nessuna
+    route che matcha `root` → TUTTE le destinazioni (anonime + nominate +
+    S3 globale): retrocompat identico a 0.10.0, il routing è opt-in.
+
+    Funzione pura (nessun accesso al filesystem): `root` e le route sono
+    normalizzati con expanduser + abspath. Il caller (daemon) passa la source
+    root scoperta; la scoperta resta fuori da qui.
+    """
+    p = os.path.abspath(os.path.expanduser(root))
+    best = None
+    for r in cfg.routes:
+        if p == r.src or r.src == os.sep or p.startswith(r.src + os.sep):
+            if best is None or len(r.src) > len(best.src):
+                best = r
+    if best is None:
+        return (list(cfg.dests),
+                [(cfg.s3.bucket, cfg.s3.prefix)] if cfg.s3 else [])
+    return list(best.dests), list(best.s3)
 
 
 def _build_s3(raw, origin):
