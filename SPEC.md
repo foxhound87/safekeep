@@ -118,7 +118,9 @@ Sintassi: `chiave: valore` (una per riga), commenti `#`, blank lines ignorati.
 | Chiave | Tipo | Default | Descrizione |
 |---|---|---|---|
 | `source` | path (ripetibile) | **opzionale** | radici da osservare; ogni radice è una "sorgente"; assente → **modalità auto-discovery** da `$HOME` (vedi §6); dir senza `.sync` = **non seguita** (vedi §4.1) |
-| `dest` | path (ripetibile) | **obbligatoria\*** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11); \* serve **almeno una `dest:` oppure `s3_bucket:`** (dest S3-compatible, §18) |
+| `dest` | path (ripetibile) | **obbligatoria\*** | destinazioni di **tutti** i progetti: le uniche esistenti (i `.sync` non possono aggiungerne o rimuoverne, vedi §4.2 e §11); \* serve **almeno una `dest:` oppure `s3_bucket:`** (dest S3-compatible, §18). Forma nominata `dest <name>: <path>` (0.11.0): la dest è citabile nelle `route` (§21) e in `restore --dest <nome>` |
+| `dest <name>` | path (ripetibile) | opzionale | (0.11.0) destinazione **nominata**: stessa semantica della `dest:` anonima, ma il `<name>` la rende referenziabile nelle route (§21.2) e nei comandi; le dest anonime restano valide ma non sono citabili in route |
+| `route` | `src → dest-list` (ripetibile) | opzionale | (0.11.0) instrada la sorgente `src` su una o più destinazioni (nomi e/o target S3 `s3:<prefix>` / `s3://<bucket>/<prefix>`); **longest-prefix-wins** sulla source root; sorgente senza route → tutte le dest (default retrocompat); vedi §21 |
 | `layout` | `relative` \| `full` | `relative` | layout dei path di destinazione (vedi nota sotto) |
 | `defaults` | lista regole | builtin | regole di default a **bassa priorità** (sotto le regole globali e sotto `.sync`) |
 | `log_level` | `debug`\|`info`\|`warn`\|`error` | `info` | livello di log su stderr + file di log |
@@ -154,6 +156,33 @@ Note:
     sovrappongono.
   - `full`: `<dest>/<path assoluto senza / iniziale>`:
     `~/Code/myapp/docs/a.md` → `<dest>/Users/<user>/Code/myapp/docs/a.md`.
+- **Routing destinazioni** (0.11.0, §21): le chiavi `dest <name>:` e `route`
+  controllano **quale** destinazione riceve **quale** sorgente. Sorgente
+  senza route → tutte le destinazioni (anonime + nominate + S3), identico a
+  0.10.0. Il routing vive **solo** qui, mai nel `.sync` (§4.2/§11).
+
+Esempio completo di routing (copy-paste — destinazioni nominate, anonime,
+legacy e route S3):
+
+```ini
+# destinazioni filesystem nominate (citabili nelle route)
+dest nas: /Volumes/NAS/backup
+dest ext: /Volumes/EXFIT/safekeep-backup
+# destinazione anonima legacy (ancora valida, non citabile in route)
+dest: /legacy/anonymous/path
+
+# S3 globale legacy (ancora valida): bucket di default per le route s3:<prefix>
+s3_bucket: my-bucket
+s3_access_key: AKIA...
+s3_secret_key_env: SAFEKEEP_S3_SECRET
+
+# routing sorgente → destinazioni (longest-prefix-wins, §21.3)
+route ~/projects → nas
+route ~/Documents/notes → ext, nas
+route ~/code → s3:backup/code              # bucket my-bucket, prefisso backup/code
+route ~/archive → s3://other-bucket/old    # bucket ESPlicito diverso da s3_bucket
+route ~ → nas                              # default per tutto ciò che non ha route più specifica
+```
 
 Esempio commentato completo: [`examples/safekeep.example`](examples/safekeep.example).
 
@@ -676,7 +705,7 @@ bin/safekeep.py <comando> [--config PATH] [--project PATH] [--json] [-v]
 |---|---|---|
 | `run` | daemon: reconcile iniziale + watch fswatch + dispatch eventi + timer 24h | 0 su SIGTERM pulito; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
 | `sync-once` | un singolo passaggio: walk sorgente, copia ciò che differisce, esce; `--prune` rimuove in più dalla dest i file non più inclusi (vedi sotto) | 0 se tutto ok; 1 se la config è invalida o una dest è dentro la sorgente/$HOME |
-| `restore` | ripristina dall'**ultima copia** in una dest (§19): dry-run **sempre** il default, `--force` per scrivere; selezione via `PATH`/`GLOB` o menu interattivo; `--from {local,s3,nas}` con auto-detect del candidato unico | 0 se tutto ok; 1 se la config è invalida, l'origine del ripristino non è determinabile o nessun argomento matcha |
+| `restore` | ripristina dall'**ultima copia** in una dest (§19): dry-run **sempre** il default, `--force` per scrivere; selezione via `PATH`/`GLOB` o menu interattivo; `--dest <nome>` (dest nominata, 0.11.0, §21.4) con precedenza su `--from {local,s3,nas}`; auto-detect del candidato unico | 0 se tutto ok; 1 se la config è invalida, l'origine del ripristino non è determinabile o nessun argomento matcha |
 | `status` | sola lettura: config path, modalità (`source` / auto-discovery da `$HOME`), source, progetti scoperti con N regole, ogni dest con `dest_state` (ok/absent) | 0 se la config è valida |
 | `doctor` | diagnostica: config, dest non sotto source, fswatch + monitor di piattaforma, python ≥ 3.9, probe TCC, lint plist ed eseguibile del processo ancora su disco (solo macOS, §14.4), residui tmp, limite inotify (solo Linux); con `--json` la stessa diagnostica come documento JSON su stdout (§9.1) | 1 se un check **fatale** fallisce |
 | `daemon {install,start,stop,status,uninstall}` | gestione dell'agent di boot (§14.3): `install [--enable-linger] [--dry-run]` preflight + render della unit da template embedded (idempotente, non avvia); `start`/`stop` caricano/scaricano la unit; `status` = sola lettura; `uninstall [--purge]` rimuove la unit (`--purge` toglie anche `~/.safekeep` e i log) | 0 se tutto ok; 1 se il preflight fallisce, la unit non è installata (`start`/`status`) o l'agent non è in esecuzione (`status`) |
@@ -932,7 +961,13 @@ illimitata della coda in memoria.
   destinazioni per costruzione** (§4.2) — la sua sintassi non prevede chiavi di destinazione,
   quindi un `.sync` malevolo incluso in un repo clonato da terzi non può far scrivere il
   backup altrove. Le righe `dest:`/`-dest:` in un `.sync` sono righe invalide e vengono
-  rifiutate (warning con `log_level: info`, errore con `log_level: debug`).
+  rifiutate (warning con `log_level: info`, errore con `log_level: debug`). Questo vale
+  **anche per il routing** (§21.1, 0.11.0): le chiavi `route`/`dest <name>:` vivono **solo**
+  in `~/.safekeep`, mai in un `.sync` — il routing non abbassa il livello di confine né
+  aggiunge superficie di scrittura: la destinazione finale resta comunque una `dest`
+  dichiarata qui, il routing sceglie solo *quale* di queste riceve una sorgente. Il
+  containment "dest sotto source → errore fatale" e la semantica **mai-cancellare**
+  restano invariati per ogni route.
 - **`restore` scrive solo dentro le source** (containment **invertito** rispetto al
   CR-01 di §7.2): il target è sempre il path originale, niente `--to`, e un path
   ricostruito che esce dalla source del progetto viene rifiutato (EACCES + skip).
@@ -972,6 +1007,11 @@ illimitata della coda in memoria.
 | `restore` da una dest non montata | errore con l'elenco dei candidati (§19.3): un'origine dichiarata non viene mai ignorata silenziosamente — monta il volume e riprova |
 | `restore` con PATH/GLOB senza match | exit ≠ 0 con messaggio (nessun file ripristinato, nessuna scrittura parziale decisa a partire da zero match) |
 | `restore` verso una cartella protetta TCC senza FDA | `EACCES`/`Operation not permitted` per-file, log + hint FDA (Full Disk Access, §11/§14.4) — il resto del piano prosegue |
+| Route ambigua (stessa source root o stesso prefisso dichiarati due volte) | **fail-fast** al parse con numero di riga + elenco righe in conflitto (§21.3): nessuna precedenza implicita, l'utente deve rendere la route univoca |
+| Route verso destinazione inesistente (nome non dichiarato con `dest <name>:`) | **fail-fast** al parse con numero di riga + nome mancante (§21.3), come ogni chiave invalida di §3 |
+| Route su source root mai scoperta (prefisso che non corrisponde ad alcuna radice nota) | **warning non fatale** (route inutilizzata): in auto-discovery la source root può non essere ancora agganciata; al rescan 24h (§6) può diventare attiva — non è un errore |
+| `route ~ → x` in auto-discovery che matcherebbe TUTTO | **consentito** (§21.3): è il modo di esprimere il default per tutto ciò che non ha route più specifiche; il *longest-prefix-wins* fa vincere le route mirate (`route ~/code → …`) sui progetti pertinenti |
+| Sorgente senza route | va su **tutte** le destinazioni (anonime + nominate + S3) — default retrocompat, zero breaking (§21.1) |
 
 ---
 
@@ -1407,6 +1447,17 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   destinazione immediata esiste già, altrimenti saltato — niente creazione di
   alberi di progetto non clonati sul disco. Skip visibili nel piano dry-run e
   nel conteggio dell'esecuzione, per tutte le origini (`fs` e `S3`).
+- **0.11.0** — **routing destinazioni** (§21, MINOR retrocompatibile): nuove
+  chiavi `dest <name>:` (destinazione **nominata**) e `route <src> → <dest-list>`
+  in `~/.safekeep` (mai nel `.sync`, §4.2/§11) per instradare una sorgente su
+  una o più destinazioni scelte, invece che su tutte. Matching **longest-prefix-wins**
+  sulla source root; route ambigua o verso destinazione inesistente → **fail-fast**
+  al parse; **sorgente senza route → tutte le dest** (default retrocompat, zero
+  breaking). Route S3 per-route: `s3:<prefix>` (bucket = `s3_bucket` globale) e
+  `s3://<bucket>/<prefix>` (bucket esplicito), con client S3 già cached per-bucket
+  (§18). Niente rewriting path per-route: il layout dest globale resta invariato.
+  `restore --dest <nome>` seleziona una destinazione nominata con precedenza su
+  `--from` (§19.3); i nomi compaiono anche in `status`/`doctor`.
 - **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0).
   La dismissione della CI GitLab (`.gitlab-ci.yml`) è **già avvenuta** su `main`
   durante 0.9.x, a seguito dell'eliminazione del repo GitLab: il publish a PyPI
@@ -1601,12 +1652,13 @@ cancellazioni** mai; le credenziali S3 arrivano **solo** dal config globale
 ### 19.1 Sintassi
 
 ```
-safekeep restore [--config PATH] [-v] [--from {local,s3,nas}] [--force] [--if-dir-exists] [PATH|GLOB ...]
+safekeep restore [--config PATH] [-v] [--dest NOME] [--from {local,s3,nas}] [--force] [--if-dir-exists] [PATH|GLOB ...]
 ```
 
 | Argomento | Significato |
 |---|---|
 | `PATH`/`GLOB` (uno o più) | path assoluto, path relativo alla radice `source` del progetto, o glob (`fnmatch`) sui path originali → modalità **non interattiva** |
+| `--dest` | (0.11.0, §21.4) origine del ripristino = destinazione **nominata** `dest <name>:` (§21.2); **ha precedenza** su `--from`; nome inesistente → errore con l'elenco dei nomi disponibili |
 | `--from` | origine del ripristino: `local` = prima `dest:`, `nas` = seconda `dest:`, `s3` = dest S3 (§18) |
 | `--force` | esegue davvero le copie; **senza, il dry-run è SEMPRE il comportamento** (nessuna eccezione, §11) |
 | `--if-dir-exists` | ripristina un file **solo se la sua directory di destinazione immediata esiste già** (0.10.0, §19.6); default inattivo |
@@ -1621,9 +1673,15 @@ safekeep restore [--config PATH] [-v] [--from {local,s3,nas}] [--force] [--if-di
 | nargs == 0 e stdin **non** è un TTY | errore (`serve un PATH/GLOB oppure un terminale interattivo`), exit ≠ 0 |
 | senza `--force` | **SEMPRE dry-run**: le righe vengono stampate e nessuna scrittura avviene — anche in interattivo |
 
-### 19.3 `--from` — origine del ripristino
+### 19.3 `--dest` e `--from` — origine del ripristino
 
-- **auto-detect** (default): i candidati sono le dest configurate, in ordine di
+- **`--dest <nome>`** (0.11.0, §21.4): se presente, identifica **univocamente**
+  l'origine come destinazione **nominata** `dest <name>:` (§21.2). **Ha
+  precedenza** su `--from`: se `--dest` è valido, l'auto-detect per classe non
+  viene neppure considerato. Nome non dichiarato → errore con l'elenco dei
+  nomi disponibili. Include anche le destinazioni S3 nominate via route
+  (`s3:<prefix>` / `s3://<bucket>/<prefix>`, §21.2).
+- **`--from` / auto-detect** (default, senza `--dest`): i candidati sono le dest configurate, in ordine di
   config — ogni `dest:` **montata**, poi la dest S3 se configurata. **Un solo
   candidato** → viene usato e il log indica quale; **due o più** → errore con
   l'elenco dei candidati (l'utente ripete con `--from`); **zero** → errore.
@@ -1797,3 +1855,135 @@ per evento (log-loop latente, chiuso in 0.9.0).
 - **WSL non verificato** (§17.4): `drvfs` è fstype locale → sotto `/mnt/` si
   resta su fswatch; un mount CIFS esplicito sotto WSL entrerebbe nel polling
   ma non è testato su macchina reale.
+
+---
+
+## 21. Routing destinazioni (0.11.0)
+
+### 21.1 Modello
+
+Fino a 0.10.0 **tutte** le sorgenti vanno su **tutte** le destinazioni
+(`dest:` filesystem anonime + la dest S3 di §18): broadcast globale. Il
+routing introduce la scelta **sorgente → target**: una sorgente può andare su
+una o più destinazioni specifiche, invece che su tutte.
+
+- **Dove vive il routing**: solo nel config globale `~/.safekeep`, **mai** nel
+  `.sync` di progetto (§4.2): le destinazioni restano fuori dal progetto —
+  decisione storica di sicurezza (§11), un `.sync` malevolo di terzi non può
+  mai deviare un backup.
+- **Granularità**: **per progetto**, determinata dalla *source root* scoperta
+  (la radice `source` che contiene il progetto, o `$HOME` in auto-discovery
+  §6). La route si applica all'intero progetto sotto quella radice.
+- **Default retrocompat (zero breaking)**: una sorgente **senza** route va su
+  **tutte** le destinazioni (anonime + nominate + S3) — comportamento
+  identico a 0.10.0. Il routing è **opt-in**.
+
+### 21.2 Sintassi
+
+Nuove forme di riga in `~/.safekeep` (stessa grammatica `chiave: valore` di
+§3, fail-fast con numero di riga):
+
+```ini
+dest nas: /Volumes/NAS/backup        # destinazione NOMINATA (filesystem)
+dest ext: /Volumes/EXFIT/safekeep-backup
+dest: /legacy/anonymous/path         # destinazione anonima (legacy, ancora valida)
+s3_bucket: my-bucket                 # legacy, ancora valido (§18)
+
+route ~/projects → nas               # sorgente su una sola destinazione
+route ~/Documents/notes → ext, nas   # sorgente su più destinazioni
+route ~/code → s3:backup/code        # sorgente su S3: bucket = s3_bucket, prefisso backup/code
+```
+
+| Forma | Significato |
+|---|---|
+| `dest <name>: <path>` | destinazione filesystem **nominata**; `<name>` serve da riferimento nelle route, in `status`/`doctor`/`restore --dest` |
+| `dest: <path>` | destinazione **anonima** (legacy, §3): ancora valida, mai citabile in una route (non ha nome) |
+| `route <src> → <dest-list>` | instrada la sorgente `<src>` su **tutte** le destinazioni elencate in `<dest-list>` (nomi filesystem separati da virgola, e/o target S3) |
+| `route <src> → s3:<prefix>` | target S3 con **bucket = `s3_bucket` globale** (§18) e prefisso proprio `<prefix>` |
+| `route <src> → s3://<bucket>/<prefix>` | target S3 con **bucket esplicito** diverso da `s3_bucket`, prefisso `<prefix>` |
+
+**Target S3 nelle route — due forme (decisioni §21.7):**
+
+- `s3:<prefix>` (senza bucket): usa il **bucket globale `s3_bucket`** + il
+  prefisso `<prefix>`. Forma **minimale** raccomandata nella maggior parte
+  dei casi: un solo bucket, route che differenziano solo il prefisso.
+- `s3://<bucket>/<prefix>` (bucket **esplicito**): forma **assoluta** che
+  ricorda l'URI S3 standard e non collide con la forma breve. Serve quando la
+  route deve finire su un bucket **diverso** da `s3_bucket`. La forma è
+  coerente col resto del file (le `dest` fs usano path assoluti `/…`; la
+  route S3 "assoluta" usa il suo URI assoluto `s3://…`). Coerente con lo
+  stile del file: la forma breve è la scorciatoia, l'URI è l'esplicita.
+- Le credenziali S3 restano **le stesse** `s3_*` globali (§18.1): una route
+  S3 non porta credenziali proprie; per un bucket self-hosted su endpoint
+  diverso resta una limitazione dichiarata (§21.6). `s3_access_key` è
+  **obbligatorio** se esiste anche una sola route S3 (stessa validazione di
+  §18.1, estesa).
+
+### 21.3 Semantica di matching — *longest-prefix-wins*
+
+- Il matching è sulla **source root** del progetto (non sui singoli file):
+  la route il cui `<src>` è il **prefisso più lungo** della source root vince.
+- **Route multiple che matchano lo stesso prefisso** (stessa source root
+  dichiarata due volte, o un prefisso letteralmente identico) → **errore
+  fail-fast** al parse: nessuna ambiguità tollerata, la riga più corta non
+  "batte" l'altra. Il messaggio elenca le righe in conflitto.
+- **Route verso una destinazione inesistente** (nome non dichiarato con
+  `dest <name>:`) → **errore fail-fast** al parse con **numero di riga** e
+  nome della destinazione mancante (stessa filosofia di ogni chiave di §3).
+- **Sorgente senza route** → **tutte** le destinazioni (anonime + nominate +
+  S3 globale): identico a 0.10.0, zero breaking (§21.1).
+- `route ~ → x` in auto-discovery `$HOME` matcherebbe **tutto**: è
+  **consentito** ed è il modo di esprimere un "default per tutto ciò che non
+  ha una route più specifica" — il *longest-prefix-wins* fa sì che una route
+  più mirata (`route ~/code → s3:backup/code`) vinca su `route ~ → nas` per
+  quei progetti. Una route su `$HOME` non è dunque un errore: è la regola di
+  default che le route specifiche overrideano.
+
+### 21.4 Destinazioni nominate e comandi
+
+- I **nomi** delle destinazioni nominate sono usati anche in `status`,
+  `doctor` e `restore --dest <nome>` (§9, §19): `status` etichetta ogni dest
+  col nome (`dest nas [ok] [local]`), `doctor` le elenca per nome.
+- Le dest anonime **non** hanno nome e restano raggiungibili solo via
+  `--from {local,s3,nas}` e auto-detect (§19.3), come oggi.
+- `restore --dest <nome>` **ha precedenza** su `--from local|s3|nas`
+  (§19.3): se presente, il nome identifica univocamente l'origine (l'auto-detect
+  per classe resta per i comandi senza `--dest`).
+
+### 21.5 Interazione con S3 per-route (§18)
+
+- La destinazione S3 **globale** (le chiavi `s3_*` di §18.1, una sola) resta:
+  è il bucket/prefisso di default per `s3_bucket`/`s3_prefix`. Con il routing
+  può non essere più "broadcast" su tutte le sorgenti, ma resta il target S3
+  di riferimento per `s3:<prefix>` senza bucket esplicito.
+- Il **client S3 è già cached per-bucket** (`s3dest.py`): route S3 verso
+  **bucket diversi** condividono endpoint/regione/credenziali `s3_*`; la cache
+  per-bucket evita di ricreare il client a ogni route. Un bucket non presente
+  in `s3_bucket` usa comunque le credenziali globali (§21.2).
+- **Niente rewriting path per-route**: il layout dest (`relative`/`full`, §3)
+  è **globale** e resta invariato; una route S3 usa solo il **prefisso**
+  proprio (`s3:<prefix>`), il calcolo del path dentro la dest è lo stesso
+  `dest_path` di sempre. La route sceglie *dove* va il progetto, non *come*
+  si mappa il suo path dentro la destinazione.
+
+### 21.6 Limiti dichiarati
+
+- **Niente rewriting path per-route**: la destinazione mantiene il layout
+  `relative`/`full` globale (§3); una route non può ridefinire il layout del
+  proprio target.
+- Le route S3 condividono **endpoint/regione/credenziali** `s3_*` globali
+  (§18.1): route verso un servizio S3 su endpoint diverso da `s3_endpoint`
+  non sono supportate in v1.
+- Il routing è **per source root** (progetto), non per singolo file: una
+  route non si applica a sotto-insiemi arbitrari di file dentro un progetto.
+
+### 21.7 Decisioni
+
+- **(a)** Bucket **esplicito** diverso da `s3_bucket` → `s3://<bucket>/<prefix>`
+  (URI assoluto, non collide con la forma breve `s3:<prefix>`). Motivazione:
+  coerente con lo stile del file — le `dest` fs usano path assoluti, la route
+  S3 "assoluta" usa l'URI standard; la forma breve resta la scorciatoia per
+  il bucket globale.
+- **(b)** `s3:<prefix>` **senza** bucket usa il **`s3_bucket` globale** →
+  **sì**. Motivazione: minimale — un solo bucket, route che differenziano solo
+  per prefisso, niente ripetizione inutile del nome bucket.
