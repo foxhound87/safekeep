@@ -218,6 +218,35 @@ Key) as `s3_access_key`/`s3_secret_key`.
 and `safekeep doctor` reports credentials, file permissions and bucket
 reachability — all as **non-fatal** warnings.
 
+## Destination routing (optional)
+
+Beyond the destinations declared in the config, you can define *routes*:
+`(source prefix, destination)` pairs that automatically attach **every**
+project under that prefix to the right destination — no need to list them
+one by one in the `.sync` files.
+
+```ini
+dest nas:
+    path = /Volumes/Backup/safekeep
+    label = backup USB
+
+route ~/code: nas
+```
+
+Every project under `~/code` (say `~/code/myapp`) is now attached to the
+`nas` destination. Matching is **longest-prefix** and checks both the source
+root (`~/code/myapp/.vault`) and the project root (`~/code/myapp`), so a
+project on an external volume is picked up even when the volume's mount point
+varies between reboots.
+
+`status` shows the active routing, `doctor` warns about unused routes or
+unreachable routed destinations (non-fatal), and the daemon uses the route to
+pick the push destination. `restore --dest <name>` restores from a declared
+destination; when combined with `--from`, `--dest` wins (SPEC §19.3).
+
+Full details (S3 routes, config lookup order, edge cases): SPEC §21 and
+`examples/safekeep.example`.
+
 ## CLI commands
 
 ```

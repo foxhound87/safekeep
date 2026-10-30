@@ -64,12 +64,15 @@ dest: /Volumes/NAS/generale
 # dest nas: /Volumes/NAS/generale
 #
 # Sintassi:  route <sorgente>: <dest>[, <dest>…]
-# La sorgente è una radice progetto (source esplicita o auto-discovery);
-# il match è longest-prefix sulla radice: la route più specifica vince.
+# La sorgente è una radice sorgente (source esplicita o auto-discovery);
+# il match è longest-prefix e vale SIA sulla source root (.vault) SIA sul
+# project root: `route ~/code: nas` aggancia automaticamente ogni progetto
+# sotto ~/code (~/code/myapp, ~/code/altro) senza toccare i .sync.
+# La route più specifica vince.
 # Più route che matchano la stessa radice = errore fail-fast (no ambiguità);
 # una route verso una dest inesistente = errore con numero di riga.
 #
-# route /Users/REPLACEME/Code: nas                # solo sulla dest "nas"
+# route ~/REPLACEME/code: nas                 # aggancia TUTTI i progetti sotto
 # route /Users/REPLACEME/Documents/notes: nas, ext  # mirror su due dest
 #
 # Dest S3 in route — forma breve: il bucket è PER DEFINIZIONE quello di
