@@ -665,5 +665,35 @@ class S3DoctorTest(CliTestCase):
         self.assertIn('config valida', r.stdout)
 
 
+class RoutingCliTest(CliTestCase):
+    """`sync-once` con routing (§21): ogni progetto finisce SOLO sulla sua
+    dest — il mapping passa anche dal percorso CLI, non solo dal daemon."""
+
+    def test_sync_once_routed_copia_solo_sulla_sua_dest(self):
+        src2 = os.path.join(self.tmp, 'src2')
+        write(os.path.join(src2, 'proj2', '.sync'), 'include: *.md\n')
+        write(os.path.join(src2, 'proj2', 'docs', 'note.md'), 'y')
+        dest2 = os.path.join(self.tmp, 'dst2')
+        os.makedirs(dest2)
+        cfg = write(os.path.join(self.tmp, 'route.cfg'),
+                    f'source: {self.src}\nsource: {src2}\n'
+                    f'dest a: {self.dest}\ndest b: {dest2}\n'
+                    f'route {self.src}: a\nroute {src2}: b\n')
+        r = self.cli('sync-once', '--config', cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, 'proj/docs/note.md')))
+        self.assertTrue(os.path.exists(os.path.join(dest2, 'proj2/docs/note.md')))
+        self.assertFalse(os.path.exists(os.path.join(dest2, 'proj/docs/note.md')),
+                         'il progetto instradato su `a` non deve finire su `b`')
+        self.assertFalse(os.path.exists(os.path.join(self.dest, 'proj2/docs/note.md')),
+                         'e viceversa')
+
+    def test_sync_once_senza_route_broadcast_di_sempre(self):
+        # nessuna route: comportamento identico a 0.10.0 (default retrocompat)
+        r = self.cli('sync-once', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, 'proj/docs/note.md')))
+
+
 if __name__ == '__main__':
     unittest.main()

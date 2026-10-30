@@ -995,6 +995,279 @@ class S3SeamTest(TmpTestCase):
         self.assertEqual(absent, 0)
 
 
+class RouteS3(FakeS3):
+    """FakeS3 con la firma reale di `S3Destination(scfg, client=)`: root
+    derivata dal (bucket, prefix) del config, così il routing per-route (§21.5)
+    produce un doppione diverso per ogni target — zero botocore, zero rete."""
+
+    def __init__(self, scfg=None, client=None):
+        super().__init__()
+        self.cfg = scfg
+        self.shared_client = client
+        if scfg is not None:
+            self.root = 's3://' + scfg.bucket + (
+                '/' + scfg.prefix if scfg.prefix else '')
+
+    def client(self):
+        return ('client', self.cfg.bucket)      # marca per il test di condivisione
+
+
+S3_NOCRED = ('s3_bucket: bkt\n'
+             's3_access_key: AK\ns3_secret_key: SK\n')
+
+
+class RoutingReconcileTest(TmpTestCase):
+    """Routing destinazioni 0.11.0 (SPEC.md §21): ogni progetto copia SOLO
+    sulle dest della sua route; senza route il broadcast di sempre."""
+
+    def _proj(self, root):
+        write(os.path.join(root, '.sync'), 'include: *.md\n')
+        write(os.path.join(root, 'note.md'), 'x')
+
+    def _dest(self, name):
+        d = self.path(name)
+        os.makedirs(d, exist_ok=True)           # esiste ⇒ dest_state ok
+        return d
+
+    def _daemon(self, *lines, patch_s3=None):
+        cfg_path = write(self.path('safekeep.cfg'), '\n'.join(lines) + '\n')
+        if patch_s3 is not None:
+            # il patch resta attivo per tutto il test: anche reconcile/sync_once
+            # costruiscono destinazioni S3 per-route (s3_dest)
+            patcher = mock.patch.object(daemon_mod, 'S3Destination', patch_s3)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        return daemon
+
+    def copied(self, dest):
+        return sorted(os.path.relpath(os.path.join(dp, f), dest)
+                      for dp, _, fs in os.walk(dest) for f in fs)
+
+    def test_due_sorgenti_con_route_distinte_ognuno_sulla_sua_dest(self):
+        srcA, srcB = self.path('srcA'), self.path('srcB')
+        destA, destB = self._dest('dstA'), self._dest('dstB')
+        self._proj(os.path.join(srcA, 'projA'))
+        self._proj(os.path.join(srcB, 'projB'))
+        daemon = self._daemon(
+            f'source: {srcA}', f'source: {srcB}',
+            f'dest a: {destA}', f'dest b: {destB}',
+            f'route {srcA}: a', f'route {srcB}: b')
+        # 2 progetti × 2 file (.sync + note.md): nessuna copia sulla dest altrui
+        self.assertEqual(daemon.reconcile_all(), 4)
+        self.assertEqual(self.copied(destA), ['projA/.sync', 'projA/note.md'])
+        self.assertEqual(self.copied(destB), ['projB/.sync', 'projB/note.md'])
+
+    def test_route_multipla_un_progetto_su_due_dest(self):
+        src = self.path('src')
+        destA, destB = self._dest('dstA'), self._dest('dstB')
+        self._proj(os.path.join(src, 'proj'))
+        daemon = self._daemon(
+            f'source: {src}', f'dest a: {destA}', f'dest b: {destB}',
+            f'route {src}: a, b')
+        daemon.reconcile_all()
+        self.assertEqual(self.copied(destA), ['proj/.sync', 'proj/note.md'])
+        self.assertEqual(self.copied(destB), ['proj/.sync', 'proj/note.md'])
+
+    def test_sorgente_senza_route_restano_tutte_le_dest(self):
+        src, routed = self.path('src'), self.path('altro')
+        destA, destB = self._dest('dstA'), self._dest('dstB')
+        self._proj(os.path.join(src, 'proj'))
+        daemon = self._daemon(
+            f'source: {src}', f'dest a: {destA}', f'dest b: {destB}',
+            f'route {routed}: a')              # route su unaltra sorgente
+        daemon.reconcile_all()
+        # default retrocompat (§21.1): broadcast su tutte le destinazioni
+        self.assertEqual(self.copied(destA), ['proj/.sync', 'proj/note.md'])
+        self.assertEqual(self.copied(destB), ['proj/.sync', 'proj/note.md'])
+
+    def test_sync_once_routed_e_dest_assente_solo_sulla_route(self):
+        srcA, srcB = self.path('srcA'), self.path('srcB')
+        destA = self._dest('dstA')
+        destB = self.path('dstB')               # MAI creata: dest assente
+        self._proj(os.path.join(srcA, 'projA'))
+        self._proj(os.path.join(srcB, 'projB'))
+        daemon = self._daemon(
+            f'source: {srcA}', f'source: {srcB}',
+            f'dest a: {destA}', f'dest b: {destB}',
+            f'route {srcA}: a', f'route {srcB}: b')
+        rows = daemon.sync_once()
+        self.assertEqual(self.copied(destA), ['projA/.sync', 'projA/note.md'])
+        by_name = {p.name: (stats, absent) for p, stats, absent in rows}
+        self.assertEqual(by_name['projA'][1], 0, 'la sua dest è montata')
+        self.assertEqual(by_name['projB'][1], 1, 'conta solo la sua dest assente')
+        # il reconcile del daemon mette in pending SOLO la dest della route
+        # assente (§8.3): laltra destinazione non viene toccata
+        daemon.reconcile(daemon.projects[0])       # projA → destA montata
+        daemon.reconcile(daemon.projects[1])       # projB → destB assente
+        self.assertIn(destB, daemon.pending)
+        self.assertNotIn(destA, daemon.pending)
+
+    def test_evento_copy_routed_copia_solo_sulla_sua_dest(self):
+        srcA, srcB = self.path('srcA'), self.path('srcB')
+        destA, destB = self._dest('dstA'), self._dest('dstB')
+        self._proj(os.path.join(srcA, 'projA'))
+        self._proj(os.path.join(srcB, 'projB'))
+        daemon = self._daemon(
+            f'source: {srcA}', f'source: {srcB}',
+            f'dest a: {destA}', f'dest b: {destB}',
+            f'route {srcA}: a', f'route {srcB}: b')
+        # evento incrementale (percorso fswatch/poll, non il reconcile)
+        new = os.path.join(srcA, 'projA', 'nuovo.md')
+        write(new, 'y')
+        daemon._copy(new, daemon.projects[0])
+        self.assertTrue(os.path.exists(os.path.join(destA, 'projA/nuovo.md')))
+        self.assertFalse(os.path.exists(os.path.join(destB, 'projA/nuovo.md')),
+                         'un evento non deve finire su dest non instradate')
+
+    def test_symlink_route_vs_source_root_realpathizzata(self):
+        # la route è scritta col path symlink, il daemon scopre root
+        # realpathizzate (come /tmp → /private/tmp su macOS): deve matchare
+        real = self.path('real')
+        link = self.path('link')
+        os.symlink(real, link)
+        proj = os.path.join(real, 'src', 'proj')
+        self._proj(proj)
+        destA, destB = self._dest('dstA'), self._dest('dstB')
+        daemon = self._daemon(
+            f'source: {os.path.join(real, "src")}',
+            f'dest a: {destA}', f'dest b: {destB}',
+            f'route {link}: a')                 # path symlink, non realpath
+        self.assertEqual(daemon.projects[0].source_root,
+                         os.path.realpath(os.path.join(real, 'src')))
+        daemon.reconcile_all()
+        self.assertEqual(self.copied(destA), ['proj/.sync', 'proj/note.md'])
+        self.assertEqual(self.copied(destB), [])
+
+    def test_s3_per_route_prefisso_proprio_e_cache(self):
+        src = self.path('src')
+        self._proj(os.path.join(src, 'proj'))
+        made = []
+
+        def factory(scfg, client=None):
+            d = RouteS3(scfg, client)
+            made.append(d)
+            return d
+
+        daemon = self._daemon(
+            f'source: {src}', 'dest nas: ' + self._dest('nas'), S3_NOCRED,
+            'route ' + src + ': s3:code/backup', patch_s3=factory)
+        daemon.reconcile_all()
+        routed = [d for d in made if d.root == 's3://bkt/code/backup']
+        self.assertEqual(len(routed), 1, 'una sola S3Destination per target')
+        # dest_path con il prefix della route + layout relative (§21.5/§4.3)
+        self.assertEqual(sorted(routed[0].copies),
+                         ['s3://bkt/code/backup/proj/.sync',
+                          's3://bkt/code/backup/proj/note.md'])
+        # la route S3 sostituisce il broadcast: niente copie su nas né sulla
+        # dest S3 globale (s3://bkt) — il routing instrada, §21.1
+        self.assertEqual(self.copied(self.path('nas')), [])
+        self.assertEqual([d.root for d in made if d.copies and d is not routed[0]],
+                         [])
+        # cache per (bucket, prefix): la stessa richiesta ritorna la stessa
+        # istanza, un prefix diverso ne crea unaltra (client condiviso per
+        # bucket con la globale, §21.5)
+        self.assertIs(daemon.s3_dest('bkt', 'code/backup'), routed[0])
+        alt = daemon.s3_dest('bkt', 'altri')
+        self.assertIsNot(alt, routed[0])
+        self.assertEqual(alt.root, 's3://bkt/altri')
+        self.assertEqual(routed[0].shared_client, ('client', 'bkt'))
+        other = daemon.s3_dest('altrabkt', 'pfx')
+        self.assertIsNone(other.shared_client,
+                          'un bucket diverso non eredita il client')
+        self.assertIs(daemon.s3_dest('bkt', 'code/backup'), routed[0],
+                      'cache stabile a più chiamate')
+
+    def test_route_s3_mista_fs_e_s3(self):
+        src = self.path('src')
+        nas = self._dest('nas')
+        self._proj(os.path.join(src, 'proj'))
+        daemon = self._daemon(
+            f'source: {src}', f'dest nas: {nas}', S3_NOCRED,
+            f'route {src}: nas, s3:pfx', patch_s3=lambda scfg, client=None: RouteS3(scfg, client))
+        daemon.reconcile_all()
+        self.assertEqual(self.copied(nas), ['proj/.sync', 'proj/note.md'])
+        s3 = daemon.s3_for_root('s3://bkt/pfx')
+        self.assertEqual(sorted(s3.copies),
+                         ['s3://bkt/pfx/proj/.sync', 's3://bkt/pfx/proj/note.md'])
+
+    def test_pending_retry_dest_s3_per_route(self):
+        src = self.path('src')
+        self._proj(os.path.join(src, 'proj'))
+        made = {}
+
+        def factory(scfg, client=None):
+            d = made.get(scfg.prefix)
+            if d is None:
+                d = made[scfg.prefix] = RouteS3(scfg, client)
+                d._state = 'offline'            # tutti offline allavvio
+            return d
+
+        daemon = self._daemon(f'source: {src}', 'dest nas: ' + self._dest('nas'),
+                              S3_NOCRED, f'route {src}: s3:pfx',
+                              patch_s3=factory)
+        daemon.reconcile(daemon.projects[0])
+        self.assertIn('s3://bkt/pfx', daemon.pending)
+        self.assertFalse(daemon.dest_ready('s3://bkt/pfx'))
+        made['pfx']._state = 'ok'
+        self.assertTrue(daemon.dest_ready('s3://bkt/pfx'),
+                        'il retry pending risale la cache per-route (§8.3)')
+
+
+class RouteInutilizzataTest(TmpTestCase):
+    """SPEC.md §12: route che non matcha nessuna radice nota → warning non
+    fatale, una-tantum per riga (load_projects gira anche a ogni reload)."""
+
+    def test_warning_non_fatale_e_una_tantum(self):
+        src = self.path('src')
+        write(os.path.join(src, 'proj/.sync'), 'include: *.md\n')
+        dest = self.path('dst')
+        os.makedirs(dest)
+        cfg_path = write(self.path('safekeep.cfg'),
+                         f'source: {src}\ndest nas: {dest}\n'
+                         f'route {self.path("mai-esistita")}: nas\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        with self.assertLogs('safekeep', 'WARNING') as cm:
+            daemon.load_projects()
+        self.assertTrue(any('non corrisponde ad alcuna source root' in line
+                            and 'mai-esistita' in line for line in cm.output))
+        # non fatale: i progetti restano carreggiati e il sync-once gira
+        self.assertEqual(len(daemon.projects), 1)
+        # una-tantum: un rescan successivo non ripete la riga
+        with mock.patch.object(daemon_mod.log, 'warning') as warn:
+            daemon.load_projects()
+        warn.assert_not_called()
+
+    def test_route_matchata_niente_warning(self):
+        src = self.path('src')
+        write(os.path.join(src, 'proj/.sync'), 'include: *.md\n')
+        dest = self.path('dst')
+        os.makedirs(dest)
+        cfg_path = write(self.path('safekeep.cfg'),
+                         f'source: {src}\ndest nas: {dest}\nroute {src}: nas\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        with mock.patch.object(daemon_mod.log, 'warning') as warn:
+            daemon.load_projects()
+        warn.assert_not_called()
+
+    def test_nessuna_route_niente_check(self):
+        src = self.path('src')
+        write(os.path.join(src, 'proj/.sync'), 'include: *.md\n')
+        dest = self.path('dst')
+        os.makedirs(dest)
+        cfg_path = write(self.path('safekeep.cfg'),
+                         f'source: {src}\ndest: {dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        with mock.patch.object(daemon_mod.log, 'warning') as warn:
+            daemon.load_projects()
+        warn.assert_not_called()
+
+
 @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
 class S3LoadConfigTest(TmpTestCase):
     """`load_config` costruisce il dest S3 reale e controlla chmod 600 (§18.4)."""
