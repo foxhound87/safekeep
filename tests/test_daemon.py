@@ -1216,6 +1216,104 @@ class RoutingReconcileTest(TmpTestCase):
                         'il retry pending risale la cache per-route (§8.3)')
 
 
+class RoutingAutoDiscoveryTest(TmpTestCase):
+    """Fase 2.5 (SPEC.md §21.3): in auto-discovery la source root di ogni
+    progetto è $HOME — la route matcha anche sulla project root (dir del
+    `.sync`), così `route ~/code: nas` aggancia i progetti sotto code/.
+
+    Simulazione: `expanduser('~')` puntato a un home finto (i config usano
+    path assoluti, l'unica `~` espansa è proprio la radice auto-discovery),
+    poi discovery REALE dentro quel home col pruning `home_prune`."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.path('home')
+        for proj in ('code/myapp', 'docs/myapp'):
+            write(os.path.join(self.home, proj, '.sync'), 'include: *.md\n')
+            write(os.path.join(self.home, proj, 'note.md'), 'x')
+        real = os.path.expanduser
+        patcher = mock.patch('os.path.expanduser',
+                             lambda p: self.home if p == '~' else real(p))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _dest(self, name):
+        d = self.path(name)
+        os.makedirs(d, exist_ok=True)           # esiste ⇒ dest_state ok
+        return d
+
+    def _daemon(self, *lines):
+        cfg_path = write(self.path('safekeep.cfg'), '\n'.join(lines) + '\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        return daemon
+
+    def copied(self, dest):
+        return sorted(os.path.relpath(os.path.join(dp, f), dest)
+                      for dp, _, fs in os.walk(dest) for f in fs)
+
+    def test_route_sul_codice_aggancia_solo_i_progetti_sotto_code(self):
+        nas, ext = self._dest('nas'), self._dest('ext')
+        daemon = self._daemon(f'dest nas: {nas}', f'dest ext: {ext}',
+                              f'route {self.home}/code: nas')
+        # source root di ENTRAMBI i progetti è il home finto: la route
+        # matcha solo via project root (§21.3, il livello che serve)
+        self.assertEqual({p.source_root for p in daemon.projects},
+                         {os.path.realpath(self.home)})
+        daemon.reconcile_all()
+        # code/myapp va SOLO su nas (la sua route); docs/myapp non ha route
+        # → broadcast su TUTTE le dest, nas compresa (§21.1)
+        self.assertEqual(self.copied(nas),
+                         ['code/myapp/.sync', 'code/myapp/note.md',
+                          'docs/myapp/.sync', 'docs/myapp/note.md'])
+        # l'assaggio netto: nessun file di code/myapp finisce su ext
+        self.assertEqual(self.copied(ext),
+                         ['docs/myapp/.sync', 'docs/myapp/note.md'])
+
+    def test_route_home_come_default_per_tutto(self):
+        ext = self._dest('ext')
+        daemon = self._daemon(f'dest ext: {ext}', 'route ~: ext')
+        daemon.reconcile_all()
+        self.assertEqual(self.copied(ext),
+                         ['code/myapp/.sync', 'code/myapp/note.md',
+                          'docs/myapp/.sync', 'docs/myapp/note.md'])
+
+    def test_longest_prefix_wins_sui_due_livelli(self):
+        nas, ext, hot = self._dest('nas'), self._dest('ext'), self._dest('hot')
+        daemon = self._daemon(f'dest nas: {nas}', f'dest ext: {ext}',
+                              f'dest hot: {hot}', 'route ~: nas',
+                              f'route {self.home}/code: ext',
+                              f'route {self.home}/code/myapp: hot')
+        daemon.reconcile_all()
+        # route sulla project root esatta: più specifica di ~/code → hot
+        self.assertEqual(self.copied(hot),
+                         ['code/myapp/.sync', 'code/myapp/note.md'])
+        # nessun progetto finisce sulla route di mezzo (ext resta vuota)
+        self.assertEqual(self.copied(ext), [])
+        # docs/myapp senza route specifica → default ~ → nas
+        self.assertEqual(self.copied(nas),
+                         ['docs/myapp/.sync', 'docs/myapp/note.md'])
+
+    def test_warning_route_inutilizzata_ma_project_root_matchata_no(self):
+        nas = self._dest('nas')
+        cfg_path = write(self.path('safekeep.cfg'),
+                         f'dest nas: {nas}\n'
+                         f'route {self.home}/code: nas\n'
+                         f'route {self.home}/sparizione: nas\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        with self.assertLogs('safekeep', 'WARNING') as cm:
+            daemon.load_projects()
+        # ~/code matcha la project root scoperta → nessun warning
+        self.assertFalse(any('/code' in line and 'non corrisponde' in line
+                             for line in cm.output))
+        # ~/sparizione non matcha né source root né project root → warning
+        self.assertTrue(any('sparizione' in line
+                            and 'non corrisponde ad alcuna root' in line
+                            for line in cm.output))
+
+
 class RouteInutilizzataTest(TmpTestCase):
     """SPEC.md §12: route che non matcha nessuna radice nota → warning non
     fatale, una-tantum per riga (load_projects gira anche a ogni reload)."""
@@ -1232,7 +1330,7 @@ class RouteInutilizzataTest(TmpTestCase):
         daemon.load_config()
         with self.assertLogs('safekeep', 'WARNING') as cm:
             daemon.load_projects()
-        self.assertTrue(any('non corrisponde ad alcuna source root' in line
+        self.assertTrue(any('non corrisponde ad alcuna root' in line
                             and 'mai-esistita' in line for line in cm.output))
         # non fatale: i progetti restano carreggiati e il sync-once gira
         self.assertEqual(len(daemon.projects), 1)
