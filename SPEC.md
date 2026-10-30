@@ -1009,7 +1009,7 @@ illimitata della coda in memoria.
 | `restore` verso una cartella protetta TCC senza FDA | `EACCES`/`Operation not permitted` per-file, log + hint FDA (Full Disk Access, §11/§14.4) — il resto del piano prosegue |
 | Route ambigua (stessa source root o stesso prefisso dichiarati due volte) | **fail-fast** al parse con numero di riga + elenco righe in conflitto (§21.3): nessuna precedenza implicita, l'utente deve rendere la route univoca |
 | Route verso destinazione inesistente (nome non dichiarato con `dest <name>:`) | **fail-fast** al parse con numero di riga + nome mancante (§21.3), come ogni chiave invalida di §3 |
-| Route su source root mai scoperta (prefisso che non corrisponde ad alcuna radice nota) | **warning non fatale** (route inutilizzata): in auto-discovery la source root può non essere ancora agganciata; al rescan 24h (§6) può diventare attiva — non è un errore |
+| Route il cui `<src>` non corrisponde ad alcuna root nota — né source root né project root (dir del `.sync`) di alcun progetto scoperto | **warning non fatale** (route inutilizzata): in auto-discovery la root può non essere ancora agganciata; al rescan 24h (§6) può diventare attiva — non è un errore |
 | `route ~: x` in auto-discovery che matcherebbe TUTTO | **consentito** (§21.3): è il modo di esprimere il default per tutto ciò che non ha route più specifiche; il *longest-prefix-wins* fa vincere le route mirate (`route ~/code: …`) sui progetti pertinenti |
 | Sorgente senza route | va su **tutte** le destinazioni (anonime + nominate + S3) — default retrocompat, zero breaking (§21.1) |
 
@@ -1871,9 +1871,10 @@ una o più destinazioni specifiche, invece che su tutte.
   `.sync` di progetto (§4.2): le destinazioni restano fuori dal progetto —
   decisione storica di sicurezza (§11), un `.sync` malevolo di terzi non può
   mai deviare un backup.
-- **Granularità**: **per progetto**, determinata dalla *source root* scoperta
-  (la radice `source` che contiene il progetto, o `$HOME` in auto-discovery
-  §6). La route si applica all'intero progetto sotto quella radice.
+- **Granularità**: **per progetto**, determinata dal match sulla *source
+  root* E sulla *project root* scoperte (§21.3): la route si applica
+  all'intero progetto la cui directory (quella del suo `.sync`) sta sotto
+  il `<src>` della route.
 - **Default retrocompat (zero breaking)**: una sorgente **senza** route va su
   **tutte** le destinazioni (anonime + nominate + S3) — comportamento
   identico a 0.10.0. Il routing è **opt-in**.
@@ -1927,8 +1928,21 @@ route ~/code: s3:backup/code        # sorgente su S3: bucket = s3_bucket, prefis
 
 ### 21.3 Semantica di matching — *longest-prefix-wins*
 
-- Il matching è sulla **source root** del progetto (non sui singoli file):
-  la route il cui `<src>` è il **prefisso più lungo** della source root vince.
+- Il match valuta **due livelli** per ogni progetto: la **source root** (la
+  radice `source` che contiene il progetto, o `$HOME` in auto-discovery §6)
+  e la **project root** (la directory del progetto, quella del suo `.sync`).
+  Una route matcha il progetto se il suo `<src>` è prefisso della source
+  root **O** della project root; fra tutti i match — su entrambi i livelli —
+  vince la route col `<src>` **più lungo** (longest-prefix-wins). Il match è
+  comunque sulla root del progetto, non sui singoli file.
+- **Perché il doppio livello**: in auto-discovery (config senza `source:`)
+  ogni progetto ha source root `$HOME`, quindi una route per-progetto come
+  `route ~/code: nas` non aggancerebbe MAI nulla sul primo livello: è la
+  project root che può matcharla. Esempio: `route ~/code: nas` aggancia il
+  progetto `~/code/myapp` (progetto scoperto sotto `~/code`) ma NON
+  `~/altro/myapp`; `route ~: nas` resta il "default per tutto". Con
+  `source:` esplicite la project root coincide spesso con la source root
+  (un progetto per sorgente) e i due livelli danno lo stesso risultato.
 - **Route multiple che matchano lo stesso prefisso** (stessa source root
   dichiarata due volte, o un prefisso letteralmente identico) → **errore
   fail-fast** al parse: nessuna ambiguità tollerata, la riga più corta non
@@ -1980,8 +1994,9 @@ route ~/code: s3:backup/code        # sorgente su S3: bucket = s3_bucket, prefis
 - Le route S3 condividono **endpoint/regione/credenziali** `s3_*` globali
   (§18.1): route verso un servizio S3 su endpoint diverso da `s3_endpoint`
   non sono supportate in v1.
-- Il routing è **per source root** (progetto), non per singolo file: una
-  route non si applica a sotto-insiemi arbitrari di file dentro un progetto.
+- Il routing è **per root di progetto** (source root o project root, §21.3),
+  non per singolo file: una route non si applica a sotto-insiemi arbitrari
+  di file dentro un progetto.
 
 ### 21.7 Decisioni
 
