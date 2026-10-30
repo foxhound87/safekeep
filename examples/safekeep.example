@@ -53,6 +53,34 @@ dest: /Volumes/NAS/generale
 # MAI cancellazioni — `--prune` tocca solo le dest filesystem.
 # Silo/MinIO/Ceph/Wasabi/B2/AWS: path-style + SIGV4, vedi README e SPEC §18.
 
+# --- Routing destinazioni (OPZIONALE, SPEC.md §21) -------------------
+# Senza queste righe: TUTTE le sorgenti vanno su TUTTE le dest sopra
+# (comportamento di sempre). Con `route`: ogni sorgente dichiarata va SOLO
+# sulle dest che indichi — le altre sorgenti restano su tutte le dest.
+# Il routing vive SOLO in QUESTO file, mai nei .sync (SPEC.md §11).
+#
+# DESTINAZIONI NOMINATE: un nome davanti alla dest la rende citabile.
+# Le dest anonime (senza nome) restano valide e non sono citabili.
+# dest nas: /Volumes/NAS/generale
+#
+# Sintassi:  route <sorgente> → <dest>[, <dest>…]
+# La sorgente è una radice progetto (source esplicita o auto-discovery);
+# il match è longest-prefix sulla radice: la route più specifica vince.
+# Più route che matchano la stessa radice = errore fail-fast (no ambiguità);
+# una route verso una dest inesistente = errore con numero di riga.
+#
+# route /Users/REPLACEME/Code → nas                # solo sulla dest "nas"
+# route /Users/REPLACEME/Documents/notes → nas, ext  # mirror su due dest
+#
+# Dest S3 in route — forma breve (prefisso sul bucket globale s3_bucket):
+# route /Users/REPLACEME/Code/secrets → s3:private/secrets
+# oppure bucket/URI esplicito (bucket diverso dal globale):
+# route /Users/REPLACEME/Code → s3://other-bucket/code
+#
+# ATTENZIONE: una route su ~ (es. `route /Users/REPLACEME → nas`) è
+# LEGITTIMA ed è il modo di dire "tutto ciò che non ha route più
+# specifiche va su nas" — le route più specifiche vincono comunque.
+
 # --- Layout dei path in destinazione --------------------------------
 # relative (default): <dest>/<path relativo alla radice sorgente>
 #     sorgente ~/Code/myapp/docs/a.md  →  /Volumes/BackupUSB/backup/myapp/docs/a.md
