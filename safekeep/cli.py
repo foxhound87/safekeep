@@ -21,7 +21,8 @@ except ImportError:
 from safekeep import __version__
 from safekeep import daemonctl
 from safekeep import restore
-from safekeep.config import ConfigError, discover_projects, parse_sync
+from safekeep.config import (
+    ConfigError, discover_projects, matching_route, parse_sync)
 from safekeep.copier import TMP_INFIX
 from safekeep.daemon import Daemon, setup_logging
 from safekeep.platform import (
@@ -76,10 +77,16 @@ def build_parser():
                          help="ripristina dall'ultima copia in una dest: dry-run di "
                               'default, --force per scrivere; PATH/GLOB o menu '
                               'interattivo (SPEC §19)')
+    res.add_argument('--dest', metavar='NOME',
+                     help='origine = destinazione nominata `dest <nome>:` oppure '
+                          'target S3 di una route (s3:<prefisso> / '
+                          's3://bucket/prefisso): ha PRECEDENZA su --from '
+                          '(SPEC §19.3/§21.4); nome inesistente → errore con '
+                          "l'elenco dei nomi disponibili")
     res.add_argument('--from', dest='from_', choices=('local', 's3', 'nas'),
                      help='origine del ripristino: local = prima dest:, nas = seconda '
                           'dest:, s3 = dest S3 (default: auto-detect del candidato '
-                          'unico, SPEC §19.3)')
+                          'unico, SPEC §19.3 — con --dest presente non vale)')
     res.add_argument('--force', action='store_true',
                      help='esegue le copie (default: dry-run — nessuna scrittura, '
                           'nemmeno in interattivo)')
@@ -212,7 +219,9 @@ def _interactive_select(entries):
 
 def cmd_restore(args):
     """Ripristino dall'ultima copia (SPEC §19): dry-run di default, `--force`
-    per scrivere; PATH/GLOB non interattivo oppure menu per livelli da TTY."""
+    per scrivere; PATH/GLOB non interattivo oppure menu per livelli da TTY.
+    `--dest <nome>` (§21.4) identifica l'origine in modo univoco e ha
+    precedenza su `--from`/auto-detect (§19.3)."""
     daemon = Daemon(args.config)
     daemon.load_config()
     setup_logging('debug' if args.v else daemon.cfg.log_level)
@@ -223,19 +232,28 @@ def cmd_restore(args):
               '(SPEC §19.2)', file=sys.stderr)
         return 1
     try:
-        from_ = args.from_
-        if from_ is None and interactive:
-            cands = restore.candidates(daemon.cfg, daemon.s3)
-            if len(cands) > 1:
-                # livello "origine" (§19.4): solo se ambigua (≥2 candidati)
-                labels = [f'{label} — {o.root if kind == "s3" else o}'
-                          for kind, o, label in cands]
-                picked = _menu('origine del ripristino:', labels)
-                if picked is None:
-                    print('restore: annullato', file=sys.stderr)
-                    return 1
-                from_ = cands[picked[0]][2]
-        kind, origin = restore.pick_source(daemon.cfg, daemon.s3, from_)
+        if args.dest is not None:
+            if args.from_ is not None:
+                log.warning('--dest e --from insieme: --dest ha precedenza '
+                            '(SPEC §19.3)')
+            kind, origin = restore.pick_dest(daemon.cfg, args.dest)
+            if kind == 's3':
+                # bucket/prefisso della route → S3Destination per-route (§21.5)
+                origin = daemon.s3_dest(*origin)
+        else:
+            from_ = args.from_
+            if from_ is None and interactive:
+                cands = restore.candidates(daemon.cfg, daemon.s3)
+                if len(cands) > 1:
+                    # livello "origine" (§19.4): solo se ambigua (≥2 candidati)
+                    labels = [f'{label} — {o.root if kind == "s3" else o}'
+                              for kind, o, label in cands]
+                    picked = _menu('origine del ripristino:', labels)
+                    if picked is None:
+                        print('restore: annullato', file=sys.stderr)
+                        return 1
+                    from_ = cands[picked[0]][2]
+            kind, origin = restore.pick_source(daemon.cfg, daemon.s3, from_)
     except restore.RestoreError as e:
         print(f'restore: {e}', file=sys.stderr)
         return 1
@@ -284,8 +302,32 @@ def cmd_restore(args):
     return 0 if err == 0 else 1
 
 
+def dest_name_map(cfg):
+    """path → nome della dest nominata (SPEC §21.2): il primo nome dichiarato
+    per un path vince — solo per l'etichettatura in `status`/`doctor`."""
+    out = {}
+    for name, path in cfg.dest_names.items():
+        out.setdefault(path, name)
+    return out
+
+
+def route_label(cfg, project):
+    """Destinazioni del progetto come etichetta compatta (SPEC §21.4): nomi
+    delle dest fs + `s3://bucket/prefisso` per i target S3; `tutte` se
+    nessuna route matcha il progetto (broadcast retrocompat §21.1)."""
+    route = matching_route(project.source_root, cfg, project_root=project.root)
+    if route is None:
+        return 'tutte'
+    names = dest_name_map(cfg)
+    parts = [names.get(path, path) for path in route.dests]
+    parts += [f's3://{bucket}/{prefix}' if prefix else f's3://{bucket}'
+              for bucket, prefix in route.s3]
+    return ', '.join(parts)
+
+
 def cmd_status(args):
-    """Sola lettura: config, modalità, source/progetti con N regole, dest con dest_state."""
+    """Sola lettura: config, modalità, source/progetti con N regole, routing
+    dei progetti (solo con route, §21.4), dest con dest_state."""
     daemon = Daemon(args.config)
     daemon.load_config()
     print(f'config    {daemon.config_path}')
@@ -302,6 +344,14 @@ def cmd_status(args):
               f'— {project.root}')
     if not daemon.projects:
         print('progetto  nessuno (.sync non trovato)')
+    # routing (§21.4): SOLO se il config ha route — senza, l'output resta
+    # identico a 0.10.0 (broadcast implicito, §21.1). Il progetto senza route
+    # che matcha va su tutte le dest: `tutte`.
+    if daemon.cfg.routes:
+        for project in sorted(daemon.projects, key=lambda p: p.root):
+            print(f'routing   {project.name} → '
+                  f'[{route_label(daemon.cfg, project)}]')
+    names = dest_name_map(daemon.cfg)     # etichetta del nome accanto al path (§21.4)
     for dest in daemon.cfg.dests:
         # etichetta `nas`/`local` dalla fstype detect (§20.6): solo lettura,
         # nessun processo figlio (fs_fstype legge /proc/mounts o `mount`)
@@ -311,7 +361,7 @@ def cmd_status(args):
         # ENOTCONN → `unreachable` invece dell'ingannevole `[ok]` (§20.6)
         if state == 'ok' and network_error(dest) is not None:
             state = 'unreachable'
-        print(f'dest      {dest} [{state}] [{label}]')
+        print(f'dest {names.get(dest, ""):<5}{dest} [{state}] [{label}]')
     if daemon.s3 is not None:
         # HeadBucket con cache 30s (§18.3): ok/offline, senza toccare la
         # config — `status` resta sola lettura
@@ -462,6 +512,40 @@ def cmd_doctor(args):
             out(True, f'.sync: {total} progetto/i parsificati con regole valide')
         else:
             out(True, '.sync: nessun progetto scoperto (niente da validare)')
+
+    # Routing destinazioni (SPEC §21): solo con route nel config — senza, la
+    # riga non c'è e l'output di doctor resta identico a 0.10.0. `load_projects`
+    # scopre le radici note per il match sui DUE livelli (§21.3); doctor non
+    # configura mai il logging (§9.1), quindi il warning di log del daemon non
+    # esce da qui: la riga di check è l'unico output, mai duplicata.
+    if cfg is not None and daemon is not None and cfg.routes:
+        daemon.load_projects()
+        unused = daemon.unused_routes()
+        if unused:
+            detail = '; '.join(f'{r.src} (riga {r.lineno})' for r in unused)
+            out(False, f'route inutilizzate: {detail} — nessuna root nota '
+                       '(source o project) la usa: al prossimo rescan potrebbe '
+                       'agganciarsi (SPEC §12) — warning non fatale')
+        else:
+            out(True, f'route: {len(cfg.routes)} dichiarate, tutte agganciate '
+                      'a una root nota (source o project)')
+        # dest nominate citate in route ma NON montate: volume assente (§8.3),
+        # condizione disgiunta dal check volumi qui sotto (che copre i mount
+        # presenti ma irraggiungibili, dest_state == ok, §20.6) — nessuna
+        # collisione fra i due
+        names = dest_name_map(cfg)
+        cited = {p for r in cfg.routes for p in r.dests}
+        absent = [d for d in cfg.dests if d in cited and dest_state(d) != 'ok']
+        if absent:
+            out(False, 'dest di route non montate: '
+                + ', '.join(f'{names.get(d, d)} ({d})' for d in absent)
+                + ' — monta il volume e riprova — warning non fatale')
+        if daemon.projects:
+            out(True, 'routing: ' + ', '.join(
+                f'{p.name} → [{route_label(cfg, p)}]'
+                for p in sorted(daemon.projects, key=lambda p: p.root)))
+        else:
+            out(True, 'routing: nessun progetto scoperto')
 
     # Volumi di rete (SPEC §20.6): split radici locali (fswatch) vs radici su
     # volume di rete (monitor a polling) — tutti NON fatali

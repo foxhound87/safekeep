@@ -92,6 +92,74 @@ def _labels(cfg, s3):
     return ', '.join(label for _, _, label in cands) or 'nessuna'
 
 
+# ------------------------------------------------------------- origine --dest
+
+def s3_route_targets(cfg):
+    """`(bucket, prefix)` dei target S3 citati nelle route, ordine di config
+    e senza duplicati (SPEC.md §21.2)."""
+    out = []
+    for r in cfg.routes:
+        for target in r.s3:
+            if target not in out:
+                out.append(target)
+    return out
+
+
+def _s3_token(cfg, name):
+    """Token `s3:<prefisso>` / `s3://<bucket>/<prefisso>` → `(bucket, prefix)`,
+    oppure None se malformato. Forma breve: il bucket è PER DEFINIZIONE quello
+    globale (§21.7b); il prefisso è letterale (§21.2)."""
+    if name.startswith('s3://'):
+        bucket, slash, prefix = name[len('s3://'):].partition('/')
+        if not bucket or not slash:
+            return None
+        return bucket, prefix.strip('/')
+    if name.startswith('s3:') and cfg.s3 is not None:
+        prefix = name[len('s3:'):].strip('/')
+        if not prefix:
+            return None
+        return cfg.s3.bucket, prefix
+    return None
+
+
+def _dest_choices(cfg):
+    """Nomi dest disponibili + token S3 delle route, in ordine di config —
+    l'elenco che `--dest` mostra nell'errore (SPEC.md §19.3)."""
+    out = list(cfg.dest_names)
+    for bucket, prefix in s3_route_targets(cfg):
+        if cfg.s3 is not None and bucket == cfg.s3.bucket:
+            out.append(f's3:{prefix}')
+        else:
+            out.append(f's3://{bucket}/{prefix}')
+    return ', '.join(out) or 'nessuna'
+
+
+def pick_dest(cfg, name):
+    """Origine da `--dest <nome>` (SPEC.md §19.3/§21.4): ha **precedenza** su
+    `--from` — l'auto-detect per classe non viene neppure considerato.
+
+    - `dest <name>:` → filesystem: il mountpoint deve esistere, altrimenti
+      errore chiaro (mai un'origine dichiarata ignorata in silenzio, §19.3);
+    - token S3 di una route (`s3:<prefisso>` / `s3://<bucket>/<prefisso>`) →
+      `(bucket, prefix)`: solo target effettivamente dichiarati in una route
+      (§21.2), il caller costruisce la S3Destination per-route (§21.5).
+
+    → `('fs', path)` | `('s3', (bucket, prefix))`; nome ignoto →
+    RestoreError con l'elenco dei nomi disponibili.
+    """
+    path = cfg.dest_names.get(name)
+    if path is not None:
+        if dest_state(path) != 'ok':
+            raise RestoreError(f'dest {name} ({path}) non montata: monta il '
+                               'volume e riprova (SPEC §19.3)')
+        return 'fs', path
+    target = _s3_token(cfg, name)
+    if target is not None and target in s3_route_targets(cfg):
+        return 's3', target
+    raise RestoreError(f'destinazione inesistente: {name!r} — nomi '
+                       f'disponibili: {_dest_choices(cfg)}')
+
+
 # --------------------------------------------------------------- inventario
 
 def inventory(projects, kind, origin, layout):

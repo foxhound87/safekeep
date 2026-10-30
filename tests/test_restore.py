@@ -17,10 +17,16 @@ from types import SimpleNamespace
 from unittest import mock
 
 from safekeep import cli, restore
-from safekeep.config import dest_path, parse_rule
+from safekeep.config import dest_path, parse_config, parse_rule
 from safekeep.copier import TMP_INFIX, reconcile_project
 from safekeep.matcher import Matcher
 from safekeep.s3dest import S3Destination
+
+try:
+    import botocore  # noqa: F401
+    HAVE_BOTOCORE = True
+except ImportError:
+    HAVE_BOTOCORE = False
 
 
 def write(path, text=''):
@@ -297,6 +303,75 @@ class PickSourceTest(unittest.TestCase):
         self.assertEqual(restore.pick_source(self.cfg(), s3=s3), ('s3', s3))
 
 
+class PickDestTest(unittest.TestCase):
+    """`--dest <nome>` (SPEC §19.3/§21.4): origine univoca con precedenza su
+    `--from` — fs nominato montato, S3 solo per target dichiarati in una
+    route, ogni errore con l'elenco dei nomi disponibili."""
+
+    # blocco s3_* valido: serve a parse per le route S3 (§21.2/§21.7b)
+    S3 = 's3_bucket: bkt\ns3_access_key: AK\ns3_secret_key: SK\n'
+
+    @staticmethod
+    def cfg(text):
+        return parse_config(text, origin='test')
+
+    @staticmethod
+    def tmpdir():
+        return tempfile.mkdtemp()
+
+    def test_fs_nominato_montato(self):
+        dest = self.tmpdir()
+        self.addCleanup(shutil.rmtree, dest, ignore_errors=True)
+        cfg = self.cfg(f'dest nas: {dest}\n')
+        self.assertEqual(restore.pick_dest(cfg, 'nas'), ('fs', dest))
+
+    def test_fs_non_montato_errore_chiaro(self):
+        assente = os.path.join(self.tmpdir(), 'volume-assente')
+        cfg = self.cfg(f'dest nas: {assente}\n')
+        with self.assertRaises(restore.RestoreError) as cm:
+            restore.pick_dest(cfg, 'nas')
+        self.assertIn('non montata', str(cm.exception))
+        self.assertIn(assente, str(cm.exception))
+
+    def test_nome_inesistente_errore_con_elenco(self):
+        dest = self.tmpdir()
+        self.addCleanup(shutil.rmtree, dest, ignore_errors=True)
+        cfg = self.cfg(f'dest nas: {dest}\n')
+        with self.assertRaises(restore.RestoreError) as cm:
+            restore.pick_dest(cfg, 'zeta')
+        msg = str(cm.exception)
+        self.assertIn('inesistente', msg)
+        self.assertIn('nas', msg)              # l'elenco dei nomi disponibili
+
+    def test_s3_forme_breve_e_uri_della_route(self):
+        cfg = self.cfg(self.S3 + 'route /src: s3:pre/code, s3://other/old\n')
+        self.assertEqual(restore.pick_dest(cfg, 's3:pre/code'),
+                         ('s3', ('bkt', 'pre/code')))
+        self.assertEqual(restore.pick_dest(cfg, 's3://other/old'),
+                         ('s3', ('other', 'old')))
+        # stessa route citata nell'altra forma (bucket globale, §21.7b)
+        self.assertEqual(restore.pick_dest(cfg, 's3://bkt/pre/code'),
+                         ('s3', ('bkt', 'pre/code')))
+
+    def test_s3_fuori_da_route_errore_con_elenco(self):
+        cfg = self.cfg(self.S3 + 'route /src: s3:pre/code\n')
+        with self.assertRaises(restore.RestoreError) as cm:
+            restore.pick_dest(cfg, 's3:altro')
+        msg = str(cm.exception)
+        self.assertIn('inesistente', msg)
+        self.assertIn('s3:pre/code', msg)      # solo i target dichiarati
+
+    def test_s3_senza_blocco_s3_errore(self):
+        # nessuna s3_* → nessuna route S3 possibile: il token resta un nome
+        # inesistente (la dest anonima non è citabile, §21.2)
+        dest = self.tmpdir()
+        self.addCleanup(shutil.rmtree, dest, ignore_errors=True)
+        cfg = self.cfg(f'dest: {dest}\n')
+        with self.assertRaises(restore.RestoreError) as cm:
+            restore.pick_dest(cfg, 's3:pre/code')
+        self.assertIn('inesistente', str(cm.exception))
+
+
 class FirstLevelMenuTest(unittest.TestCase):
     def test_first_level_raggruppa(self):
         p = make_project('/tmp/p')
@@ -418,7 +493,7 @@ class CliRestoreTest(unittest.TestCase):
         self.cfg = write(os.path.join(self.tmp, 'safekeep'),
                          f'source: {self.src}\ndest: {self.dest}\n')
 
-    def run_cli(self, *argv, tty=False, inputs=None):
+    def run_cli(self, *argv, tty=False, inputs=None, cfg=None):
         stdin = mock.Mock()
         stdin.isatty = lambda: tty
         ctx = [mock.patch.dict(os.environ, {'HOME': self.home}),
@@ -431,7 +506,7 @@ class CliRestoreTest(unittest.TestCase):
             for c in ctx[4:]:
                 c.start()
                 self.addCleanup(c.stop)
-            code = cli.main(['restore', '--config', self.cfg, *argv])
+            code = cli.main(['restore', '--config', cfg or self.cfg, *argv])
         return code, out.getvalue(), err.getvalue()
 
     def test_no_args_non_tty_errore(self):
@@ -510,6 +585,63 @@ class CliRestoreTest(unittest.TestCase):
         self.assertIn('nas', out.getvalue())            # livello origine
         with open(self.target) as f:
             self.assertEqual(f.read(), 'v1 backup2')    # seconda dest scelta
+
+    def _dest_cfg(self):
+        """Config con due dest **nominate** `a`/`b` e SENZA route (§21.2)."""
+        os.makedirs(self.dest2, exist_ok=True)
+        return write(os.path.join(self.tmp, 'dest-nomi'),
+                     f'source: {self.src}\ndest a: {self.dest}\n'
+                     f'dest b: {self.dest2}\n')
+
+    def test_dest_precedenza_su_from(self):
+        # --dest b vince su --from local (classe): l'origine è la dest b (§19.3)
+        write(os.path.join(self.dest2, 'proj', 'a.md'), 'backup della b')
+        os.remove(self.target)
+        code, out, _ = self.run_cli('--dest', 'b', '--from', 'local',
+                                    '--force', self.target,
+                                    cfg=self._dest_cfg())
+        self.assertEqual(code, 0, out)
+        self.assertIn(self.dest2, out)              # riga del piano sulla dest b
+        with open(self.target) as f:
+            self.assertEqual(f.read(), 'backup della b')   # non quello di `a`
+
+    def test_dest_nome_inesistente_errore_con_elenco(self):
+        code, _, err = self.run_cli('--dest', 'zeta', self.target,
+                                    cfg=self._dest_cfg())
+        self.assertEqual(code, 1)
+        self.assertIn("inesistente: 'zeta'", err)
+        self.assertIn('disponibili: a, b', err)     # elenco dei nomi validi
+
+    def test_dest_non_montato_errore(self):
+        assente = os.path.join(self.tmp, 'volume-assente')
+        cfg = write(os.path.join(self.tmp, 'dest-gone'),
+                    f'source: {self.src}\ndest nas: {assente}\n')
+        code, _, err = self.run_cli('--dest', 'nas', self.target, cfg=cfg)
+        self.assertEqual(code, 1)
+        self.assertIn('non montata', err)
+        self.assertIn(assente, err)
+
+    @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+    def test_dest_s3_di_route_con_mock(self):
+        # --dest s3:pre/code → origine = S3Destination per-route (§21.5), con
+        # precedenza su --from local anche per la classe S3 (§19.3)
+        fake = FakeS3('s3://bkt/pre/code',
+                      {'pre/code/proj/a.md': (10, {}, 'backup da s3')})
+        os.remove(self.target)
+        cfg = write(os.path.join(self.tmp, 's3-route.cfg'),
+                    f'source: {self.src}\ndest: {self.dest}\n'
+                    's3_bucket: bkt\ns3_access_key: AK\ns3_secret_key: SK\n'
+                    f'route {self.src}: s3:pre/code\n')
+        os.chmod(cfg, 0o600)
+        with mock.patch.object(cli.Daemon, 's3_dest', return_value=fake):
+            code, out, err = self.run_cli('--dest', 's3:pre/code',
+                                          '--from', 'local', '--force',
+                                          self.target, cfg=cfg)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('pre/code/proj/a.md', out)    # riga del piano su S3
+        self.assertEqual(fake.downloaded, ['pre/code/proj/a.md'])
+        with open(self.target) as f:
+            self.assertEqual(f.read(), 'backup da s3')
 
     def _nested_backup(self):
         """Backup `proj/sub/b.md` la cui source+parent `proj/sub/` non esiste."""
