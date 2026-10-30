@@ -695,5 +695,112 @@ class RoutingCliTest(CliTestCase):
         self.assertTrue(os.path.exists(os.path.join(self.dest, 'proj/docs/note.md')))
 
 
+class StatusRoutingTest(CliTestCase):
+    """`status` con routing (§21.4): dest nominate etichettate col nome e
+    destinazioni affiancate a ogni progetto — solo se il config ha route."""
+
+    def route_cfg(self):
+        self.src2 = os.path.join(self.tmp, 'src2')
+        write(os.path.join(self.src2, 'proj2', '.sync'), 'include: *.md\n')
+        self.dest2 = os.path.join(self.tmp, 'dst2')
+        os.makedirs(self.dest2)
+        return write(os.path.join(self.tmp, 'route.cfg'),
+                     f'source: {self.src}\nsource: {self.src2}\n'
+                     f'dest a: {self.dest}\ndest b: {self.dest2}\n'
+                     f'route {self.src}: a\n')
+
+    def test_destinazioni_per_progetto_e_nomi_sulle_dest(self):
+        r = self.cli('status', '--config', self.route_cfg())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # progetto routeato: SOLO la dest della sua route (§21.3)
+        self.assertIn('routing   proj → [a]', r.stdout)
+        # progetto senza route: broadcast retrocompat, etichettato `tutte` (§21.1)
+        self.assertIn('routing   proj2 → [tutte]', r.stdout)
+        # dest nominate etichettate col nome, colonna `dest` da 10 char (§21.4)
+        self.assertIn(f'dest a    {self.dest} [ok]', r.stdout)
+        self.assertIn(f'dest b    {self.dest2} [ok]', r.stdout)
+
+    def test_senza_route_output_byte_identico(self):
+        r = self.cli('status', '--config', self.cfg)     # config di default
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('routing', r.stdout, 'broadcast implicito: nessuna riga')
+        # dest anonima: prefisso `dest      ` invariato (retrocompat 0.10.0)
+        self.assertIn(f'dest      {self.dest} [ok]', r.stdout)
+
+    @unittest.skipUnless(HAVE_BOTOCORE, 'botocore non installato (extra safekeep[s3])')
+    def test_target_s3_della_route_nell_etichetta(self):
+        cfg = write(os.path.join(self.tmp, 's3route.cfg'),
+                    f'source: {self.src}\ndest a: {self.dest}\n' + S3_BLOCK +
+                    f'route {self.src}: s3:pre/code\n')
+        os.chmod(cfg, 0o600)
+        r = self.cli('status', '--config', cfg)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('routing   proj → [s3://bkt/pre/code]', r.stdout)
+
+
+class DoctorRoutingTest(CliTestCase):
+    """`doctor` con routing (§21.4): route inutilizzate, dest nominate non
+    montate e progetto → dest — warning NON fatali e mai duplicati (doctor non
+    configura il logging, §9.1: la persona è la riga di check)."""
+
+    def unused_cfg(self):
+        # route su una root che non esiste: inutilizzata (§12) E con una dest
+        # nominata non montata → tutte e due le righe di warning insieme
+        self.assente = os.path.join(self.tmp, 'volume-assente')
+        return write(os.path.join(self.tmp, 'route.cfg'),
+                     f'source: {self.src}\ndest nas: {self.assente}\n'
+                     f'route {os.path.join(self.tmp, "mai-esistita")}: nas\n')
+
+    def test_route_inutilizzata_riga_sola_non_fatale(self):
+        r = self.cli('doctor', '--config', self.unused_cfg())
+        righe = [l for l in r.stdout.splitlines() if 'route inutilizzate' in l]
+        self.assertEqual(len(righe), 1, f'warning duplicato: {righe}')
+        self.assertTrue(righe[0].startswith('✗'), righe[0])
+        for needle in ('(riga 3)', 'SPEC §12', 'warning non fatale'):
+            self.assertIn(needle, righe[0], needle)
+        # il warning di log del daemon NON esce da doctor (§9.1): un solo canale
+        self.assertNotIn('non corrisponde ad alcuna root', r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout)     # NON fatale
+
+    def test_dest_nominata_non_montata_warning_unico(self):
+        r = self.cli('doctor', '--config', self.unused_cfg())
+        righe = [l for l in r.stdout.splitlines() if self.assente in l]
+        self.assertEqual(len(righe), 1,
+                         f'dest citata una volta sola, non dai check di rete: {righe}')
+        self.assertTrue(righe[0].startswith('✗'), righe[0])
+        for needle in ('dest di route non montate', 'nas', 'warning non fatale'):
+            self.assertIn(needle, righe[0], needle)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_elenco_progetto_dest(self):
+        cfg = write(os.path.join(self.tmp, 'route.cfg'),
+                    f'source: {self.src}\ndest a: {self.dest}\n'
+                    f'route {self.src}: a\n')
+        r = self.cli('doctor', '--config', cfg)
+        line = next(l for l in r.stdout.splitlines()
+                    if l.startswith('✔ routing'))
+        self.assertIn('proj → [a]', line)
+        self.assertNotIn('route inutilizzate', r.stdout)   # route agganciata
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_doctor_senza_route_invariato(self):
+        r = self.cli('doctor', '--config', self.cfg)
+        self.assertNotIn('routing', r.stdout, 'senza route il check non c\'è')
+        self.assertNotIn('route inutilizzate', r.stdout)
+
+    def test_json_stessi_check_stessi_id_univoci(self):
+        normale = self.cli('doctor', '--config', self.unused_cfg())
+        r = self.cli('doctor', '--json', '--config', self.unused_cfg())
+        self.assertEqual(r.returncode, normale.returncode, 'stesso exit code')
+        doc = json.loads(r.stdout)
+        attesi = [msg for _, msg in DoctorJsonTest.righe(normale.stdout)]
+        self.assertEqual([c['message'] for c in doc['checks']], attesi)
+        ids = [c['id'] for c in doc['checks']]
+        self.assertEqual(len(set(ids)), len(ids), f'id duplicati: {ids}')
+        self.assertIn('route_inutilizzate', ids)
+        self.assertIn('dest_di_route_non_montate', ids)
+        self.assertIn('routing', ids)
+
+
 if __name__ == '__main__':
     unittest.main()
