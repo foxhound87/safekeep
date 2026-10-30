@@ -6,6 +6,8 @@ Path finti assoluti (nessun path reale della macchina tranne `~`, che è
 espanso a runtime) — come nel resto della suite.
 """
 import os
+import shutil
+import tempfile
 import unittest
 
 from safekeep.config import ConfigError, dests_for_source, parse_config
@@ -362,6 +364,51 @@ class DestsForSourceTest(unittest.TestCase):
         # non tocca questa root, che resta su tutte le dest (default)
         cfg = parse('dest: /d1\ndest nas: /d2\nroute /altro: nas\n')
         self.assertEqual(dests_for_source('/src', cfg), (['/d1', '/d2'], []))
+
+
+class NormalizzazioneSymlinkTest(unittest.TestCase):
+    """Route scritta col path symlink vs root realpathizzata (nota fase 1).
+
+    Il daemon passa `Project.source_root` (realpath, SPEC/daemon) mentre la
+    route arriva dal config col path come scritto: `/tmp` su macOS risolve a
+    `/private/tmp` e — prima del fix — il match cadeva in broadcast silenzioso.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.real = os.path.join(self.tmp, 'real')
+        os.makedirs(os.path.join(self.real, 'src'))
+        self.link = os.path.join(self.tmp, 'link')
+        os.symlink(self.real, self.link)
+        self.assertNotEqual(os.path.realpath(self.link), self.link,
+                            'il test serve un symlink risolvibile')
+
+    def cfg(self, route_src):
+        return parse(f'dest: /d1\ndest nas: /d2\nroute {route_src}: nas\n')
+
+    def test_route_col_path_symlink_matcha_root_realpathizzata(self):
+        cfg = self.cfg(os.path.join(self.link, 'src'))
+        # root passata come la passa il daemon: realpath
+        root = os.path.realpath(os.path.join(self.link, 'src'))
+        self.assertEqual(dests_for_source(root, cfg), (['/d2'], []))
+
+    def test_route_realpathizzata_matcha_root_col_path_symlink(self):
+        cfg = self.cfg(os.path.realpath(os.path.join(self.link, 'src')))
+        root = os.path.join(self.link, 'src')       # path symlink come da eventi
+        self.assertEqual(dests_for_source(root, cfg), (['/d2'], []))
+
+    def test_route_sotto_il_symlink_comunque_matchata(self):
+        cfg = self.cfg(self.link)
+        root = os.path.join(self.link, 'src', 'proj')
+        self.assertEqual(dests_for_source(os.path.realpath(root), cfg),
+                         (['/d2'], []))
+
+    def test_route_diversa_non_matcha_nonostante_symlink(self):
+        cfg = self.cfg(os.path.join(self.link, 'altro'))
+        root = os.path.realpath(os.path.join(self.link, 'src'))
+        # nessun match → broadcast di sempre (default retrocompat)
+        self.assertEqual(dests_for_source(root, cfg), (['/d1', '/d2'], []))
 
 
 if __name__ == '__main__':

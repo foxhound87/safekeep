@@ -373,16 +373,24 @@ def dests_for_source(root, cfg):
     route che matcha `root` → TUTTE le destinazioni (anonime + nominate +
     S3 globale): retrocompat identico a 0.10.0, il routing è opt-in.
 
-    Funzione pura (nessun accesso al filesystem): `root` e le route sono
-    normalizzati con expanduser + abspath. Il caller (daemon) passa la source
-    root scoperta; la scoperta resta fuori da qui.
+    Normalizzazione: `root` E il sorgente di ogni route vengono confrontati
+    dopo **realpath + abspath + expanduser** su ENTRAMBI i lati. Il daemon
+    passa la source root già realpathizzata (`Project.source_root`), mentre
+    la route arriva dal config col path come scritto (es. `/tmp`, che su
+    macOS è un symlink per `/private/tmp`): con l'abspath di sola fase 1 il
+    match falliva SILENTIOSAMENTE e il progetto andava in broadcast.
+
+    Funzione pura solo per la logica (nessuna esistenza richiesta: realpath
+    risolve i symlink esistenti e tiene il resto); il caller (daemon) passa
+    la source root scoperta; la scoperta resta fuori da qui.
     """
-    p = os.path.abspath(os.path.expanduser(root))
-    best = None
+    p = os.path.realpath(os.path.abspath(os.path.expanduser(root)))
+    best, best_src = None, None
     for r in cfg.routes:
-        if p == r.src or r.src == os.sep or p.startswith(r.src + os.sep):
-            if best is None or len(r.src) > len(best.src):
-                best = r
+        src = os.path.realpath(r.src)     # r.src è già expanduser+abspath a parse
+        if ((p == src or src == os.sep or p.startswith(src + os.sep))
+                and (best_src is None or len(src) > len(best_src))):
+            best, best_src = r, src
     if best is None:
         return (list(cfg.dests),
                 [(cfg.s3.bucket, cfg.s3.prefix)] if cfg.s3 else [])
