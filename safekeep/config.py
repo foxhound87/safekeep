@@ -362,33 +362,57 @@ def _resolve_routes(cfg, raw_routes, origin):
         cfg.routes.append(route)
 
 
-def dests_for_source(root, cfg):
+def route_matches(src, root):
+    """True se `root` sta sotto `src`: confronto per SEGMENTI, `/` matcha tutto.
+
+    Regola UNICA del match §21.3: la usa `dests_for_source` E il warning
+    route inutilizzata (§12), così i due non divergono mai. Entrambi i lati
+    sono già normalizzati dai caller (realpath, vedi `dests_for_source`).
+    """
+    return root == src or src == os.sep or root.startswith(src + os.sep)
+
+
+def dests_for_source(root, cfg, project_root=None):
     """`(dest_fs, dest_s3)` per la sorgente `root` (SPEC.md §21.3).
 
     - `dest_fs`: path delle destinazioni filesystem **in ordine di config**;
     - `dest_s3`: target S3 come `(bucket, prefix)` in ordine di config.
 
-    Matching *longest-prefix-wins* sulla route: `root` va confrontato per
-    SEGMENTI (`/a/bc` non matcha `/a/b`), prefisso più lungo vincente. Nessuna
-    route che matcha `root` → TUTTE le destinazioni (anonime + nominate +
-    S3 globale): retrocompat identico a 0.10.0, il routing è opt-in.
+    Matching *longest-prefix-wins* su **DUE LIVELLI** (§21.3): la route
+    matcha se il suo sorgente è prefisso della source root `root` **O** della
+    project root `project_root` (directory del `.sync`, opzionale), e fra
+    tutti i match — su entrambi i livelli — vince il sorgente più lungo. Il
+    secondo livello serve in auto-discovery, dove la source root di ogni
+    progetto è `$HOME` e il routing per-progetto (`route ~/code: nas`) può
+    agganciare solo le project root. Confronto per SEGMENTI (`/a/bc` non
+    matcha `/a/b`), prefisso più lungo vincente. Nessuna route che matcha →
+    TUTTE le destinazioni (anonime + nominate + S3 globale): retrocompat
+    identica a 0.10.0, il routing è opt-in.
 
-    Normalizzazione: `root` E il sorgente di ogni route vengono confrontati
-    dopo **realpath + abspath + expanduser** su ENTRAMBI i lati. Il daemon
-    passa la source root già realpathizzata (`Project.source_root`), mentre
-    la route arriva dal config col path come scritto (es. `/tmp`, che su
-    macOS è un symlink per `/private/tmp`): con l'abspath di sola fase 1 il
-    match falliva SILENTIOSAMENTE e il progetto andava in broadcast.
+    Normalizzazione: `root`, `project_root` E il sorgente di ogni route
+    vengono confrontati dopo **realpath + abspath + expanduser** su ENTRAMBI
+    i lati. Il daemon passa le radici già realpathizzate (`Project.source_root`
+    e `Project.root`), mentre la route arriva dal config col path come
+    scritto (es. `/tmp`, che su macOS è un symlink per `/private/tmp`): con
+    l'abspath di sola fase 1 il match falliva SILENTIOSAMENTE e il progetto
+    andava in broadcast.
 
     Funzione pura solo per la logica (nessuna esistenza richiesta: realpath
     risolve i symlink esistenti e tiene il resto); il caller (daemon) passa
-    la source root scoperta; la scoperta resta fuori da qui.
+    le radici scoperte; la scoperta resta fuori da qui.
     """
-    p = os.path.realpath(os.path.abspath(os.path.expanduser(root)))
+    def canon(p):
+        return os.path.realpath(os.path.abspath(os.path.expanduser(p)))
+
+    candidates = [canon(root)]
+    if project_root is not None:
+        q = canon(project_root)
+        if q not in candidates:
+            candidates.append(q)
     best, best_src = None, None
     for r in cfg.routes:
         src = os.path.realpath(r.src)     # r.src è già expanduser+abspath a parse
-        if ((p == src or src == os.sep or p.startswith(src + os.sep))
+        if (any(route_matches(src, c) for c in candidates)
                 and (best_src is None or len(src) > len(best_src))):
             best, best_src = r, src
     if best is None:

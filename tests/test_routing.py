@@ -366,6 +366,79 @@ class DestsForSourceTest(unittest.TestCase):
         self.assertEqual(dests_for_source('/src', cfg), (['/d1', '/d2'], []))
 
 
+class ProjectRootMatchTest(unittest.TestCase):
+    """Match su DUE livelli — source root O project root (SPEC.md §21.3).
+
+    Il caso motore: auto-discovery, dove la source root di ogni progetto è
+    $HOME e il routing per-progetto può agganciare solo la project root
+    (directory del `.sync`). `project_root` è opzionale: senza, il match
+    resta sul solo primo livello (semantica di fase 1 come caso degenere).
+    """
+
+    def test_route_aggancia_project_root_anche_se_source_root_non_matcha(self):
+        # source root $HOME, route su ~/code: matcha SOLO via project root
+        cfg = parse('dest nas: /d/nas\ndest ext: /d/ext\n'
+                    f'route {HOME}/code: nas\n')
+        self.assertEqual(
+            dests_for_source(HOME, cfg,
+                             project_root=os.path.join(HOME, 'code', 'myapp')),
+            (['/d/nas'], []))
+        # progetto sotto ~ ma FUORI da ~/code → nessun match → broadcast
+        self.assertEqual(
+            dests_for_source(HOME, cfg,
+                             project_root=os.path.join(HOME, 'altro', 'myapp')),
+            (['/d/nas', '/d/ext'], []))
+
+    def test_route_home_come_default_per_tutto(self):
+        # `route ~: nas` unica route: ogni progetto sotto ~ ci finisce
+        cfg = parse('dest nas: /d/nas\nroute ~: nas\n')
+        for proj in (HOME, os.path.join(HOME, 'code', 'myapp'), '/altro'):
+            with self.subTest(proj=proj):
+                self.assertEqual(dests_for_source(HOME, cfg, project_root=proj),
+                                 (['/d/nas'], []))
+
+    def test_longest_prefix_wins_tra_i_due_livelli(self):
+        cfg = parse('dest a: /d/a\ndest b: /d/b\ndest c: /d/c\n'
+                    f'route ~: a\nroute {HOME}/code: b\n'
+                    f'route {HOME}/code/myapp: c\n')
+        # tre livelli: la route più lunga vince SU qualunque livello matchi
+        self.assertEqual(
+            dests_for_source(HOME, cfg,
+                             project_root=os.path.join(HOME, 'code', 'myapp')),
+            (['/d/c'], []))
+        self.assertEqual(
+            dests_for_source(HOME, cfg,
+                             project_root=os.path.join(HOME, 'code', 'altro')),
+            (['/d/b'], []))
+        self.assertEqual(
+            dests_for_source(HOME, cfg,
+                             project_root=os.path.join(HOME, 'docs', 'altro')),
+            (['/d/a'], []))
+
+    def test_route_sulla_source_root_anche_se_project_root_fuori(self):
+        # il primo livello resta: route che matcha la source root vince anche
+        # se la project root sta da tutt'altra parte
+        cfg = parse('dest nas: /d/nas\nroute /src: nas\n')
+        self.assertEqual(dests_for_source('/src', cfg, project_root='/altro/proj'),
+                         (['/d/nas'], []))
+
+    def test_source_esplicita_project_root_coincide_invariato(self):
+        # con `source:` esplicite la project root coincide spesso con la
+        # source root (un progetto per sorgente): doppio livello = stesso esito
+        cfg = parse('dest nas: /d/nas\nroute /src: nas\n')
+        self.assertEqual(dests_for_source('/src', cfg, project_root='/src'),
+                         (['/d/nas'], []))
+
+    def test_prefisso_per_segmenti_anche_sul_project_root(self):
+        # `~/codex` non è sotto `~/code` (segmento, non substring) → broadcast
+        cfg = parse('dest nas: /d/nas\ndest ext: /d/ext\n'
+                    f'route {HOME}/code: ext\n')
+        self.assertEqual(
+            dests_for_source(HOME, cfg,
+                             project_root=os.path.join(HOME, 'codex', 'myapp')),
+            (['/d/nas', '/d/ext'], []))
+
+
 class NormalizzazioneSymlinkTest(unittest.TestCase):
     """Route scritta col path symlink vs root realpathizzata (nota fase 1).
 
