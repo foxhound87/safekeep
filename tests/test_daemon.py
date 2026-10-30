@@ -908,12 +908,15 @@ class S3SeamTest(TmpTestCase):
         write(os.path.join(proj, 'a.md'), 'x')
         dest = self.path('dst')
         os.makedirs(dest, exist_ok=True)
+        # blocco s3_* reale: il routing passa i target S3 per (bucket, prefix)
+        # e il doppione sostituisce la destinazione costruita da load_config
         cfg_path = write(self.path('safekeep.cfg'),
-                         f'source: {src}\ndest: {dest}\n')
-        daemon = Daemon(cfg_path)
-        daemon.load_config()
+                         f'source: {src}\ndest: {dest}\n' + S3_TEXT)
+        with mock.patch.object(daemon_mod, 'S3Destination', return_value=s3):
+            daemon = Daemon(cfg_path)
+            daemon.load_config()
+            self.assertIs(daemon.s3, s3)     # il doppione al posto del client reale
         daemon.load_projects()
-        daemon.s3 = s3                  # il doppione al posto del client reale
         return daemon
 
     def test_reconcile_copia_anche_su_s3_e_somma_le_conta(self):

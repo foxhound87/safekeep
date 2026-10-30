@@ -2,7 +2,10 @@
 mapping, metadata (mtime ns/mode/symlink) e mapping errori → pending.
 
 Solo upload, needs_copy e — per restore (§19) — `iter_keys`/`download`:
-**nessuna cancellazione** (§18.2), nessun versioning, una sola dest S3.
+**nessuna cancellazione** (§18.2), nessun versioning. Il config ha un solo
+blocco `s3_*` (credenziali/endpoint uniche, §21.5): con il routing (0.11.0)
+possono esistere più `S3Destination` — una per (bucket, prefix) — che
+condividono lo stesso client botocore per bucket (`client=` in `__init__`).
 botocore arriva dall'extra `safekeep[s3]` e viene importato SOLO qui, alla
 prima costruzione di `S3Destination` — senza `s3_*` in config il runtime
 resta stdlib-only.
@@ -83,11 +86,11 @@ class S3Destination:
     target in `x-amz-meta-symlink`, stability check invariato.
     """
 
-    def __init__(self, scfg: S3Config):
+    def __init__(self, scfg: S3Config, client=None):
         _, _, exc = _import_botocore()      # fail-fast se l'extra manca (§18)
         self.cfg = scfg
         self._exc = exc
-        self._client = None
+        self._client = client               # client condiviso per bucket (§21.5)
         self._head = (0.0, None)            # (monotonic, esito HeadBucket | None)
         self.root = 's3://' + scfg.bucket + (
             '/' + scfg.prefix if scfg.prefix else '')
