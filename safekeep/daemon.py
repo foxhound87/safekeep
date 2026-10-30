@@ -27,6 +27,7 @@ from .config import (
     discover_projects,
     parse_config,
     parse_sync,
+    route_matches,
     source_root_for,
     validate_dests,
 )
@@ -396,29 +397,31 @@ class Daemon:
         return self.projects
 
     def warn_unused_routes(self):
-        """SPEC.md §12: una route che non matcha NESSUNA radice nota avvisa
-        (warning non fatale): in auto-discovery la source root può non essere
-        ancora agganciata e al rescan 24h la route può diventare attiva.
+        """SPEC.md §12: una route che non matcha NESSUNA root nota avvisa
+        (warning non fatale): in auto-discovery la root può non essere ancora
+        agganciata e al rescan 24h la route può diventare attiva.
 
         Radici note = le `source` del config (o `$HOME` in auto-discovery) più
-        le source root dei progetti scoperti. Warning una-tantum per riga per
-        daemon: `load_projects` gira anche a ogni reload di `.sync`.
+        le source root E le project root (dir del `.sync`) dei progetti
+        scoperti — stesso doppio livello del match (§21.3). Warning una-tantum
+        per riga per daemon: `load_projects` gira anche a ogni reload di
+        `.sync`.
         """
         if not self.cfg.routes:
             return
         roots = {os.path.realpath(os.path.abspath(os.path.expanduser(r)))
                  for r in (self.cfg.sources or [os.path.expanduser('~')])}
         roots |= {p.source_root for p in self.projects}
+        roots |= {p.root for p in self.projects}
         for r in self.cfg.routes:
             src = os.path.realpath(r.src)
-            if any(root == src or root.startswith(src + os.sep)
-                   for root in roots):
+            if any(route_matches(src, root) for root in roots):
                 continue
             if (src, r.lineno) not in self._routes_warned:
                 self._routes_warned.add((src, r.lineno))
-                log.warning('route %s (riga %d) non corrisponde ad alcuna source '
-                            'root nota: nessun progetto la usa — al prossimo '
-                            'rescan potrebbe agganciarsi (SPEC.md §12)',
+                log.warning('route %s (riga %d) non corrisponde ad alcuna root '
+                            'nota (source o project): nessun progetto la usa — '
+                            'al prossimo rescan potrebbe agganciarsi (SPEC.md §12)',
                             r.src, r.lineno)
 
     def classify_roots(self, roots, auto=False):
@@ -480,10 +483,12 @@ class Daemon:
 
     def project_targets(self, project):
         """`(dest_fs, dest_s3)` del progetto (SPEC.md §21.3): solo le dest della
-        route che vince sulla sua source root (longest-prefix-wins); nessuna
-        route → TUTTE le destinazioni (default retrocompat 0.10.0). `dest_s3`
-        è la lista di destinazioni S3 (cached per bucket/prefix, §21.5)."""
-        fs, s3specs = dests_for_source(project.source_root, self.cfg)
+        route che vince sui DUE livelli — source root e project root del
+        `.sync` (longest-prefix-wins); nessuna route → TUTTE le destinazioni
+        (default retrocompat 0.10.0). `dest_s3` è la lista di destinazioni S3
+        (cached per bucket/prefix, §21.5)."""
+        fs, s3specs = dests_for_source(project.source_root, self.cfg,
+                                       project_root=project.root)
         return fs, [self.s3_dest(bucket, prefix) for bucket, prefix in s3specs]
 
     def reconcile_all(self):
