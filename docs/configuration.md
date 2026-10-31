@@ -12,6 +12,8 @@ A single file in `$HOME` — no `~/.config/safekeep/…`. Syntax is
 |---|---|---|---|
 | `source` | path, repeatable | optional | roots to watch; a directory without a `.sync` is not followed |
 | `dest` | path, repeatable | **required**\* | destinations for every project (\*unless `s3_bucket:` is set — at least one `dest:` **or** `s3_bucket:`) |
+| `dest <name>: <path>` | name + path, repeatable | optional | named destination, citable in `route` lines and by `restore --dest` — see [Destination routing](/destination-routing) |
+| `route <src>: <dest-list>` | source + list, repeatable | optional | which destinations a source goes to (default: every destination) — see [Destination routing](/destination-routing) |
 | `layout` | `relative` \| `full` | `relative` | destination path layout |
 | `defaults` | rule, repeatable | builtin | low-priority default rules |
 | `s3_*` | see [S3 destination](/s3) | absent | one optional S3-compatible bucket (needs the `safekeep[s3]` extra) |

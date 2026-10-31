@@ -35,6 +35,7 @@ export default defineConfig({
           { text: 'Install', link: '/install' },
           { text: 'Configuration', link: '/configuration' },
           { text: 'Network volumes', link: '/network-volumes' },
+          { text: 'Destination routing', link: '/destination-routing' },
           { text: 'Commands', link: '/commands' },
           { text: 'S3 destination', link: '/s3' }
         ]
@@ -51,6 +52,7 @@ export default defineConfig({
           { text: 'Install', link: '/install' },
           { text: 'Configuration', link: '/configuration' },
           { text: 'Network volumes', link: '/network-volumes' },
+          { text: 'Destination routing', link: '/destination-routing' },
           { text: 'Commands', link: '/commands' },
           { text: 'S3 destination', link: '/s3' }
         ]

@@ -8,7 +8,7 @@ safekeep <command> [--config PATH] [-v]
 |---|---|
 | `run` | daemon: initial reconcile, fswatch loop, event dispatch, 24h timer |
 | `sync-once [--dry-run] [--prune] [--project PATH]` | one pass: walks the source and copies whatever differs, then exits |
-| `restore [--force] [--from {local,s3,nas}] [--if-dir-exists] [PATH\|GLOB ...]` | restore from the **latest copy** in a destination — always a dry-run unless `--force`; pick files by path/glob or with the interactive menu; `--if-dir-exists` only restores files whose destination directory already exists |
+| `restore [--force] [--from {local,s3,nas}] [--dest NAME] [--if-dir-exists] [PATH\|GLOB ...]` | restore from the **latest copy** in a destination — always a dry-run unless `--force`; pick files by path/glob or with the interactive menu; `--dest` restores from a named destination (0.11.0, takes precedence over `--from`); `--if-dir-exists` only restores files whose destination directory already exists |
 | `status` | read-only: config, sources, discovered projects with N rules, destination states |
 | `doctor [--json]` | diagnostics: config, fswatch + platform monitor, python, TCC/launchd plist and daemon executable (macOS), inotify limit and systemd unit (Linux) — exits non-zero if a fatal check fails; `--json` prints the same checks as one JSON document on stdout with the same exit code |
 | `daemon {install,start,stop,status,uninstall}` | manage the boot agent — see below |
@@ -49,6 +49,7 @@ safekeep restore ~/Code/myapp/docs/note.md    # dry-run: prints the plan
 safekeep restore --force ~/Code/myapp         # actually restores
 safekeep restore --force 'myapp/docs/*.md'    # glob, relative to the source root
 safekeep restore --from s3 --force ~/Code/myapp
+safekeep restore --dest nas --force ~/Code/myapp
 safekeep restore --force                      # interactive menu (terminal only)
 ```
 
@@ -69,6 +70,10 @@ what you get back. Nothing is ever deleted.
   destination is auto-detected (and logged); several candidates → an error
   listing them; a destination that isn't mounted → an error, never silently
   skipped.
+- **`--dest <name>`** (0.11.0) picks a **named** destination (`dest <name>:`)
+  and **takes precedence over `--from`** — the name identifies the origin
+  unambiguously, filesystem or S3. An undeclared name → an error listing the
+  available ones — see [Destination routing](/destination-routing).
 - **Writes only inside the sources.** The target is always the original path —
   there is no `--to` — and a reconstructed path outside the project's source
   is refused (EACCES). Copies are atomic (temp file + `os.replace`) and
