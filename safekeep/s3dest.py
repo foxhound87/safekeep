@@ -1,8 +1,9 @@
 """Destinazione S3-compatible (SPEC.md §18): client botocore lazy, key
 mapping, metadata (mtime ns/mode/symlink) e mapping errori → pending.
 
-Solo upload, needs_copy e — per restore (§19) — `iter_keys`/`download`:
-**nessuna cancellazione** (§18.2), nessun versioning. Il config ha un solo
+Solo upload, needs_copy (con snapshot LIST una-tantum per `sync-once`, §18.2)
+e — per restore (§19) — `iter_keys`/`download`: **nessuna cancellazione**
+(§18.2), nessun versioning. Il config ha un solo
 blocco `s3_*` (credenziali/endpoint uniche, §21.5): con il routing (0.11.0)
 possono esistere più `S3Destination` — una per (bucket, prefix) — che
 condividono lo stesso client botocore per bucket (`client=` in `__init__`).
@@ -215,14 +216,29 @@ class S3Destination:
         return r['ContentLength'], {k.lower(): v
                                     for k, v in (r.get('Metadata') or {}).items()}
 
-    def needs_copy(self, src, dst) -> bool:
+    def needs_copy(self, src, dst, snap=None) -> bool:
         """True se l'oggetto manca o (size, mtime ns) diversi — tolleranza
-        1s (`MTIME_TOLERANCE`), stessa semantica di `copier.needs_copy`."""
+        1s (`MTIME_TOLERANCE`), stessa semantica di `copier.needs_copy`.
+
+        Con `snap` (snapshot `list_objects_v2`, §18.2) esistenza e size
+        arrivano dalla LIST e il mtime si confronta con `LastModified`
+        (limite superiore del tempo di upload): nessun HeadObject per i
+        file regolari. Symlink: sempre HeadObject (target nelle metadata).
+        Senza `snap`: HeadObject per-file (come sempre).
+        """
         try:
             s = os.stat(src)
         except FileNotFoundError:
             return False                      # niente da copiare
         bucket, key = self._parse(dst)
+        if snap is not None and not os.path.islink(src):
+            entry = snap.get(key)
+            if entry is None:
+                return True                   # assente → copia
+            size, lastmod = entry
+            if size != s.st_size:
+                return True
+            return s.st_mtime > lastmod.timestamp() + MTIME_TOLERANCE
         head = self._head_object(bucket, key)
         if head is None:
             return True
@@ -283,6 +299,19 @@ class S3Destination:
 
     # --- restore: iterazione e download (SPEC.md §19) ----------------------
 
+    def _list_objects(self, prefix):
+        """Ogni object sotto `prefix` — `list_objects_v2` paginato
+        (`ContinuationToken`). Nessuna cancellazione."""
+        kwargs = {'Bucket': self.cfg.bucket, 'Prefix': prefix}
+        while True:
+            r = self._call(self.client().list_objects_v2, **kwargs)
+            for obj in (r.get('Contents') or []):
+                yield obj
+            token = r.get('NextContinuationToken')
+            if not token:
+                return
+            kwargs['ContinuationToken'] = token
+
     def iter_keys(self, prefix):
         """`(key, size, metadata)` per ogni object sotto `prefix`.
 
@@ -290,20 +319,31 @@ class S3Destination:
         size+metadata (lowercase, come `_head_object`) da un HeadObject per
         key — un list S3 non restituisce le metadata. Nessuna cancellazione.
         """
-        kwargs = {'Bucket': self.cfg.bucket, 'Prefix': prefix}
-        while True:
-            r = self._call(self.client().list_objects_v2, **kwargs)
-            for obj in (r.get('Contents') or []):
-                key = obj['Key']
-                head = self._head_object(self.cfg.bucket, key)
-                if head is None:
-                    continue                   # sparito fra list e head
-                size, md = head
-                yield key, size, md
-            token = r.get('NextContinuationToken')
-            if not token:
-                return
-            kwargs['ContinuationToken'] = token
+        for obj in self._list_objects(prefix):
+            key = obj['Key']
+            head = self._head_object(self.cfg.bucket, key)
+            if head is None:
+                continue                       # sparito fra list e head
+            size, md = head
+            yield key, size, md
+
+    def snapshot(self):
+        """`{key: (Size, LastModified)}` una-tantum per il prefix di questa
+        dest (`list_objects_v2` paginato, §18.2): la passata `sync-once` la
+        consulta in-memory al posto di un HeadObject per file.
+
+        None se la LIST fallisce (warning): il caller torna al percorso
+        HeadObject per-file — sicurezza > velocità.
+        """
+        snap = {}
+        try:
+            for obj in self._list_objects(self.cfg.prefix):
+                snap[obj['Key']] = (obj['Size'], obj['LastModified'])
+        except OSError as e:
+            log.warning('LIST %s fallita: %s — passo HeadObject per-file',
+                        self.root, e)
+            return None
+        return snap
 
     def download(self, key, dst):
         """Scarica l'object `key` su `dst` (tmp nella dir target + `os.replace`).

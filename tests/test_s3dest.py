@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 from safekeep.config import ConfigError, S3Config
@@ -161,6 +162,136 @@ class NeedsCopyTest(unittest.TestCase):
         dest._client.head_object.return_value = self.head(
             0, {'symlink': 'altro.md'})
         self.assertTrue(dest.needs_copy(link, 's3://bkt/safekeep/link'))
+
+
+@SKIP
+class SnapshotTest(unittest.TestCase):
+    """§18.2/0.11.1: snapshot `list_objects_v2` una-tantum al posto degli
+    HeadObject per-file nella passata `sync-once` — zero HeadObject per i
+    file regolari presenti e aggiornati, fallback HEAD se la LIST fallisce."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.src = os.path.join(self.tmp, 'note.md')
+        with open(self.src, 'w') as f:
+            f.write('abc')
+
+    @staticmethod
+    def lm(seconds):
+        """LastModified come lo restituisce botocore: datetime aware UTC."""
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+
+    def test_snapshot_paginata_prefisso_del_config(self):
+        dest = make_dest()                   # prefix 'safekeep'
+        dest._client.list_objects_v2.side_effect = [
+            {'Contents': [{'Key': 'safekeep/a.md', 'Size': 3,
+                           'LastModified': self.lm(1_700_000_000)}],
+             'NextContinuationToken': 't1'},
+            {'Contents': [{'Key': 'safekeep/b.md', 'Size': 0,
+                           'LastModified': self.lm(1_700_000_100)}],
+             'IsTruncated': False},
+        ]
+        snap = dest.snapshot()
+        self.assertEqual(set(snap), {'safekeep/a.md', 'safekeep/b.md'})
+        self.assertEqual(snap['safekeep/a.md'][0], 3)
+        first = dest._client.list_objects_v2.call_args_list[0][1]
+        self.assertEqual(first['Prefix'], 'safekeep')
+        second = dest._client.list_objects_v2.call_args_list[1][1]
+        self.assertEqual(second['ContinuationToken'], 't1')
+        self.assertEqual(dest._client.head_object.call_count, 0,
+                         'la snapshot non fa HeadObject')
+
+    def test_snapshot_un_prefisso_per_destinazione(self):
+        # più route S3 (§21.2): ogni dest lista il SUO prefix
+        alpha, beta = make_dest(prefix='alpha'), make_dest(prefix='beta')
+        alpha._client.list_objects_v2.return_value = {'Contents': []}
+        beta._client.list_objects_v2.return_value = {'Contents': []}
+        self.assertEqual(alpha.snapshot(), {})
+        self.assertEqual(beta.snapshot(), {})
+        self.assertEqual(
+            alpha._client.list_objects_v2.call_args_list[0][1]['Prefix'], 'alpha')
+        self.assertEqual(
+            beta._client.list_objects_v2.call_args_list[0][1]['Prefix'], 'beta')
+
+    def test_snapshot_list_fallita_warning_e_none(self):
+        dest = make_dest()
+        dest._client.list_objects_v2.side_effect = bce.EndpointConnectionError(
+            endpoint_url='https://x')
+        with self.assertLogs('safekeep', level='WARNING') as cm:
+            snap = dest.snapshot()
+        self.assertIsNone(snap, 'fallback: il caller torna agli HeadObject')
+        self.assertIn('LIST', cm.output[0])
+        self.assertIn('HeadObject', cm.output[0])
+        self.assertEqual(dest._client.head_object.call_count, 0)
+
+    def test_snapshot_presente_e_aggiornato_zero_head(self):
+        s = os.stat(self.src)
+        dest = make_dest()
+        snap = {'safekeep/note.md': (s.st_size, self.lm(s.st_mtime))}
+        self.assertFalse(dest.needs_copy(self.src, 's3://bkt/safekeep/note.md',
+                                         snap))
+        self.assertEqual(dest._client.head_object.call_count, 0,
+                         'file presente e aggiornato: nessun HeadObject')
+
+    def test_snapshot_assente_o_size_diverso_copia_senza_head(self):
+        s = os.stat(self.src)
+        dest = make_dest()
+        self.assertTrue(dest.needs_copy(self.src, 's3://bkt/safekeep/altro.md',
+                                        {}))
+        self.assertTrue(dest.needs_copy(
+            self.src, 's3://bkt/safekeep/note.md',
+            {'safekeep/note.md': (s.st_size + 1, self.lm(s.st_mtime))}))
+        self.assertEqual(dest._client.head_object.call_count, 0)
+
+    def test_snapshot_mtime_dopo_lupload_copia_senza_head(self):
+        # LastModified 2s prima dell'mtime della sorgente → cambiato dopo
+        # l'upload → copia (stesso verdetto del percorso HeadObject)
+        s = os.stat(self.src)
+        dest = make_dest()
+        snap = {'safekeep/note.md': (s.st_size, self.lm(s.st_mtime - 2))}
+        self.assertTrue(dest.needs_copy(self.src, 's3://bkt/safekeep/note.md',
+                                        snap))
+        self.assertEqual(dest._client.head_object.call_count, 0)
+
+    def test_criterio_identico_ai_percorso_head(self):
+        # stesso file, stessi verdetti: snapshot (LastModified) e HeadObject
+        # (x-amz-meta-mtime) concordano su "aggiornato" e "da copiare"
+        s = os.stat(self.src)
+        dest = make_dest()
+        snap_ok = {'safekeep/note.md': (s.st_size, self.lm(s.st_mtime))}
+        dest._client.head_object.return_value = {
+            'ContentLength': s.st_size, 'Metadata': {'mtime': str(s.st_mtime_ns)}}
+        self.assertFalse(dest.needs_copy(self.src, 's3://bkt/safekeep/note.md'))
+        self.assertFalse(dest.needs_copy(self.src, 's3://bkt/safekeep/note.md',
+                                         snap_ok))
+        snap_old = {'safekeep/note.md': (s.st_size + 1, self.lm(s.st_mtime))}
+        dest._client.head_object.return_value = {
+            'ContentLength': s.st_size + 1, 'Metadata': {}}
+        self.assertTrue(dest.needs_copy(self.src, 's3://bkt/safekeep/note.md'))
+        self.assertTrue(dest.needs_copy(self.src, 's3://bkt/safekeep/note.md',
+                                        snap_old))
+
+    def test_symlink_con_snapshot_viene_headato(self):
+        # il target del symlink vive in x-amz-meta-symlink: la LIST non lo
+        # sa → HeadObject invariato (criterio identico per i link)
+        link = os.path.join(self.tmp, 'link')
+        os.symlink('note.md', link)
+        dest = make_dest()
+        snap = {'safekeep/link': (0, self.lm(1_700_000_000))}
+        dest._client.head_object.return_value = {
+            'ContentLength': 0, 'Metadata': {'symlink': 'note.md'}}
+        self.assertFalse(dest.needs_copy(link, 's3://bkt/safekeep/link', snap))
+        self.assertEqual(dest._client.head_object.call_count, 1)
+        dest._client.head_object.return_value = {
+            'ContentLength': 0, 'Metadata': {'symlink': 'altro.md'}}
+        self.assertTrue(dest.needs_copy(link, 's3://bkt/safekeep/link', snap))
+
+    def test_sorgente_sparita_con_snapshot_niente_head(self):
+        dest = make_dest()
+        self.assertFalse(dest.needs_copy(self.src + '.fantasma',
+                                         's3://bkt/safekeep/x.md', {}))
+        self.assertEqual(dest._client.head_object.call_count, 0)
 
 
 @SKIP

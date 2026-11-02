@@ -352,6 +352,34 @@ class PruneCliTest(CliTestCase):
             self.assertTrue(os.path.exists(os.path.join(self.dest, keep)), keep)
 
 
+class ProgressCliTest(CliTestCase):
+    """0.11.1 (§9): riga di progresso per progetto con `flush`, stampata
+    PRIMA di lavorarlo — anche in dry-run, sintesi finale invariata."""
+
+    def test_progresso_prima_della_sintesi(self):
+        r = self.cli('sync-once', '--config', self.cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = r.stdout.splitlines()
+        i_prog = lines.index('sync-once: proj…')
+        i_sum = next(i for i, l in enumerate(lines) if l.startswith('proj: '))
+        self.assertLess(i_prog, i_sum, 'il progresso precede la sintesi')
+        self.assertIn('copie', lines[i_sum])          # sintesi finale invariata
+
+    def test_progresso_ordinato_e_con_dry_run(self):
+        src2 = os.path.join(self.tmp, 'src2')
+        write(os.path.join(src2, 'zproj', '.sync'), 'include: *.md\n')
+        write(os.path.join(src2, 'zproj', 'note.md'), 'y')
+        cfg = write(os.path.join(self.tmp, 'two.cfg'),
+                    f'source: {self.src}\nsource: {src2}\n'
+                    f'dest: {self.dest}\n')
+        r = self.cli('sync-once', '--dry-run', '--config', cfg)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = r.stdout.splitlines()
+        progs = [l for l in lines if l.startswith('sync-once: ')]
+        self.assertEqual(progs, ['sync-once: proj…', 'sync-once: zproj…'])
+        self.assertTrue(any('da copiare' in l for l in lines))  # sintesi dry-run
+
+
 class DoctorPermessiRecentiTest(CliTestCase):
     """SPEC.md §14.4: errori di permesso nel log corrente — finestra 24h,
     warning non fatale, log assente ⇒ check saltato."""
