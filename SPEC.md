@@ -717,6 +717,11 @@ directory → file intatto (policy "mai cancellare"). Default senza `--prune`: n
 rimozione. Il controllo "dest dentro source/$HOME" è lo stesso di `doctor`
 (vedi §11): con `run` e `sync-once` esce con codice ≠ 0.
 
+Durante il passaggio ogni progetto stampa una **riga di progresso** su stdout
+(`sync-once: <nome>…`, con `flush`) prima di essere lavorato — così un passaggio
+lungo (walk + passata S3, §18.2) non resta silenzioso; le righe di sintesi
+alla fine restano invariate. Vale anche con `--dry-run` (0.11.1).
+
 Esempi:
 
 ```bash
@@ -1459,6 +1464,14 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   (§18). Niente rewriting path per-route: il layout dest globale resta invariato.
   `restore --dest <nome>` seleziona una destinazione nominata con precedenza su
   `--from` (§19.3); i nomi compaiono anche in `status`/`doctor`.
+- **0.11.1** — fix/perf (PATCH) `sync-once`: (a) **riga di progresso** per
+  progetto su stdout con `flush`, stampata prima di lavorarlo — la passata non
+  è più silenziosa per minuti; (b) la passata S3 da **N HeadObject** (uno per
+  file, ~2.550 richieste sequenziali ≈ 2 min) a **una `list_objects_v2` per
+  prefisso** (`snapshot()`, §18.2): esistenza/size/mtime letti una-tantum per
+  esecuzione e consultati in-memory per tutto il walk (~0,1s). Symlink e
+  fallback HEAD-per-file invariati; criterio "già aggiornato" identico nella
+  sostanza (size + mtime con tolleranza 1s). Nessuna cache fra esecuzioni.
 - **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0).
   La dismissione della CI GitLab (`.gitlab-ci.yml`) è **già avvenuta** su `main`
   durante 0.9.x, a seguito dell'eliminazione del repo GitLab: il publish a PyPI
@@ -1585,6 +1598,21 @@ resta invariato.
   delle dest fs. Metadata `x-amz-meta-mode` = `oct(st_mode)`.
 - **Symlink** = object a **zero byte** con `x-amz-meta-symlink` = target
   (mai seguito, §7.3): `needs_copy` confronta il target.
+- **Snapshot LIST in `sync-once`** (0.11.1): la passata di riconciliazione
+  della CLI fa **una `list_objects_v2` per prefisso** una-tantum per
+  esecuzione (`S3Destination.snapshot()`, paginata con continuation token) e
+  consulta il dict `{key: (Size, LastModified)}` in-memory per l'intero walk:
+  nessun HeadObject per i file regolari. Criterio nella sostanza invariato —
+  assente → copia; size diversa → copia; size uguale → `mtime ≤ LastModified
+  + 1s` ⇒ già aggiornato (`LastModified` è il tempo di upload, limite
+  superiore del mtime del contenuto: confronto una-tantale, non `abs`);
+  symlink → HeadObject come prima (il target vive nelle metadata). LIST
+  fallita (permessi/rete) → warning + **fallback HeadObject per-file**
+  (sicurezza > velocità). Differenze dichiarate rispetto a
+  `x-amz-meta-mtime`: lo skew fra orologio host e server sposta la finestra
+  di tolleranza; un contenuto sostituito con mtime retrodatato e size uguale
+  non viene rilevato (la lista è solo "in avanti"); mtime futuro → ricopia
+  conservativa. Nessuna cache fra esecuzioni.
 - **Upload** = `put_object` con `Body` = file aperto in streaming e i
   metadata; nessuna writer di destinazione: niente tmp, niente replace —
   un PUT object è di per sé atomico (lo scritto parziale non diventa mai
