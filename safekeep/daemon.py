@@ -602,6 +602,12 @@ class Daemon:
                                 project.name, s3.root, e)
                 # nessun prune su S3 (SPEC §18.2): `--prune` tocca solo le dest fs
             rows.append((project, stats, len(absent)))
+        if not dry_run:
+            # Totale nel log per `recent_copy_outcomes` (§14.4, 0.11.2): i
+            # successi di sync-once altrimenti restavano solo su stdout.
+            # dry-run escluso: lì stats['copiati'] conta il PIANIFICATO.
+            log.info('sync-once: %d copie su %d progetto/i',
+                     sum(s.get('copiati', 0) for _, s, _ in rows), len(rows))
         return rows
 
     def mark_pending(self, project, dest):
@@ -887,9 +893,12 @@ class Daemon:
             dst = dest_path(dest, project.source_root, rel, self.cfg.layout)
             try:
                 if is_link_dir:
-                    copy_one(src, dst, dest)    # symlink: sempre ricreato come link
+                    # symlink: sempre ricreato come link — anche lì una copia
+                    # riuscita va contata (0.11.2, §14.4)
+                    if copy_one(src, dst, dest):
+                        log.info('copiato %s → %s', src, dst)
                 elif needs_copy(src, dst) and copy_one(src, dst, dest):
-                    log.debug('copiato %s → %s', src, dst)
+                    log.info('copiato %s → %s', src, dst)   # INFO da 0.11.2 (§14.4)
             except OSError as e:
                 if e.errno in DEST_DOWN_ERRNOS:
                     log.warning('errore di mount/rete %s → %s: %s: dest in pending',
@@ -906,9 +915,12 @@ class Daemon:
             dst = s3.dest_path(s3.root, project.source_root, rel, self.cfg.layout)
             try:
                 if is_link_dir:
-                    s3.copy(src, dst)            # symlink: object zero-byte
+                    # symlink: object zero-byte — idem fs, una copia riuscita
+                    # conta (0.11.2, §14.4)
+                    if s3.copy(src, dst):
+                        log.info('copiato %s → %s', src, dst)
                 elif s3.needs_copy(src, dst) and s3.copy(src, dst):
-                    log.debug('copiato %s → %s', src, dst)
+                    log.info('copiato %s → %s', src, dst)   # INFO da 0.11.2 (§14.4)
             except OSError as e:
                 if e.errno in DEST_DOWN_ERRNOS:
                     log.warning('errore di rete %s → %s: %s: dest S3 in pending',

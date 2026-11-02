@@ -23,7 +23,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(REPO, 'bin', 'safekeep.py')
 
 # Check di `doctor` condivisi da tutte le piattaforme (SPEC.md §9)
-BASE_MARKERS = ('config', 'dest non annidate', 'fswatch', 'python', 'residui')
+BASE_MARKERS = ('config', 'dest non annidate', 'fswatch', 'python', 'residui',
+                'copie nelle ultime 24h')   # 0.11.2: §14.4
 # SPEC.md §14.4: TCC e plist sono Darwin-only, inotify e unit systemd Linux-only
 DARWIN_MARKERS = ('TCC', 'plist')
 LINUX_MARKERS = ('inotify', 'unit systemd')
@@ -424,6 +425,83 @@ class DoctorPermessiRecentiTest(CliTestCase):
         self.assertIn('check saltato', line)
 
 
+class DoctorCopieRecentiTest(CliTestCase):
+    """SPEC.md §14.4 (0.11.2): copie riuscite/fallite nelle ultime 24h —
+    warning NON fatale solo se fallimenti > 0 e riuscite = 0; log assente
+    ⇒ check saltato."""
+
+    def log_path(self):
+        return os.path.join(self.home, '.local/state/safekeep/safekeep.log')
+
+    @staticmethod
+    def stamp(delta):
+        return (datetime.now() - delta).strftime('%Y-%m-%d %H:%M:%S,000')
+
+    def riga_fail(self, delta):
+        return (f'{self.stamp(delta)} ERROR copia fallita a → b: '
+                '[Errno 1] Operation not permitted: "/x.tmp.1"\n')
+
+    def riga_ok(self, delta):
+        return f'{self.stamp(delta)} INFO copiato /a → /b\n'
+
+    def riga_doctor(self, stdout):
+        self.assertIn('copie nelle ultime 24h', stdout, stdout)
+        return next(l for l in stdout.splitlines()
+                    if 'copie nelle ultime 24h' in l)
+
+    def test_fallimenti_zero_riuscite_warning_non_fatale(self):
+        write(self.log_path(), self.riga_fail(timedelta(hours=3)))
+        r = self.cli('doctor', '--config', self.cfg)
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✗'), line)
+        for needle in ('0 riuscite su 1 fallite', 'warning non fatale',
+                       'sync-once --dry-run', self.log_path()):
+            self.assertIn(needle, line, needle)
+        self.assertEqual(r.returncode, 0, r.stdout)      # NON fatale
+
+    def test_riuscite_anche_con_fallimenti_verde(self):
+        # una dest che fallisce mentre un'altra riesce: il lato per-dest è
+        # del check permessi — qui i due conteggi restano visibili, esito ✔
+        write(self.log_path(), self.riga_ok(timedelta(hours=1))
+              + self.riga_fail(timedelta(hours=2)))
+        r = self.cli('doctor', '--config', self.cfg)
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('1 riuscite, 1 fallite', line)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_aggregati_reconcile_contati_come_riuscite(self):
+        write(self.log_path(),
+              f'{self.stamp(timedelta(hours=1))} INFO reconcile: 4 copie su 2 '
+              'progetto/i\n')
+        r = self.cli('doctor', '--config', self.cfg)
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('4 riuscite, 0 fallite', line)
+
+    def test_nessuna_attivita_verde(self):
+        write(self.log_path(),
+              f'{self.stamp(timedelta(hours=1))} INFO reconcile: 0 copie su 2 '
+              'progetto/i\n')
+        r = self.cli('doctor', '--config', self.cfg)
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('nessuna attività', line)
+
+    def test_solo_attivita_vecchia_verde(self):
+        write(self.log_path(), self.riga_fail(timedelta(days=3)))
+        r = self.cli('doctor', '--config', self.cfg)
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('nessuna attività', line)
+
+    def test_log_assente_check_saltato(self):
+        r = self.cli('doctor', '--config', self.cfg)     # nessun log nel HOME finto
+        line = self.riga_doctor(r.stdout)
+        self.assertTrue(line.startswith('✔'), line)
+        self.assertIn('check saltato', line)
+
+
 @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
 class DoctorLingerTest(CliTestCase):
     """SPEC.md §14.4: linger solo dove c'è la unit systemd, warning non fatale."""
@@ -598,6 +676,18 @@ class DoctorJsonTest(CliTestCase):
         _, doc = self.json_doctor('--config', self.cfg)     # HOME finto: niente log
         self.assertEqual(doc['permission_errors'],
                          {'count_24h': 0, 'last': None})
+
+    def test_copie_24h_status_warn_non_fatale(self):
+        # 0.11.2/§14.4: fallimenti > 0 e riuscite = 0 → warn in JSON, exit 0
+        log = os.path.join(self.home, '.local/state/safekeep/safekeep.log')
+        stamp = (datetime.now() - timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
+        write(log, f'{stamp},000 ERROR copia fallita a → b: '
+                   '[Errno 1] Operation not permitted: "/x.tmp.1"\n')
+        r, doc = self.json_doctor('--config', self.cfg)
+        check = next(c for c in doc['checks']
+                     if 'copie nelle ultime 24h' in c['message'])
+        self.assertEqual(check['status'], 'warn')           # warning, NON fatale
+        self.assertEqual(r.returncode, 0, r.stdout)
 
     @unittest.skipUnless(shutil.which('fswatch'), 'fswatch non installato')
     def test_check_fatale_esce_1_e_lo_dichiara(self):

@@ -259,6 +259,74 @@ class RecentPermissionErrorsTest(unittest.TestCase):
         self.assertEqual(count, 2)
 
 
+class RecentCopyOutcomesTest(unittest.TestCase):
+    """SPEC.md §14.4 (0.11.2): copie riuscite/fallite nelle ultime 24h —
+    stesse regole di finestra/timestamp di `recent_permission_errors`."""
+
+    NOW = datetime(2026, 10, 4, 20, 0, 0)
+
+    def _log(self, text):
+        fd, path = tempfile.mkstemp(suffix='.log')
+        self.addCleanup(os.unlink, path)
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(text)
+        return path
+
+    @staticmethod
+    def _stamp(dt):
+        return dt.strftime('%Y-%m-%d %H:%M:%S,000')   # formato %(asctime)s
+
+    def test_log_assente(self):
+        self.assertIsNone(
+            plat.recent_copy_outcomes('/non/esiste/safekeep.log'),
+            'nessun log ⇒ check saltato, non warning')
+
+    def test_riuscite_event_aggregati_e_fallite_con_throttle(self):
+        text = (
+            f'{self._stamp(self.NOW - timedelta(hours=2))} INFO copiato /a → /b\n'
+            f'{self._stamp(self.NOW - timedelta(hours=2))} INFO copiato /c → '
+            's3://bkt/pre/k\n'
+            f'{self._stamp(self.NOW - timedelta(hours=3))} INFO reconcile: 5 copie '
+            'su 2 progetto/i\n'
+            f'{self._stamp(self.NOW - timedelta(hours=1))} INFO sync-once: 3 copie '
+            'su 1 progetto/i\n'
+            f'{self._stamp(self.NOW - timedelta(hours=2))} ERROR copia fallita '
+            '/x → /y: [Errno 1] Operation not permitted: \'/x.tmp.1\'\n'
+            f'{self._stamp(self.NOW - timedelta(hours=1))} ERROR copia fallita '
+            '/x → /y: [Errno 1] Operation not permitted: \'/x.tmp.1\' '
+            '— ripetuto 49 volte\n'
+        )
+        ok, fail = plat.recent_copy_outcomes(self._log(text), now=self.NOW)
+        self.assertEqual(ok, 2 + 5 + 3, 'event (1 ciascuna) + aggregati (somma)')
+        self.assertEqual(fail, 1 + (1 + 49), 'throttle: riga + riga-suffisso + 49')
+
+    def test_debug_e_righe_estranea_non_contano(self):
+        text = (
+            f'{self._stamp(self.NOW - timedelta(hours=1))} DEBUG copiato /a → /b\n'
+            f'{self._stamp(self.NOW - timedelta(hours=1))} INFO reconcile: 0 copie '
+            'su 2 progetto/i\n'
+            f'{self._stamp(self.NOW - timedelta(hours=1))} INFO saltato '
+            '(directory destinazione assente): /t\n'
+        )
+        self.assertEqual(
+            plat.recent_copy_outcomes(self._log(text), now=self.NOW), (0, 0),
+            'DEBUG copiato non conta (livello fa da discriminatore) e 0 copie = 0')
+
+    def test_finestra_clock_skew_e_timestamp_illeggibile(self):
+        text = (
+            f'{self._stamp(self.NOW - timedelta(days=3))} INFO copiato /old → /b\n'
+            f'{self._stamp(self.NOW + timedelta(hours=1))} INFO copiato /futuro → /b\n'
+            'senza-data INFO copiato /x → /y\n'
+            f'{self._stamp(self.NOW - timedelta(days=3))} ERROR copia fallita '
+            '/x → /y: [Errno 13] Permission denied\n'
+            f'{self._stamp(self.NOW + timedelta(hours=1))} ERROR copia fallita '
+            '/x → /y: [Errno 13] Permission denied\n'
+        )
+        self.assertEqual(
+            plat.recent_copy_outcomes(self._log(text), now=self.NOW), (0, 0),
+            'fuori finestra o non sicuri (clock skew incluso) ⇒ non si conta')
+
+
 class DaemonExeTest(unittest.TestCase):
     """SPEC.md §14.4 (0.5.1): exe del processo launchd, None se non
     determinabile — Darwin-only, solo lettura, casi finti."""
