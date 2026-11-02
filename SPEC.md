@@ -912,8 +912,9 @@ e `_copy` del daemon) passano da lì, quindi event-driven e reconcile sono coper
 Le fallite con errno di **mount** (`ENODEV`/`EBUSY`/`ENOSPC`) non sono throttlate: ce n'è
 al massimo una per walk (il walk si ferma) e la loro riga (`errore di mount …`) non è
 cambiata. I conteggi **non leggono mai dal log**: `stats['errati']` e le righe di sintesi
-di `sync-once` restano identici. L'unico consumatore del log è `recent_permission_errors`
-(§14.4), adattato a restare onesto (vedi là). Limite dichiarato: il dizionario in memoria
+di `sync-once` restano identici. I consumatori del log sono `recent_permission_errors`
+e `recent_copy_outcomes` (§14.4), adattati a restare onesti (vedi là). Limite dichiarato:
+il dizionario in memoria
 cresce con i path distinti falliti e non viene mai ripulito — una voce per (path, errno) di
 un albero di dimensioni normali, da valutare solo se una dest negata produce milioni di
 path distinti.
@@ -1151,6 +1152,7 @@ fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>
 | agent dell'init system | plist (se presente) | unit systemd (se presente), riga informativa |
 | limite inotify | — | `fs.inotify.max_user_watches` letto da `/proc/sys/fs/inotify/max_user_watches` |
 | errori di permesso recenti nel log | ✔/✗ | ✔/✗ |
+| copie riuscite/fallite nel log (0.11.2) | ✔/✗ | ✔/✗ |
 | exe del daemon ancora su disco (0.5.1) | ✔/✗/saltato | — |
 | linger (solo con unit installata) | — | ✔/✗ |
 
@@ -1186,6 +1188,28 @@ fswatch -0 -m <monitor> -r -l 1.0 -E -e <regex> -- <roots>
   (la riga stessa + i N fallimenti compressi): `count_24h` resta il numero **vero** di
   fallimenti nella finestra, sono solo le righe scritte sul file a essere di meno.
   Riga senza suffisso → 1, come prima.
+- **copie nelle ultime 24h (0.11.2)**: stesso log, stessa finestra, stessa regola
+  di timestamp del check precedente — ma qui si contano le copie **riuscite** e
+  quelle **fallite** (`ERROR copia fallita`, qualsiasi errno, throttle N+1 come
+  sopra), per rispondere alla domanda che i soli conteggi di fallimenti non
+  potevano: *è mai andata a buon fine qualcosa?*. Riuscite = le righe
+  `INFO copiato src → dst` (una per copia event-driven — da 0.11.2 sono INFO,
+  prima erano DEBUG e a `log_level: info` di default non comparivano) **più la
+  somma** dei totali aggregati `INFO reconcile: N copie` e `INFO sync-once: N
+  copie` (uno per passata; `sync-once` logga il proprio totale da 0.11.2,
+  `--dry-run` escluso: pianificare non è copiare). Esito: fallimenti > 0 **e**
+  riuscite = 0 → **warning non fatale** con entrambi i conteggi + hint
+  (`sync-once --dry-run`, path del log); riuscite > 0 → ✔ con entrambi i
+  conteggi (anche se i fallimenti > 0: una dest che fallisce mentre un'altra
+  riesce è il caso del check errori di permesso qui sopra, che resta il lato
+  per-dest); 0/0 → ✔ "nessuna attività"; log assente → check saltato. In
+  `doctor --json` compare solo come riga di `checks[]` (§9.1): nessun campo
+  dedicato. **Limiti dichiarati**: (a) gli errori di mount/rete non producono
+  righe `copia fallita` (vanno in pending, §20.4) e qui non contano — quel caso
+  lo coprono i check sui volumi di rete (§20.6); (b) `restore` non contribuisce:
+  le sue copie riuscite non scrivono righe `copiato` e i suoi fallimenti hanno
+  messaggio proprio (`restore fallito`, §19.5) — nel log contano solo le copie
+  di backup.
 - **exe del daemon ancora su disco (0.5.1, Darwin-only)**: se il job
   `com.safekeep.agent` è caricato, `daemon_exe()` legge il `pid` da
   `launchctl print gui/$UID/com.safekeep.agent` e l'eseguibile assoluto da
@@ -1472,6 +1496,14 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   esecuzione e consultati in-memory per tutto il walk (~0,1s). Symlink e
   fallback HEAD-per-file invariati; criterio "già aggiornato" identico nella
   sostanza (size + mtime con tolleranza 1s). Nessuna cache fra esecuzioni.
+- **0.11.2** — `doctor`: nuovo check **non fatale** «copie nelle ultime 24h»
+  (§14.4): legge il log corrente e conta riuscite (`INFO copiato` + totali
+  `reconcile:`/`sync-once:`) e fallite (`copia fallita`, throttle N+1) —
+  warning solo se ci sono fallimenti e **zero** riuscite. Le copie
+  event-driven salgono da DEBUG a INFO (una riga per copia) e `sync-once`
+  logga il proprio totale (dry-run escluso); i reconcile restano aggregati.
+  Aggiunge il lato che mancava all'incidente EPERM (§8.4): i fallimenti si
+  contavano già (0.3.1), ma nessuno sapeva se qualcosa fosse riuscito.
 - **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0).
   La dismissione della CI GitLab (`.gitlab-ci.yml`) è **già avvenuta** su `main`
   durante 0.9.x, a seguito dell'eliminazione del repo GitLab: il publish a PyPI
