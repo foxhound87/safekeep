@@ -872,8 +872,8 @@ S3_TEXT = ('s3_endpoint: https://s3.example.com:443\n'
 
 class FakeS3:
     """Doppione senza rete di `S3Destination`: stesso seam
-    (`state`/`dest_path`/`needs_copy`/`copy`), contatore delle copie.
-    Nessun botocore richiesto — qui si testa il wiring del daemon (§18)."""
+    (`state`/`dest_path`/`needs_copy`/`copy`/`snapshot`), contatore delle
+    copie. Nessun botocore richiesto — qui si testa il wiring del daemon (§18)."""
 
     def __init__(self, state='ok', copy_error=None):
         self.root = 's3://bkt/pre'
@@ -883,6 +883,11 @@ class FakeS3:
 
     def state(self):
         return self._state
+
+    def snapshot(self):
+        """0.11.1 (§18.2): None → il wiring di `sync_once` torna al percorso
+        HeadObject per-file (`needs_copy` senza snap, come prima)."""
+        return None
 
     def dest_path(self, dest_root, source_root, relpath, layout):
         return dest_root.rstrip('/') + '/' + os.path.normpath(relpath)
@@ -895,6 +900,30 @@ class FakeS3:
             raise self._copy_error
         self.copies.append(dst)
         return True
+
+
+class SnapS3(FakeS3):
+    """FakeS3 con snapshot LIST (§18.2): registra il snap passato a
+    `needs_copy` e gli eventi (progresso/copie) — wiring di `sync_once` (0.11.1)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.snap = {'a.md': (1, 1.0)}
+        self.snapshots = 0
+        self.snaps_used = []
+        self.events = []
+
+    def snapshot(self):
+        self.snapshots += 1
+        return self.snap
+
+    def needs_copy(self, src, dst, snap=None):
+        self.snaps_used.append(snap)
+        return True
+
+    def copy(self, src, dst):
+        self.events.append('copy')
+        return super().copy(src, dst)
 
 
 class S3SeamTest(TmpTestCase):
@@ -993,6 +1022,56 @@ class S3SeamTest(TmpTestCase):
                          ['s3://bkt/pre/proj/.sync', 's3://bkt/pre/proj/a.md'])
         self.assertEqual(stats.get('rimossi', 0), 0)
         self.assertEqual(absent, 0)
+
+
+class SyncSnapshotTest(TmpTestCase):
+    """0.11.1: `sync_once` fa una LIST per dest (`snapshot`, §18.2) e stampa
+    il progresso per progetto prima di lavorarlo (§9) — doppione, zero rete."""
+
+    def build(self, s3):
+        src = self.path('src')
+        for name in ('proj1', 'proj2'):
+            write(os.path.join(src, name, '.sync'), 'include: *.md\n')
+            write(os.path.join(src, name, 'a.md'), 'x')
+        cfg_path = write(self.path('safekeep.cfg'), f'source: {src}\n' + S3_TEXT)
+        with mock.patch.object(daemon_mod, 'S3Destination', return_value=s3):
+            daemon = Daemon(cfg_path)
+            daemon.load_config()
+        daemon.load_projects()
+        return daemon
+
+    def test_list_una_volta_e_snap_passato_a_needs_copy(self):
+        fake = SnapS3()
+        daemon = self.build(fake)
+        daemon.sync_once()
+        self.assertEqual(fake.snapshots, 1, 'una LIST per dest, non per progetto')
+        self.assertEqual(len(fake.snaps_used), 4, '2 progetti × 2 file')
+        self.assertTrue(all(s is fake.snap for s in fake.snaps_used))
+
+    def test_snapshot_fallita_fallback_stesso_comportamento(self):
+        fake = FakeS3()                    # snapshot() → None → percorso HEAD
+        daemon = self.build(fake)
+        daemon.sync_once()
+        # FakeS3.needs_copy accetta SOLO (src, dst): il fallback lo chiama
+        # senza snap — stesso comportamento di prima dell'0.11.1
+        self.assertEqual(len(fake.copies), 4)
+
+    def test_progresso_prima_di_lavorare_in_ordine(self):
+        fake = SnapS3()
+        daemon = self.build(fake)
+        daemon.sync_once(
+            progress=lambda p: fake.events.append('progress:' + p.name))
+        self.assertEqual(fake.events,
+                         ['progress:proj1', 'copy', 'copy',
+                          'progress:proj2', 'copy', 'copy'])
+
+    def test_progresso_con_dry_run(self):
+        fake = SnapS3()
+        daemon = self.build(fake)
+        seen = []
+        daemon.sync_once(dry_run=True, progress=seen.append)
+        self.assertEqual([p.name for p in seen], ['proj1', 'proj2'])
+        self.assertEqual(fake.copies, [], 'dry-run non copia')
 
 
 class RouteS3(FakeS3):
