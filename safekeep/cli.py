@@ -152,7 +152,9 @@ def cmd_sync_once(args):
     daemon.validate_dests()               # CR-02: dest dentro source/$HOME → exit ≠ 0
     daemon.load_projects()
     rows = daemon.sync_once(dry_run=args.dry_run, only=args.project,
-                            prune=args.prune)
+                            prune=args.prune,
+                            progress=lambda p: print(f'sync-once: {p.name}…',
+                                                      flush=True))
     if args.project and not rows:
         print(f'progetto non trovato: {args.project}', file=sys.stderr)
         return 1

@@ -552,16 +552,23 @@ class Daemon:
                     self.mark_pending(project, s3.root)
         return copied
 
-    def sync_once(self, dry_run=False, only=None, prune=False):
+    def sync_once(self, dry_run=False, only=None, prune=False, progress=None):
         """Passaggio singolo per la CLI: [(project, stats, dest_assenti)].
         `prune=True` rimuove dalla dest i file non più inclusi con sorgente
         ancora presente (`--prune`, SPEC.md §9): **solo sulle dest fs** —
-        la dest S3 non viene mai toccata (§18.2, nessuna cancellazione)."""
+        la dest S3 non viene mai toccata (§18.2, nessuna cancellazione).
+        `progress(project)` (0.11.1) viene chiamato per ogni progetto prima
+        di lavorarlo — la riga di progresso vive nella CLI (§9). Per ogni
+        destinazione S3 la LIST una-tantum (`snapshot`, §18.2) viene fatta
+        una sola volta per esecuzione, non per progetto."""
         only_abs = os.path.realpath(os.path.expanduser(only)) if only else None
+        snaps = {}                            # s3.root → snapshot LIST (§18.2)
         rows = []
         for project in self.projects:
             if only and project.root != only_abs and project.name != only:
                 continue
+            if progress is not None:
+                progress(project)
             dests, s3dests = self.project_targets(project)
             ready, absent = partition_dests(dests)
             stats = {}
@@ -578,13 +585,18 @@ class Daemon:
                         project.root, dest, project.matcher, self.cfg.layout,
                         dest_path, dest_base=project.source_root, dry_run=dry_run)
             for s3 in s3dests:
+                if s3.root not in snaps:
+                    snaps[s3.root] = s3.snapshot()   # LIST una-tantum; None → HEAD
+                snap = snaps[s3.root]
+                need = (s3.needs_copy if snap is None else
+                        lambda src, dst, _s=s3, _k=snap: _s.needs_copy(src, dst, _k))
                 try:
                     reconcile_project(
                         project.root, s3.root, project.matcher,
                         self.cfg.layout, s3.dest_path,
                         stats=stats, dry_run=dry_run,
                         dest_base=project.source_root,
-                        copy_fn=s3.copy, needs_copy_fn=s3.needs_copy)
+                        copy_fn=s3.copy, needs_copy_fn=need)
                 except OSError as e:
                     log.warning('reconcile %s → %s fallito: %s',
                                 project.name, s3.root, e)
