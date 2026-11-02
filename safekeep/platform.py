@@ -30,6 +30,14 @@ PERM_ERR_RE = re.compile(r'\[Errno (?:1|13)\]|Operation not permitted|Permission
 # suffisso del throttle (SPEC.md §10.1, 0.5.1): la riga rappresenta se stessa
 # + i N fallimenti compressi → count_24h la conta come N+1, non 1 (onesto)
 REPEAT_RE = re.compile(r'ripetuto (\d+) volte')
+# Copie nel log (SPEC.md §14.4, 0.11.2): riuscite = righe `INFO copiato`
+# (event-driven; da 0.11.2 sono INFO, prima DEBUG) + la somma dei totali
+# aggregati `INFO reconcile: N copie` / `INFO sync-once: N copie`; fallite =
+# `ERROR copia fallita` (qualsiasi errno, throttle N+1 come sopra). Il livello
+# fa da discriminatore: `DEBUG copiato` (s3dest, log_level debug) non conta.
+COPY_OK_RE = re.compile(r' INFO copiato ')
+COPY_AGG_RE = re.compile(r' INFO (?:reconcile|sync-once): (\d+) copie')
+COPY_FAIL_RE = re.compile(r' ERROR copia fallita ')
 
 
 def is_darwin():
@@ -109,6 +117,50 @@ def recent_permission_errors(path=None, now=None, window=86400):
     except OSError:
         return None
     return count, last
+
+
+def recent_copy_outcomes(path=None, now=None, window=86400):
+    """`(riuscite, fallite)` delle copie nelle ultime `window` secondi del log
+    corrente, o None se il log non c'è/non è leggibile (SPEC.md §14.4, 0.11.2).
+
+    Stesse regole di `recent_permission_errors`: timestamp = prefisso
+    `%(asctime)s` (prime 19 posizioni), riga senza timestamp sicuro o fuori
+    finestra (clock skew incluso) non conta — i conteggi sono un minimo.
+    Riuscite = `INFO copiato` (1 ciascuna) + somma dei totali `INFO
+    reconcile: N copie` / `INFO sync-once: N copie`; fallite = `ERROR copia
+    fallita` col suffisso del throttle (`— ripetuto N volte` → N+1, §10.1).
+    **Limiti dichiarati (§14.4)**: mount/rete → pending, nessuna riga
+    `copia fallita` (contano i check volumi §20.6); `restore` non scrive
+    righe `copiato` e i suoi fallimenti hanno messaggio proprio."""
+    if path is None:
+        path = os.path.expanduser(LOG_PATH)
+    if now is None:
+        now = datetime.now()
+    ok = fail = 0
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                agg = COPY_AGG_RE.search(line)
+                if agg is None and not (COPY_OK_RE.search(line)
+                                        or COPY_FAIL_RE.search(line)):
+                    continue
+                try:
+                    ts = datetime.strptime(line[:19], '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    continue        # timestamp illeggibile → non sicuri, salta
+                age = (now - ts).total_seconds()
+                if not 0 <= age <= window:
+                    continue        # troppo vecchio (o nel futuro: clock skew)
+                if agg is not None:
+                    ok += int(agg.group(1))
+                elif COPY_FAIL_RE.search(line):
+                    rep = REPEAT_RE.search(line)
+                    fail += 1 + (int(rep.group(1)) if rep else 0)
+                else:
+                    ok += 1
+    except OSError:
+        return None
+    return ok, fail
 
 
 DAEMON_LABEL = 'com.safekeep.agent'          # label launchd dell'agent (§8.1)

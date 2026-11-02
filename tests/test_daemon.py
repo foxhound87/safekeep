@@ -1475,5 +1475,80 @@ class S3LoadConfigTest(TmpTestCase):
         warn.assert_not_called()
 
 
+class SyncOnceLogTotaleTest(TmpTestCase):
+    """0.11.2/§14.4: `sync-once` logga il proprio totale di copie (i successi
+    vivevano solo su stdout, nel log restavano solo i fallimenti); dry-run
+    escluso — lì `stats['copiati']` conta il PIANIFICATO, non un successo."""
+
+    def build(self):
+        src = self.path('src')
+        proj = os.path.join(src, 'proj')
+        write(os.path.join(proj, '.sync'), 'include: *.md\n')
+        write(os.path.join(proj, 'a.md'), 'x')
+        dest = self.path('dst')
+        os.makedirs(dest)                       # dest esiste ⇒ dest_state == ok
+        cfg_path = write(self.path('safekeep.cfg'), f'source: {src}\ndest: {dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        return daemon
+
+    def test_totale_loggato(self):
+        daemon = self.build()
+        with mock.patch.object(daemon_mod.log, 'info') as info:
+            daemon.sync_once()
+        logged = [c.args for c in info.call_args_list
+                  if c.args and str(c.args[0]).startswith('sync-once:')]
+        # .sync (sempre copiato, §4.1) + a.md = 2 copie su 1 progetto
+        self.assertEqual(logged,
+                         [('sync-once: %d copie su %d progetto/i', 2, 1)])
+
+    def test_dry_run_non_logga_il_totale(self):
+        daemon = self.build()
+        with mock.patch.object(daemon_mod.log, 'info') as info:
+            daemon.sync_once(dry_run=True)
+        self.assertFalse(
+            any(str(c.args[0]).startswith('sync-once:')
+                for c in info.call_args_list if c.args),
+            'pianificato non è una copia riuscita: niente riga nel log')
+
+
+class CopiaLoggataInfoTest(TmpTestCase):
+    """0.11.2/§14.4: la copia event-driven logga a INFO (era DEBUG, quindi a
+    `log_level: info` di default non appariva) — è il segnale «riuscita» che
+    `recent_copy_outcomes` conta. Anche i symlink, che prima non loggavano."""
+
+    def build(self):
+        src = self.path('src')
+        proj = os.path.join(src, 'proj')
+        dest = self.path('dst')
+        os.makedirs(dest)                       # dest esiste ⇒ dest_state == ok
+        write(os.path.join(proj, '.sync'), 'include: *.md\n')
+        target = write(os.path.join(proj, 'note.md'), 'v1')
+        cfg_path = write(self.path('safekeep.cfg'), f'source: {src}\ndest: {dest}\n')
+        daemon = Daemon(cfg_path)
+        daemon.load_config()
+        daemon.load_projects()
+        return daemon, target
+
+    def test_copia_regolare_a_info(self):
+        daemon, target = self.build()
+        with self.assertLogs('safekeep', level='INFO') as cm:
+            daemon.run_batch([target])
+        self.assertTrue(
+            any('copiato ' in m and 'note.md' in m for m in cm.output),
+            cm.output)
+
+    def test_symlink_a_info(self):
+        daemon, target = self.build()
+        link = os.path.join(os.path.dirname(target), 'alias.md')
+        os.symlink(target, link)                # foglia col verdict incluso
+        with self.assertLogs('safekeep', level='INFO') as cm:
+            daemon.run_batch([link])
+        self.assertTrue(
+            any('copiato ' in m and 'alias.md' in m for m in cm.output),
+            cm.output)
+
+
 if __name__ == '__main__':
     unittest.main()

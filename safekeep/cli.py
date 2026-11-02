@@ -37,6 +37,7 @@ from safekeep.platform import (
     is_network_fs,
     is_wsl,
     linger_enabled,
+    recent_copy_outcomes,
     recent_permission_errors,
     systemd_user_available,
     wsl_distro,
@@ -632,6 +633,23 @@ def cmd_doctor(args):
                        'Privacy & Security → «Interagisci con i volumi '
                        'rimovibili» e aggiungi safekeep (launchd) — '
                        'warning non fatale')
+
+    # Copie riuscite/fallite nelle 24h (SPEC.md §14.4, 0.11.2): il lato
+    # "è mai successo qualcosa?" — i soli conteggi di fallimenti non lo
+    # davano. Sintomo recente del log, non stato del sistema → NON fatale
+    outcomes = recent_copy_outcomes()
+    if outcomes is None:
+        out(True, f'copie nelle ultime 24h: log assente — check saltato ({log})')
+    elif outcomes[0] == 0 and outcomes[1] > 0:
+        out(False, f'copie nelle ultime 24h: 0 riuscite su {outcomes[1]} '
+                   'fallite — warning non fatale: vedi i pending con '
+                   '`safekeep sync-once --dry-run` e il log: ' + log)
+    elif outcomes[0] == 0:
+        out(True, f'copie nelle ultime 24h: nessuna attività '
+                  f'(0 riuscite, 0 fallite) — log: {log}')
+    else:
+        out(True, f'copie nelle ultime 24h: {outcomes[0]} riuscite, '
+                  f'{outcomes[1]} fallite — log: {log}')
 
     # WSL (SPEC.md §17.2): tre righe informative — nessuna è mai fatale
     if is_wsl():
