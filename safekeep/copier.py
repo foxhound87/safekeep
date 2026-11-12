@@ -27,10 +27,45 @@ NETWORK_ERRNOS = (errno.ENOTCONN, errno.EHOSTUNREACH, errno.ETIMEDOUT,
                   errno.ENETUNREACH, errno.ENETDOWN, errno.ESTALE)
 # l'insieme controllato ai call-site: "dest non usabile adesso" (§8.3/§20.4)
 DEST_DOWN_ERRNOS = MOUNT_ERRNOS + NETWORK_ERRNOS
+# errori di ACCESSO al volume: EPERM (errno 1) ed EACCES (errno 13). Su macOS
+# EPERM è il rifiuto TCC (Transparency, Consent and Control) «volumi rimovibili»
+# o la quota: la dest è montata ma non usabile. Valgono come "dest non
+# usabile" solo se l'errore è nato SCRIVENDO sulla dest: un file sorgente
+# illeggibile (EACCES in lettura) non deve bloccare gli altri file.
+ACCESS_ERRNOS = (errno.EPERM, errno.EACCES)
 # throttle delle copie fallite (SPEC.md §10.1, 0.5.1): stessa (path, errno) →
 # una riga + `— ripetuto N volte` ogni THROTTLE_INTERVAL, non una riga a fallimento
 THROTTLE_INTERVAL = 300.0       # secondi
 _copy_errors = {}               # (src, errno) → [ultimo log monotonic, non loggati]
+
+
+def _tag(e, phase):
+    """Marca la fase dell'errore: 'source' (lettura) o 'dest' (scrittura).
+
+    Serve a distinguere un EACCES (errno 13) di LETTURA — un file sorgente
+    illeggibile, che non deve bloccare la dest — da un EACCES di SCRITTURA
+    — volume montato ma non accessibile, che deve mettere la dest in pending.
+    """
+    e.safekeep_phase = phase
+    return e
+
+
+def dest_down(e) -> bool:
+    """True se l'errore dice "questa dest non è usabile adesso" → pending + backoff.
+
+    - errno di mount/rete: sempre dest-down;
+    - EPERM: su macOS è il rifiuto TCC o la quota → dest-down anche senza fase
+      nota (indistinguibile ⇒ si sceglie il caso peggiore: degrada pulito);
+    - EACCES: solo se nato scrivendo sulla dest (fase 'dest'): un file
+      sorgente illeggibile non blocca gli altri file della stessa dest.
+    """
+    if e.errno in DEST_DOWN_ERRNOS:
+        return True
+    if e.errno in ACCESS_ERRNOS:
+        if e.errno == errno.EPERM:
+            return True                # rifiuto TCC/quota: indistinguibile
+        return getattr(e, 'safekeep_phase', None) == 'dest'   # EACCES
+    return False
 
 
 def log_copy_error(src, dst, e, now=None):
@@ -144,15 +179,18 @@ def _copy_symlink(src, dst, dest_root=None):
         return False
     dirname = os.path.dirname(dst)
     if dirname:
-        os.makedirs(dirname, exist_ok=True)
+        try:
+            os.makedirs(dirname, exist_ok=True)
+        except OSError as e:
+            raise _tag(e, 'dest')
     tmp = _tmp_path(dst)
     _remove(tmp)                          # residuo di un crash precedente
     try:
         os.symlink(target, tmp)
         os.replace(tmp, dst)
-    except OSError:
+    except OSError as e:
         _remove(tmp)
-        raise
+        raise _tag(e, 'dest')
     log.debug('symlink %s → %s (target %r)', src, dst, target)
     return True
 
@@ -164,21 +202,40 @@ def copy_one(src: str, dst: str, dest_root=None) -> bool:
       cancellare" conserva già il backup esistente;
     - `dest_root` passato ⇒ containment check prima di ogni scrittura: mai
       scrivere fuori dalla dest via symlink (CR-01);
-    - OSError di I/O → rilanciato così com'è (il caller decide il retry);
+    - OSError di I/O → rilanciato così com'è, con la fase in cui è nato
+      (`safekeep_phase`: 'source' o 'dest') — `dest_down` la usa per capire
+      se la dest è da mettere in pending (§8.3);
     - chmod/utime non riusciti (volumi exFAT) → non fatali (log debug).
     """
     if os.path.islink(src):
         return _copy_symlink(src, dst, dest_root)
-    if not _stable(src):
+    try:
+        stable = _stable(src)
+    except OSError as e:
+        raise _tag(e, 'source')           # stat della sorgente: non è la dest
+    if not stable:
         return False                      # instabile o sparito
     if dest_root is not None and not _make_contained(dst, dest_root):
         log.error('scrittura fuori da dest bloccata: %s', dst)
         return False
     dirname = os.path.dirname(dst)
     if dirname:
-        os.makedirs(dirname, exist_ok=True)
+        try:
+            os.makedirs(dirname, exist_ok=True)
+        except OSError as e:
+            raise _tag(e, 'dest')         # la dest non è scrivibile
     tmp = _tmp_path(dst)
     _remove(tmp)                          # residuo di un crash precedente
+    # apertura in LETTURA della sorgente: EACCES/EPERM qui = sorgente
+    # illeggibile → non è un problema di dest (non deve metterla in pending)
+    try:
+        with open(src, 'rb'):
+            pass
+    except FileNotFoundError:
+        log.debug('sorgente sparita prima della copia: %s', src)
+        return False
+    except OSError as e:
+        raise _tag(e, 'source')
     try:
         shutil.copyfile(src, tmp)         # solo bytes: ENOSPC/EIO salgono
         try:
@@ -191,9 +248,10 @@ def copy_one(src: str, dst: str, dest_root=None) -> bool:
         _remove(tmp)
         log.debug('sorgente sparita durante la copia: %s', src)
         return False
-    except OSError:
+    except OSError as e:
         _remove(tmp)
-        raise
+        # la sorgente si è aperta: l'errore è nato scrivendo sulla dest
+        raise _tag(e, 'dest')
     return True
 
 
@@ -227,9 +285,10 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
     per ogni dest), `skippati` = file già aggiornati, `errati` = copie fallite,
     `esclusi` = file con verdict escluso incontrati nel walk (indipendente
     dalla dest), `pianificati` = [(src, dst)] con `dry_run=True`, e
-    `dest_pendente` = True se un errore di mount o di rete
-    (`DEST_DOWN_ERRNOS`, §20.4) ha fermato la passata: il caller metta quella
-    dest in pending (CR-05).
+    `dest_pendente` = True se un errore di mount, di rete o di accesso alla
+    dest (`copier.dest_down`: errno di mount/rete, EPERM, EACCES di scrittura,
+    §20.4) ha fermato la passata: il caller metta quella dest in pending
+    (CR-05).
     `dry_run`: conta ed elenca senza copiare.
 
     Seam destinazioni (SPEC.md §18.2): `copy_fn(src, dst)` e
@@ -256,12 +315,12 @@ def reconcile_project(source_root, dest_root, matcher, layout, dest_path_fn,
     plan = stats.setdefault('pianificati', []) if (stats is not None and dry_run) else None
 
     def failed(e, src, dst):
-        """Conteggia l'errore; True ⇒ errore di mount/rete: la dest va in pending."""
+        """Conteggia l'errore; True ⇒ dest non usabile: la dest va in pending."""
         nonlocal errors, mount_error
         errors += 1
-        if e.errno in DEST_DOWN_ERRNOS:
+        if dest_down(e):
             mount_error = e
-            log.error('errore di mount/rete su %s → %s: %s: la dest va in pending',
+            log.error('dest non usabile su %s → %s: %s: la dest va in pending',
                       src, dst, e)
             return True
         log_copy_error(src, dst, e)

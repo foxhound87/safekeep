@@ -32,8 +32,8 @@ from .config import (
     validate_dests,
 )
 from .copier import (
-    DEST_DOWN_ERRNOS,
     copy_one,
+    dest_down,
     log_copy_error,
     needs_copy,
     prune_project,
@@ -900,8 +900,8 @@ class Daemon:
                 elif needs_copy(src, dst) and copy_one(src, dst, dest):
                     log.info('copiato %s → %s', src, dst)   # INFO da 0.11.2 (§14.4)
             except OSError as e:
-                if e.errno in DEST_DOWN_ERRNOS:
-                    log.warning('errore di mount/rete %s → %s: %s: dest in pending',
+                if dest_down(e):
+                    log.warning('dest non usabile %s → %s: %s: dest in pending',
                                 src, dst, e)
                     self.mark_pending(project, dest)
                 else:
@@ -922,8 +922,8 @@ class Daemon:
                 elif s3.needs_copy(src, dst) and s3.copy(src, dst):
                     log.info('copiato %s → %s', src, dst)   # INFO da 0.11.2 (§14.4)
             except OSError as e:
-                if e.errno in DEST_DOWN_ERRNOS:
-                    log.warning('errore di rete %s → %s: %s: dest S3 in pending',
+                if dest_down(e):
+                    log.warning('dest non usabile %s → %s: %s: dest S3 in pending',
                                 src, dst, e)
                     self.mark_pending(project, s3.root)
                 else:

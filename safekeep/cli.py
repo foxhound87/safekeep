@@ -364,7 +364,11 @@ def cmd_status(args):
         # ENOTCONN → `unreachable` invece dell'ingannevole `[ok]` (§20.6)
         if state == 'ok' and network_error(dest) is not None:
             state = 'unreachable'
-        print(f'dest {names.get(dest, ""):<5}{dest} [{state}] [{label}]')
+        # montata ma non scrivibile (TCC «volumi rimovibili»): `not-accessible`
+        # invece dell'ingannevole `[ok]` — il rimedio è in `doctor`
+        extra = (' — manca il permesso TCC «volumi rimovibili» per '
+                 'l\'interprete del daemon' if state == 'not-accessible' else '')
+        print(f'dest {names.get(dest, ""):<5}{dest} [{state}] [{label}]{extra}')
     if daemon.s3 is not None:
         # HeadBucket con cache 30s (§18.3): ok/offline, senza toccare la
         # config — `status` resta sola lettura
@@ -532,17 +536,26 @@ def cmd_doctor(args):
         else:
             out(True, f'route: {len(cfg.routes)} dichiarate, tutte agganciate '
                       'a una root nota (source o project)')
-        # dest nominate citate in route ma NON montate: volume assente (§8.3),
-        # condizione disgiunta dal check volumi qui sotto (che copre i mount
-        # presenti ma irraggiungibili, dest_state == ok, §20.6) — nessuna
-        # collisione fra i due
+        # dest nominate citate in route ma NON disponibili: volume assente
+        # (§8.3) oppure montato ma non accessibile (`not-accessible`: TCC
+        # «volumi rimovibili» mancante) — due check distinti, id JSON stabili
+        # — condizione disgiunta dal check volumi qui sotto (che copre i
+        # mount presenti ma irraggiungibili, dest_state == ok, §20.6)
         names = dest_name_map(cfg)
         cited = {p for r in cfg.routes for p in r.dests}
-        absent = [d for d in cfg.dests if d in cited and dest_state(d) != 'ok']
+        stati = {d: dest_state(d) for d in cfg.dests if d in cited}
+        absent = [d for d, s in stati.items() if s == 'absent']
         if absent:
             out(False, 'dest di route non montate: '
                 + ', '.join(f'{names.get(d, d)} ({d})' for d in absent)
                 + ' — monta il volume e riprova — warning non fatale')
+        bloccate = [d for d, s in stati.items() if s == 'not-accessible']
+        if bloccate:
+            out(False, 'dest di route montate ma non accessibili: '
+                + ', '.join(f'{names.get(d, d)} ({d})' for d in bloccate)
+                + ' — su macOS manca il permesso TCC «volumi rimovibili» '
+                'per l\'interprete del daemon (vedi `safekeep doctor`) — '
+                'warning non fatale')
         if daemon.projects:
             out(True, 'routing: ' + ', '.join(
                 f'{p.name} → [{route_label(cfg, p)}]'
@@ -628,10 +641,21 @@ def cmd_doctor(args):
         rimovibili = [p for p in list(cfg.sources) + list(cfg.dests)
                       if p.startswith('/Volumes/')]
         if rimovibili:
+            # TCC (Transparency, Consent and Control) autorizza l'ESEGUIBILE,
+            # non il nome «safekeep»: da aggiungere è l'interprete Python che
+            # il daemon usa davvero (il plist lancia uno shim Python).
+            exe = daemon_exe()
+            dove = (f'l\'eseguibile che il daemon usa davvero — {exe}' if exe else
+                    'l\'eseguibile che il daemon usa davvero — trovalo con '
+                    '`ps -p <pid> -o comm=` (pid in `launchctl print '
+                    'gui/$(id -u)/com.safekeep.agent`), di solito '
+                    'l\'interprete Python')
             out(False, f'errori di permesso recenti con {len(rimovibili)} path '
                        'sotto /Volumes — su macOS apri System Settings → '
                        'Privacy & Security → «Interagisci con i volumi '
-                       'rimovibili» e aggiungi safekeep (launchd) — '
+                       'rimovibili» / Removable Volumes e aggiungi '
+                       f'{dove} — TCC autorizza l\'eseguibile, non «safekeep» '
+                       '— permesso separato da «Full Disk Access» / FDA — '
                        'warning non fatale')
 
     # Copie riuscite/fallite nelle 24h (SPEC.md §14.4, 0.11.2): il lato
