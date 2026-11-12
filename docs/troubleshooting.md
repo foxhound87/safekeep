@@ -41,6 +41,25 @@ safekeep daemon stop && safekeep daemon start
 # (≡ launchctl bootout + bootstrap on the rendered plist)
 ```
 
+## Removable volumes (macOS 26+)
+
+**«Interagisci con i volumi rimovibili»** (*Removable Volumes*) is a TCC
+permission **separate from FDA**: without it, every I/O under `/Volumes/…` is
+denied with `EPERM` (`[Errno 1] Operation not permitted`). Grant it to the
+**executable** that does the I/O — the Python interpreter the daemon really
+uses, not the name “safekeep” (TCC authorises binaries). Find it with:
+
+```bash
+ps -p "$(launchctl print gui/$(id -u)/com.safekeep.agent | sed -n 's/^ *pid = //p')" -o comm=
+```
+
+`doctor` prints that path in its “volumi rimovibili” hint.
+
+Since 0.11.3 a destination denied like this is **not** retried file by file:
+safekeep marks it `[not-accessible]`, puts it in `pending` with backoff and
+stays quiet until the permission is granted — the log no longer fills with
+hundreds of identical errors per day.
+
 ## Daemon runs from a deleted executable (Homebrew upgrade)
 
 **Root cause of the ~45h EPERM incident (03/10/2026), fixed in 0.5.1.** Until
@@ -315,9 +334,12 @@ Raise verbosity with `safekeep run -v` (foreground) or `log_level: debug` in
 
 ## Destination shows `pending`
 
-The destination volume is not mounted. safekeep retries the mountpoint stat
-with exponential backoff (1s → 60s cap) and reconciles that project as soon as
-the volume is back. Check with `safekeep status`.
+The destination volume is **not mounted**, or it is mounted but **not
+accessible** (every I/O denied — e.g. the macOS *Removable Volumes* permission
+missing, see below). safekeep retries with exponential backoff (1s → 60s cap)
+and reconciles that project as soon as the volume is usable again. Check with
+`safekeep status`: a destination that is mounted but denied shows
+`[not-accessible]`.
 
 ## Leftover `.safekeep.tmp.*` files
 

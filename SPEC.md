@@ -605,9 +605,15 @@ launchctl print gui/$(id -u)/com.safekeep.agent | head -40
 
 Destinazioni su volumi esterni/reti:
 
-1. Prima di copiare: `dest_state(dest_root)` — solo `os.path.exists`, **nessun processo
-   figlio** — se il path non esiste (volume non montato) → la coppia *(progetto, dest)*
-   passa in stato **`pending`**.
+1. Prima di copiare: `dest_state(dest_root)` — **nessun processo figlio**:
+   `os.path.exists` + un **probe I/O reale** (una `scandir` della dest) →
+   `ok` (montata e utilizzabile), `absent` (path assente) o `not-accessible`
+   (montata ma ogni I/O rifiutato: EACCES/EPERM — TCC «volumi rimovibili»).
+   Se il path non esiste (volume non montato) **o** la dest non è accessibile
+   → la coppia *(progetto, dest)* passa in stato **`pending`**.
+   Il probe è **cachato** (`PROBE_TTL`, 2s): `dest_state` gira nel hot path
+   del daemon (un check per evento) e il probe non può diventarne il costo
+   dominante.
 2. **Backoff sul stat del mountpoint**: retry con intervalli esponenziali
    `1s → 2s → 4s → 8s → 16s → 32s → 60s → 60s → …` (`backoff_schedule()`, cap 60s) finché
    il mount non compare; al ritorno dello stato `mounted` → **reconcile del progetto**
@@ -617,6 +623,11 @@ Destinazioni su volumi esterni/reti:
    (`NETWORK_ERRNOS`: ENOTCONN/EHOSTUNREACH/ETIMEDOUT/ENETUNREACH/ENETDOWN/
    ESTALE), oltre ai classici `MOUNT_ERRNOS` (ENODEV/EBUSY/ENOSPC): una dest su
    NAS con il server morto va in pending/backoff, non in log-loop.
+   Dal **0.11.3** (§22) valgono anche gli **errori di accesso** sulla dest:
+   `EPERM` (rifiuto TCC o quota) ed `EACCES` **di scrittura** → la dest non è
+   usabile → pending + backoff (non un retry per ogni file). Un `EACCES` di
+   **lettura** della sorgente resta un errore del singolo file: non blocca
+   gli altri file della stessa dest.
 3. `status` mostra le dest `pending` con l'ultimo errore e il prossimo retry.
 4. **Opzione plist `StartOnMount`**: aggiungendo `<key>StartOnMount</key><true/>` launchd
    riavvia il job al mount di un volume — utile se si preferisce un kick sincrono del sistema
@@ -956,6 +967,11 @@ illimitata della coda in memoria.
   `fswatch` se lanciato come binario separato e i source stanno in aree protette. Concedere a un
   terminale che esegue il CLI non basta per il daemon avviato da launchd: il job eredita il
   contesto di login ma non i consensi "per sessione" del terminale.
+- **«Interagisci con i volumi rimovibili» / *Removable Volumes***: permesso TCC **separato**
+  dalla FDA (`kTCCServiceSystemPolicyRemovableVolumes`): senza, ogni I/O su `/Volumes/…` è
+  negato con `EPERM` (errno 1). Vale per l'**eseguibile** che fa l'I/O (quindi l'interprete
+  Python del daemon), non per il nome «safekeep» — vedi §22 per il comportamento del codice
+  quando il grant manca.
 - Senza FDA: `doctor` segnala `EACCES`/`Operation not permitted` con istruzioni; il daemon non
   deve loopare: un `PermissionError` su una radice source → log error + backoff lento (60s),
   non crash.
@@ -1504,6 +1520,20 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   logga il proprio totale (dry-run escluso); i reconcile restano aggregati.
   Aggiunge il lato che mancava all'incidente EPERM (§8.4): i fallimenti si
   contavano già (0.3.1), ma nessuno sapeva se qualcosa fosse riuscito.
+- **0.11.3** — hardening dei permessi sul volume (§22): `EPERM` (errno 1) ed
+  `EACCES` (errno 13) sulla **dest** → la dest non è usabile → **pending +
+  backoff** (§8.3), non un retry per ogni file (era la causa dei ~500
+  errori/24h sull'incidente EPERM, §8.4). La distinzione è per **fase**
+  (`copier.dest_down`): un `EACCES` di **lettura** della sorgente resta un
+  errore del singolo file e non blocca gli altri; `EPERM` (rifiuto TCC o
+  quota) è indistinguibile → trattato sempre come "dest non usabile".
+  `volumes.dest_state` fa un **probe reale** (I/O) invece del solo
+  `os.path.exists`: un volume montato ma non accessibile → `not-accessible`
+  (`status` non mente più: prima diceva `[ok]`). Il rimedio TCC nel messaggio
+  di `doctor` è riscritto: da aggiungere è l'**interprete Python** che il
+  daemon usa davvero (TCC autorizza l'eseguibile, non il nome «safekeep»),
+  con il permesso «Interagisci con i volumi rimovibili» / *Removable Volumes*
+  — separato da *Full Disk Access*.
 - **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0).
   La dismissione della CI GitLab (`.gitlab-ci.yml`) è **già avvenuta** su `main`
   durante 0.9.x, a seguito dell'eliminazione del repo GitLab: il publish a PyPI
@@ -1897,14 +1927,19 @@ per evento (log-loop latente, chiuso in 0.9.0).
 - `doctor`: due righe **non fatali** (con id slug per `--json`, SPEC §9.1):
   `sorgenti su volume di rete: N (poll ogni Xs)` e `fswatch: root locali M`.
 - `status`: ogni dest viene etichettata con la fstype detect —
-  `dest <path> [ok|absent|unreachable] [nas|local]`.
+  `dest <path> [ok|absent|unreachable|not-accessible] [nas|local]`.
 - **0.9.1** — mount c'è ma il server è morto: `volumes.network_error` (un
   `listdir`, `NETWORK_ERRNOS` §20.4) fa da probe; `status` marca la dest
   `[unreachable]` (l'ingannevole `[ok]` del solo `dest_state`) e `doctor` ha
   la riga non fatale `volumi di rete non raggiungibili: N (…)`. Probe solo
   nei comandi one-shot, mai nel loop del daemon.
+- **0.11.3** (§22) — mount c'è ma ogni I/O è rifiutato (TCC): `dest_state`
+  fa un probe reale → `[not-accessible]`, non l'ingannevole `[ok]`.
 - macOS: `EACCES` su un path sotto `/Volumes` → hint TCC "Interagisci con i
   volumi rimovibili" (System Settings → Privacy & Security), warning non fatale.
+  Il rimedio nomina l'**eseguibile** del daemon (TCC autorizza il binario, non
+  il nome «safekeep»): `daemon_exe()` lo ricava dal processo launchd, e se non
+  è determinabile il messaggio dice come trovarlo (`ps -p <pid> -o comm=`).
 
 ### 20.7 Limiti dichiarati (v1)
 
@@ -2069,3 +2104,47 @@ route ~/code: s3:backup/code        # sorgente su S3: bucket = s3_bucket, prefis
 - **(b)** `s3:<prefix>` **senza** bucket usa il **`s3_bucket` globale** →
   **sì**. Motivazione: minimale — un solo bucket, route che differenziano solo
   per prefisso, niente ripetizione inutile del nome bucket.
+
+---
+
+## 22. Hardening dei permessi sul volume (0.11.3)
+
+**Problema.** Su macOS 26/27 il daemon avviato da launchd riceve `EPERM`
+(errno 1) scrivendo su `/Volumes/…`: manca il grant TCC (Transparency, Consent
+and Control) `kTCCServiceSystemPolicyRemovableVolumes` («Interagisci con i
+volumi rimovibili» / *Removable Volumes*) e l'utente non può concederlo. Il
+fix sistemistico è fuori scope: qui il codice **degrada pulito** invece di
+spammare centinaia di `ERROR copia fallita` al giorno, e `status` smette di
+dire `[ok]` per una dest inutilizzabile.
+
+**Cosa cambia.**
+
+1. **Distinzione per fase** (`copier.dest_down`): ogni errore di copia porta
+   con sé la fase in cui è nato (`source` = lettura della sorgente, `dest` =
+   scrittura sulla destinazione).
+   - `EPERM` → **dest non usabile** (rifiuto TCC o quota: indistinguibile →
+     si sceglie il caso peggiore) → `pending` + backoff (§8.3).
+   - `EACCES` → dest non usabile **solo** se è nato scrivendo sulla dest; un
+     file sorgente illeggibile resta un errore del singolo file (CR-05: gli
+     altri file vanno copiati comunque).
+   - gli errno di mount/rete restano invariati.
+2. **`volumes.dest_state` fa un probe reale**: `os.path.exists` + una
+   `scandir` della dest → `ok` / `absent` / `not-accessible`. Il probe è
+   cachato 2s (`PROBE_TTL`) perché `dest_state` è nel hot path del daemon.
+   `not-accessible` → la dest va in pending come un volume assente: nessun
+   retry per file, backoff 1s → 60s.
+3. **`doctor` dice il rimedio giusto**: TCC autorizza l'**eseguibile**, quindi
+   da aggiungere in «Privacy & Security → File e cartelle» è l'interprete
+   Python che il daemon usa davvero (non «safekeep»): il messaggio lo
+   recupera dal processo launchd (`daemon_exe()` → `ps -p <pid> -o comm=`) e,
+   se non è determinabile, dice il comando per trovarlo. Il permesso
+   «Interagisci con i volumi rimovibili» / *Removable Volumes* è **separato**
+   da *Full Disk Access* (FDA).
+
+**Limiti dichiarati.**
+
+- Il permesso TCC resta **out of scope**: senza grant il daemon non copia sul
+  volume, lo dice (`[not-accessible]`) e riprova con backoff.
+- `EPERM` in **lettura** (sorgente su un volume protetto) è trattato come
+  "dest non usabile": su macOS è il caso raro ma con lo stesso sintomo, e il
+  costo (retry con backoff invece di copiare) è preferibile a un log-loop.

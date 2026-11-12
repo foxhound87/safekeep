@@ -95,7 +95,9 @@ safekeep status
 
 Config path, mode (`source` / `$HOME` auto-discovery), sources, discovered
 projects with their rule count, per-destination state (`ok`, `absent`,
-`pending`) and, when configured, the S3 bucket
+`pending`, `unreachable` — mounted but the server is dead — `not-accessible`
+— mounted but every I/O is denied, e.g. the macOS *Removable Volumes*
+permission missing) and, when configured, the S3 bucket
 (`s3://bucket/prefix [ok]` / `[offline]` — a cached HeadBucket, 30s).
 Read-only, safe to run any time.
 
