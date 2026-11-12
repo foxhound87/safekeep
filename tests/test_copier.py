@@ -299,13 +299,17 @@ class ErroriPerFileTest(CopierTestCase):
 
     def test_reconcile_ripetuti_stessi_errori_pochissime_righe(self):
         """SPEC.md §10.1 (0.5.1): 5 reconcile con gli stessi 3 file negati
-        (EPERM) → 3 righe di log (una per (path, errno)), non 15. I conteggi
-        in memoria restano intatti: 3 errori per passata."""
+        (EACCES) → 3 righe di log (una per (path, errno)), non 15. I conteggi
+        in memoria restano intatti: 3 errori per passata.
+
+        EACCES e non EPERM: EPERM su macOS è il rifiuto TCC (Transparency,
+        Consent and Control) / la quota → la dest non è usabile → pending
+        (§8.3), non un errore confinato al file."""
         copier._copy_errors.clear()
         self.addCleanup(copier._copy_errors.clear)
 
         def boom(*args, **kwargs):
-            raise OSError(1, 'Operation not permitted')
+            raise OSError(errno.EACCES, 'Permission denied')
 
         with mock.patch.object(copier, 'copy_one', new=boom), \
                 mock.patch.object(copier.log, 'error') as errlog:
@@ -429,6 +433,99 @@ class DestRetePendenteTest(CopierTestCase):
             self.assertIn(num, copier.DEST_DOWN_ERRNOS)
         for num in (errno.EACCES, errno.EPERM, errno.ENOENT):
             self.assertNotIn(num, copier.DEST_DOWN_ERRNOS)
+
+
+class DestAccessTest(CopierTestCase):
+    """EPERM/EACCES: la dest non usabile va in pending (§8.3), un file
+    sorgente illeggibile no (bloccherebbe tutti gli altri file)."""
+
+    def test_dest_down_solo_per_la_fase_giusta(self):
+        self.assertTrue(copier.dest_down(OSError(errno.EPERM, 'x')),
+                        'EPERM = rifiuto TCC/quota → dest non usabile')
+        self.assertFalse(copier.dest_down(OSError(errno.EACCES, 'x')),
+                         'EACCES senza fase: non si sa di chi è il problema')
+        self.assertTrue(copier.dest_down(
+            copier._tag(OSError(errno.EACCES, 'x'), 'dest')))
+        self.assertFalse(copier.dest_down(
+            copier._tag(OSError(errno.EACCES, 'x'), 'source')))
+
+    def test_eperm_sulla_dest_mette_in_pending(self):
+        """macOS 26+: EPERM (errno 1) scrivendo sul volume → la dest non è
+        usabile → pending + backoff, non un retry per ogni file."""
+        src_root = os.path.join(self.tmp, 'src')
+        write(os.path.join(src_root, 'a.md'), 'A')
+        matcher = Matcher(BUILTIN_RULES, parse_rules(['include: *.md']))
+
+        def boom(src, dst):
+            raise OSError(errno.EPERM, 'Operation not permitted')
+
+        stats = {}
+        copied = reconcile_project(source_root=src_root,
+                                   dest_root=os.path.join(self.tmp, 'dst'),
+                                   matcher=matcher, layout='relative',
+                                   dest_path_fn=dest_path, stats=stats,
+                                   copy_fn=boom, needs_copy_fn=lambda s, d: True)
+        self.assertEqual(copied, 0)
+        self.assertTrue(stats.get('dest_pendente'),
+                        'EPERM → la dest va in pending (§8.3)')
+        self.assertEqual(stats['errati'], 1)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root bypassa i permessi')
+    def test_eacces_di_sorgente_non_blocca_la_dest(self):
+        """Un file sorgente illeggibile (mode 000) → EACCES in LETTURA:
+        solo log, gli altri file vengono copiati."""
+        src_root = os.path.join(self.tmp, 'src')
+        write(os.path.join(src_root, 'a.md'), 'A')
+        bloccato = write(os.path.join(src_root, 'b.md'), 'B')
+        os.chmod(bloccato, 0o000)
+        matcher = Matcher(BUILTIN_RULES, parse_rules(['include: *.md']))
+        dst_root = os.path.join(self.tmp, 'dst')
+        stats = {}
+        copied = reconcile_project(source_root=src_root, dest_root=dst_root,
+                                   matcher=matcher, layout='relative',
+                                   dest_path_fn=dest_path, stats=stats)
+        self.assertEqual(copied, 1, 'l\'altro file viene copiato')
+        self.assertEqual(stats['errati'], 1)
+        self.assertNotIn('dest_pendente', stats,
+                         'un file sorgente illeggibile non blocca la dest')
+        self.assertTrue(os.path.exists(os.path.join(dst_root, 'a.md')))
+
+    @unittest.skipIf(os.geteuid() == 0, 'root bypassa i permessi')
+    def test_eacces_di_scrivitura_mette_in_pending(self):
+        """EACCES scrivendo sulla dest (volume montato ma non scrivibile) →
+        la dest va in pending, non un retry per ogni file."""
+        src_root = os.path.join(self.tmp, 'src')
+        write(os.path.join(src_root, 'a.md'), 'A')
+        matcher = Matcher(BUILTIN_RULES, parse_rules(['include: *.md']))
+        dst_root = os.path.join(self.tmp, 'dst')
+        os.makedirs(dst_root)
+        os.chmod(dst_root, 0o555)                # sola lettura
+        self.addCleanup(os.chmod, dst_root, 0o755)
+        stats = {}
+        copied = reconcile_project(source_root=src_root, dest_root=dst_root,
+                                   matcher=matcher, layout='relative',
+                                   dest_path_fn=dest_path, stats=stats)
+        self.assertEqual(copied, 0)
+        self.assertTrue(stats.get('dest_pendente'),
+                        'EACCES in scrittura → la dest va in pending (§8.3)')
+
+    @unittest.skipIf(os.geteuid() == 0, 'root bypassa i permessi')
+    def test_copy_one_marca_la_fase(self):
+        src = write(os.path.join(self.tmp, 'src', 'a.md'), 'A')
+        bloccato = write(os.path.join(self.tmp, 'src', 'b.md'), 'B')
+        os.chmod(bloccato, 0o000)
+        with self.assertRaises(OSError) as ctx:
+            copy_one(bloccato, os.path.join(self.tmp, 'dst', 'b.md'))
+        self.assertEqual(getattr(ctx.exception, 'safekeep_phase', None),
+                         'source')
+        os.chmod(bloccato, 0o644)
+        dst_root = os.path.join(self.tmp, 'dst2')
+        os.makedirs(dst_root)
+        os.chmod(dst_root, 0o555)
+        self.addCleanup(os.chmod, dst_root, 0o755)
+        with self.assertRaises(OSError) as ctx:
+            copy_one(src, os.path.join(dst_root, 'a.md'))
+        self.assertEqual(getattr(ctx.exception, 'safekeep_phase', None), 'dest')
 
 
 if __name__ == '__main__':

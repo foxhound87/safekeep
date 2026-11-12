@@ -244,6 +244,29 @@ class ReconcilePendingTest(TmpTestCase):
                          'un errore su un file non blocca la dest intera')
         self.assertFalse(os.path.exists(os.path.join(dest, 'proj/a.md')))
 
+    def test_eperm_mette_la_dest_in_pending(self):
+        """macOS 26+: EPERM (errno 1) scrivendo sul volume → la dest non è
+        usabile (TCC «volumi rimovibili») → pending + backoff (§8.3)."""
+        daemon, dest = self.build()
+
+        def boom(*args, **kwargs):
+            raise OSError(errno.EPERM, 'Operation not permitted')
+
+        with mock.patch.object(copier, 'copy_one', new=boom):
+            daemon.reconcile(daemon.projects[0])
+        self.assertIn(dest, daemon.pending)
+
+    def test_dest_montata_ma_non_accessibile_in_pending(self):
+        """Volume montato ma ogni I/O rifiutato (TCC) → `not-accessible` →
+        la dest va in pending invece di riprovare ogni file."""
+        daemon, dest = self.build()
+        boom = OSError(errno.EACCES, 'Permission denied')
+        with mock.patch('safekeep.volumes.os.scandir', side_effect=boom):
+            daemon.reconcile(daemon.projects[0])
+        self.assertIn(dest, daemon.pending,
+                      'volume montato ma non scrivibile → pending + backoff')
+        self.assertFalse(os.path.exists(os.path.join(dest, 'proj/a.md')))
+
     def test_backoff_non_resetta_a_1s_dopo_un_nuovo_fallimento(self):
         # REGRESSIONE (CR-05): mount ok ma copia fallita di nuovo → se il
         # retry ripartisse da 1s il daemon looperebbe a 1Hz fino al prossimo errore

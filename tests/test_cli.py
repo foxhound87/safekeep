@@ -4,6 +4,7 @@ Ogni run è un subprocess con HOME finto: niente scritture nella home reale.
 """
 import argparse
 import contextlib
+import errno
 import getpass
 import io
 import json
@@ -97,6 +98,52 @@ class StatusTest(CliTestCase):
             code = cli.cmd_status(args)
         self.assertEqual(code, 0)
         self.assertIn(f'{self.dest} [unreachable] [nas]', buf.getvalue())
+
+    def test_status_dest_montata_ma_non_accessibile(self):
+        """Volume montato ma ogni I/O rifiutato (TCC «volumi rimovibili») →
+        `[not-accessible]`, non l'ingannevole `[ok]`."""
+        args = argparse.Namespace(config=self.cfg, v=False)
+        boom = OSError(errno.EACCES, 'Permission denied')
+        buf = io.StringIO()
+        with mock.patch('safekeep.volumes.os.scandir', side_effect=boom), \
+                contextlib.redirect_stdout(buf):
+            code = cli.cmd_status(args)
+        self.assertEqual(code, 0)
+        self.assertIn('[not-accessible]', buf.getvalue())
+
+
+class DoctorVolumiRimovibiliTest(CliTestCase):
+    """Il rimedio del permesso TCC (Transparency, Consent and Control) è
+    l'eseguibile che il daemon usa davvero, non il nome «safekeep»."""
+
+    def doctor_line(self, exe):
+        cfg = write(os.path.join(self.tmp, 'vol.cfg'),
+                    f'source: {self.src}\ndest: /Volumes/EXFIT\n')
+        args = argparse.Namespace(config=cfg, v=False, json=False)
+        buf = io.StringIO()
+        with mock.patch.object(cli, 'is_darwin', return_value=True), \
+                mock.patch.object(cli, 'recent_permission_errors',
+                                  return_value=(5, '2026-01-01 00:00:00')), \
+                mock.patch.object(cli, 'daemon_exe', return_value=exe), \
+                contextlib.redirect_stdout(buf):
+            cli.cmd_doctor(args)
+        return next((l for l in buf.getvalue().splitlines()
+                     if 'volumi rimovibili' in l), '')
+
+    def test_rimedio_nomina_l_interprete_del_daemon(self):
+        line = self.doctor_line('/opt/homebrew/bin/python3.14')
+        self.assertTrue(line, 'la riga sui volumi rimovibili manca')
+        self.assertIn('/opt/homebrew/bin/python3.14', line)
+        self.assertIn('Removable Volumes', line)
+        self.assertIn('Full Disk Access', line)
+        self.assertNotIn('aggiungi safekeep (launchd)', line,
+                         'TCC autorizza l\'eseguibile, non il nome del tool')
+
+    def test_rimedio_dice_come_trovare_l_interprete(self):
+        line = self.doctor_line(None)
+        self.assertTrue(line)
+        self.assertIn('ps -p <pid> -o comm=', line)
+        self.assertIn('Full Disk Access', line)
 
 
 class DoctorTest(CliTestCase):
