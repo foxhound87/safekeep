@@ -44,7 +44,12 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 2026-11-13: `ubuntu-latest` è passato a Ubuntu 26.04, per cui il
+    # manifest di actions/python-versions NON ha più build di Python 3.9
+    # (l'ultima è 3.9.25 → 22.04/24.04) → la gamba 3.9 (il floor di
+    # `requires-python`) falliva in setup-python, non nei test. Pin a 24.04,
+    # dove 3.9/3.12/3.14 ci sono tutti.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
