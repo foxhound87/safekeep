@@ -1,0 +1,49 @@
+# GitHub Release (2026-11-13): la release su PyPI la fa `publish.yml` (OIDC,
+# Trusted Publishing) — questa workflow crea la *GitHub Release* (la pagina
+# del tag), che va creata a parte.
+#
+# Perché una workflow e non `gh release create` a mano: il token OAuth del
+# maintainer ha su questo repo solo permessi di lettura (`pull`), quindi
+# l'API REST risponde 404 su POST /releases. Il `GITHUB_TOKEN` del job ha
+# invece `contents: write` → può creare la release.
+#
+# Corpo della release: `.github/release-notes/<tag>.md` se presente (note
+# curate), altrimenti `--generate-notes` (note auto dai commit del tag).
+#
+# Idempotente: se la release esiste già, il job lo dice e esce 0.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag da rilasciare (es. v0.11.4)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Crea la GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG già esistente — niente da fare"
+            exit 0
+          fi
+          notes=".github/release-notes/${TAG}.md"
+          if [ -f "$notes" ]; then
+            gh release create "$TAG" --title "safekeep ${TAG#v}" --notes-file "$notes"
+          else
+            gh release create "$TAG" --title "safekeep ${TAG#v}" --generate-notes
+          fi
+          gh release view "$TAG" --json url --jq .url
