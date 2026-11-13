@@ -166,6 +166,48 @@ def recent_copy_outcomes(path=None, now=None, window=86400):
 DAEMON_LABEL = 'com.safekeep.agent'          # label launchd dell'agent (§8.1)
 
 
+def daemon_program(label=DAEMON_LABEL):
+    """→ path del *programma* del job launchd `label` (ProgramArguments[0],
+    cioè il **responsible path** che TCC registra), o None se non
+    determinabile. Solo lettura, Darwin-only.
+
+    Diverso da `daemon_exe()`: questo è il path che launchd esegue, non
+    l'eseguibile effettivo del processo (`ps -o comm=`). Per TCC conta il
+    primo: il grant è path-keyed sul responsible path (§23).
+    """
+    if not is_darwin():
+        return None
+    try:
+        job = subprocess.run(
+            ['launchctl', 'print', f'gui/{os.getuid()}/{label}'],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    prog = re.search(r'^\s*program = (\S+)\s*$', job.stdout, re.M)
+    if job.returncode != 0 or prog is None:
+        return None
+    return prog.group(1)
+
+
+def multi_name_shim(path):
+    """True se `path` è un eseguibile di sistema **multi-nome** (hardlink
+    condiviso con altri binari, es. `/usr/bin/python3` = stesso inode di
+    `/usr/bin/git`): TCC registra il grant sul path *risolto* e con questi
+    shim il path risolto può essere un alias diverso → grant non combacia →
+    `EPERM` intermittente (§23).
+
+    Test: `st_nlink > 1` su un path in una dir di sistema. Un eseguibile
+    normale (Homebrew, venv, copia dedicata) ha `nlink == 1`.
+    """
+    if not path:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_nlink > 1
+
+
 def daemon_exe(label=DAEMON_LABEL):
     """→ eseguibile assoluto del processo launchd `label`, o None se non
     determinabile (SPEC.md §8.4/§14.4, 0.5.1: job non caricato, processo non

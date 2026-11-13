@@ -60,6 +60,64 @@ safekeep marks it `[not-accessible]`, puts it in `pending` with backoff and
 stays quiet until the permission is granted — the log no longer fills with
 hundreds of identical errors per day.
 
+## Intermittent `EPERM` on `/Volumes` — the multi-name shim (macOS)
+
+**Symptom:** `EPERM` (`[Errno 1] Operation not permitted`) on every copy to the
+external disk, but **intermittent** — the same job fails and then succeeds, the
+volume is mounted, writable and has free space, and the permissions look fine.
+
+**Root cause:** `/usr/bin/python3` is the **xcrun shim** — the *same inode* as
+`/usr/bin/git` and 76 other names in `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`
+(78 hardlinks). TCC (Transparency, Consent and Control) records the grant on
+the **responsible path**, i.e. the *resolved* path of the process. With a
+multi-name shim the kernel can resolve a different alias than the one the
+grant was issued for, and the grant then simply does not match:
+
+```text
+kernel: (Sandbox) System Policy: Python(57776) deny(1) file-write-create /Volumes/…
+tccd:   responsible={identifier=com.apple.sh, responsible_path=/bin/sh},
+        accessing={identifier=com.apple.python3, binary_path=…/Python}
+```
+
+Measured on one machine: processes with responsible path `/usr/bin/git` →
+42/42 `EPERM`; with `/usr/bin/python3` → 138/138 OK.
+
+**Fix:** make the agent launch an interpreter with a **unique path**
+(`st_nlink == 1`), e.g. Homebrew's:
+
+```bash
+# ~/Library/LaunchAgents/com.safekeep.agent.plist
+#   <key>ProgramArguments</key>
+#   <array>
+#     <string>/opt/homebrew/bin/python3</string>   ← not /usr/bin/python3
+#     <string>/Users/cla/safekeep/bin/safekeep.py</string>
+#     <string>run</string>
+#   </array>
+```
+
+Then reload the job (launchd does not re-read a plist on its own):
+
+```bash
+launchctl bootout gui/$(id -u)/com.safekeep.agent
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.safekeep.agent.plist
+```
+
+Since 0.11.4 `doctor` reports the situation:
+
+```text
+✗ programma del daemon: /usr/bin/python3 è uno shim multi-nome (stesso inode di
+  altri binari di sistema) — TCC registra il grant sul path risolto, che può
+  essere un alias diverso → EPERM intermittente sulle copie verso /Volumes →
+  usa un interprete con path unico (nlink == 1), es. /opt/homebrew/bin/python3
+  — warning non fatale
+```
+
+Caveat: the Homebrew path is version-pinned in the Cellar — a `brew upgrade`
+can change it and invalidate the grant, so re-check with `doctor` afterwards.
+The current official installer (`safekeep daemon install`) already avoids this
+class of incident: the main plist has no interpreter at all (`ProgramArguments`
+is the `safekeep` shim → `run`).
+
 ## Daemon runs from a deleted executable (Homebrew upgrade)
 
 **Root cause of the ~45h EPERM incident (03/10/2026), fixed in 0.5.1.** Until
@@ -102,15 +160,15 @@ safekeep daemon start     # bootstrap + start
 Since 0.7.0 the main plist has **no interpreter at all**: `ProgramArguments`
 is the `safekeep` shim → `run`, so this incident class no longer applies to
 the main agent (verify with `ps -p <pid> -o comm=`: it must print an
-executable **still on disk**). The `--trend` agent still renders
-`__PYTHON__` = `/usr/bin/python3` — the Apple-managed system shim no Homebrew
-upgrade can delete. launchd does **not** re-read a plist on its own: without
-`bootout`+`bootstrap` (or a reboot) the old rendering keeps running. If Full
-Disk Access was granted to a Homebrew python, grant it to `/usr/bin/python3`
-too — a one-time step, that path never changes again. A shell wrapper that
-re-resolves `python3` at every start was considered and rejected: it would
-only resolve at start, recreating the same incident on the next upgrade while
-the daemon keeps running (SPEC §8.4).
+executable **still on disk**). The `--trend` agent renders `__PYTHON__` =
+`/opt/homebrew/bin/python3` since 0.11.4 — a **unique** path (`st_nlink == 1`),
+not the multi-name `/usr/bin/python3` shim (see above). launchd does **not**
+re-read a plist on its own: without `bootout`+`bootstrap` (or a reboot) the old
+rendering keeps running. If Full Disk Access was granted to a Homebrew python,
+grant it to `/opt/homebrew/bin/python3` too — a one-time step, that path never
+changes again. A shell wrapper that re-resolves `python3` at every start was
+considered and rejected: it would only resolve at start, recreating the same
+incident on the next upgrade while the daemon keeps running (SPEC §8.4).
 
 ## Recent permission errors in the log
 

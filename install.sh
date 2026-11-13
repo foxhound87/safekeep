@@ -8,10 +8,21 @@
 # fuori scope del comando `safekeep daemon` (0.7.0).
 set -euo pipefail
 
-# Interprete renderizzato nel plist trend (SPEC.md §8.4): lo shim di sistema
-# /usr/bin/python3 non viene mai cancellato da un `brew upgrade` — un path
-# Cellar sparisce sotto il processo vivo e TCC non lo identifica più (EPERM).
-PY="${SAFEKEEP_PYTHON:-/usr/bin/python3}"
+# Interprete renderizzato nel plist trend (SPEC.md §8.4/§23): `/usr/bin/python3`
+# è lo shim xcrun **multi-nome** (stesso inode di /usr/bin/git, 78 hardlink) →
+# TCC registra il grant sul path *risolto* e un alias diverso non combacia →
+# EPERM intermittente (letture su ~/Documents negata: InterruptedError). Serve
+# un path **unico**: /opt/homebrew/bin/python3 è un symlink stabile (il
+# prefix bin/ non è version-pinned, il path nel plist non cambia con un
+# `brew upgrade`). Fallback: /usr/bin/python3 se Homebrew non c'è.
+PY="${SAFEKEEP_PYTHON:-}"
+if [ -z "$PY" ]; then
+    if [ -x /opt/homebrew/bin/python3 ]; then
+        PY=/opt/homebrew/bin/python3
+    else
+        PY=/usr/bin/python3
+    fi
+fi
 
 # ≥ 3.9 e realmente eseguibile: senza CLT (Command Line Tools) lo shim di
 # sistema non risponde → cade su python3 nel PATH (comportamento pre-0.5.1)

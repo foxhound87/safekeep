@@ -161,21 +161,23 @@ class AgentTemplateTest(unittest.TestCase):
         self.assertNotIn('/Users/', text, 'path assoluto nel template')
 
     def test_install_sh_interprete_stabile(self):
-        """SPEC.md §8.4 (0.5.1): il ramo `--trend` renderizza ancora
-        __PYTHON__ con default lo shim di sistema /usr/bin/python3, MAI un
-        path Cellar di Homebrew — un `brew upgrade` cancella il Cellar sotto
-        il processo vivo e TCC non lo identifica più. Il template principale
-        invece non ha più interprete (0.7.0: ExecStart = shim `safekeep`)."""
+        """SPEC.md §8.4 (0.5.1) + §23 (0.11.4): il ramo `--trend` renderizza
+        `__PYTHON__` con un path **unico** — `/opt/homebrew/bin/python3`
+        (nlink == 1: TCC registra il grant sul path risolto e uno shim
+        multi-nome come /usr/bin/python3 può risolversi in un alias diverso →
+        EPERM intermittente). MAI un path Cellar di Homebrew nel plist: il
+        prefix `bin/` non viene cancellato da un `brew upgrade`. Fallback:
+        /usr/bin/python3 se Homebrew non c'è. Il template principale invece
+        non ha più interprete (0.7.0: ExecStart = shim `safekeep`)."""
         with open(os.path.join(REPO, 'install.sh'), encoding='utf-8') as fh:
             text = fh.read()
-        self.assertIn('SAFEKEEP_PYTHON:-/usr/bin/python3', text)
-        self.assertNotIn('/opt/homebrew/bin/python3', text,
-                         'il default non deve più puntare al Cellar di brew')
+        self.assertIn('/opt/homebrew/bin/python3', text)
+        self.assertIn('/usr/bin/python3', text, 'fallback se Homebrew manca')
         self.assertIn('py_ok', text, "validazione ≥ 3.9 dell'interprete")
         with open(os.path.join(REPO, 'launchd', 'com.safekeep.trend.plist'),
                   encoding='utf-8') as fh:
             tpl = fh.read()
-        self.assertIn('default: /usr/bin/python3', tpl)
+        self.assertIn('default: /opt/homebrew/bin/python3', tpl)
         with open(os.path.join(REPO, 'safekeep', 'data',
                                'com.safekeep.agent.plist.tmpl'),
                   encoding='utf-8') as fh:
@@ -375,6 +377,64 @@ class DaemonExeTest(unittest.TestCase):
                                 subprocess.CompletedProcess([], 0, stdout='\n',
                                                             stderr='')])
         self.assertIsNone(exe)
+
+
+class DaemonProgramTest(unittest.TestCase):
+    """SPEC.md §23 (0.11.4): `program` del job launchd = responsible path
+    che TCC registra, e test dello shim multi-nome (`nlink > 1`)."""
+
+    LAUNCHCTL_OK = subprocess.CompletedProcess(
+        [], 0, stdout='\tprogram = /usr/bin/python3\n\tpid = 4242\n', stderr='')
+
+    def test_non_darwin_ritorna_none(self):
+        with mock.patch('sys.platform', 'linux'), \
+                mock.patch.object(plat.subprocess, 'run') as run:
+            self.assertIsNone(plat.daemon_program())
+            run.assert_not_called()
+
+    def test_program_letto_da_launchctl(self):
+        with mock.patch('sys.platform', 'darwin'), \
+                mock.patch.object(plat.subprocess, 'run',
+                                  return_value=self.LAUNCHCTL_OK):
+            self.assertEqual(plat.daemon_program(), '/usr/bin/python3')
+
+    def test_job_non_caricato_ritorna_none(self):
+        with mock.patch('sys.platform', 'darwin'), \
+                mock.patch.object(plat.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess(
+                                      [], 1, stdout='slot absent', stderr='')):
+            self.assertIsNone(plat.daemon_program())
+
+    def test_launchctl_assente_ritorna_none(self):
+        with mock.patch('sys.platform', 'darwin'), \
+                mock.patch.object(plat.subprocess, 'run',
+                                  side_effect=OSError('launchctl mancante')):
+            self.assertIsNone(plat.daemon_program())
+
+
+class MultiNameShimTest(unittest.TestCase):
+    """SPEC.md §23: uno shim multi-nome (`/usr/bin/python3` = stesso inode di
+    `/usr/bin/git`) ha `st_nlink > 1` → TCC può registrare un alias diverso
+    → EPERM intermittente. Un path unico ha `nlink == 1`."""
+
+    def test_path_inesistente_è_falso(self):
+        self.assertFalse(plat.multi_name_shim('/niente/qui/python3'))
+        self.assertFalse(plat.multi_name_shim(None))
+        self.assertFalse(plat.multi_name_shim(''))
+
+    def test_file_normale_nlink_uno(self):
+        with tempfile.NamedTemporaryFile() as fh:
+            self.assertFalse(plat.multi_name_shim(fh.name))
+
+    def test_hardlink_multi_nome_è_vero(self):
+        with tempfile.NamedTemporaryFile() as fh:
+            link = fh.name + '.alias'
+            try:
+                os.link(fh.name, link)
+            except OSError:
+                self.skipTest('filesystem senza hardlink')
+            self.assertTrue(plat.multi_name_shim(fh.name))
+            self.assertTrue(plat.multi_name_shim(link))
 
 
 class LingerTest(unittest.TestCase):

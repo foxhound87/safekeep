@@ -8,17 +8,19 @@
   bin/safekeep-trend.sh, che appende una riga a
   ~/.local/state/safekeep/permission-trend.csv.
 
-  Placeholders resi da `install.sh --trend` con lo STESSO meccanismo del
+  Placeholders resi da `install.sh` (opzione trend) con lo STESSO meccanismo del
   plist principale (launchd/com.safekeep.agent.plist):
 
     __REPO__    radice del repo safekeep (la cartella che contiene bin/ e launchd/)
-    __PYTHON__  interprete Python ≥ 3.9 (default: /usr/bin/python3 — shim di
-                sistema stabile, SPEC.md §8.4) → env SAFEKEEP_PYTHON per lo script
+    __PYTHON__  interprete Python ≥ 3.9 (default: /opt/homebrew/bin/python3 —
+                path unico, nlink == 1; /usr/bin/python3 è lo shim xcrun
+                multi-nome → TCC nega in modo intermittente, SPEC.md §23)
+                → env SAFEKEEP_PYTHON per lo script
     __SCRIPT__  bin/safekeep-trend.sh (bash)
     __HOME__    $HOME dell'utente — launchd NON espande `~` negli StandardOut/ErrorPath
 
-  Installazione:  ./install.sh --trend   (render + launchctl bootstrap)
-  Disinstallazione: ./uninstall.sh --trend
+  Installazione:  ./install.sh (opzione trend)   (render + launchctl bootstrap)
+  Disinstallazione: ./uninstall.sh (opzione trend)
   Non tocca, non ricarica com.safekeep.agent.
 
   Validazione: plutil -lint <file>

@@ -1,6 +1,6 @@
 # SPEC.md — safekeep
 
-**Versione:** 0.11.3 (semver — Semantic Versioning, https://semver.org)
+**Versione:** 0.11.4 (semver — Semantic Versioning, https://semver.org)
 **Stato:** pre-implementazione
 **Piattaforma target:** macOS (FSEvents, launchd) e Linux (inotify, systemd) — §14
 
@@ -687,6 +687,17 @@ certamente CLT (verificato in locale: `xcode-select -p` → Xcode.app; `/usr/bin
 3.9.6; la suite è verde anche girata con quell'interprete). **Nota 0.7.0**: questo
 paragrafo riguarda ora **solo l'agent trend** (`__PYTHON__`, §9.2) — il plist
 principale non nomina più interprete (§8.1).
+
+**0.11.4 — lo shim di sistema è anche multi-nome (§23).** La scelta 0.5.1 risolveva
+l'incidente "exe cancellato", ma `/usr/bin/python3` è lo **shim xcrun**: stesso inode
+di `/usr/bin/git` e di altri 76 nomi (78 hardlink). TCC registra il grant sul path
+*risolto* → un alias diverso non combacia → `EPERM` **intermittente** sulle copie verso
+`/Volumes`. Il rimedio non è un path *stabile* ma un path **unico** (`st_nlink == 1`):
+`/opt/homebrew/bin/python3` (symlink nel prefix `bin/`, che un `brew upgrade` non
+cambia) o una copia dedicata. Per l'agent trend (`__PYTHON__`) il default passa da
+`/usr/bin/python3` a `/opt/homebrew/bin/python3` (fallback: `/usr/bin/python3` se
+Homebrew non c'è). L'agent principale non è toccato: dal 0.7.0 il suo plist non nomina
+interprete.
 
 **Plist live già installati:** launchd **non rilegge** il file fino a `bootout`+`bootstrap`
 (o reboot): i plist renderizzati col vecchio default restano fragili finché non vengono
@@ -1534,6 +1545,15 @@ restano con le vecchie. Per 0.3.0 quindi, una tantum:
   daemon usa davvero (TCC autorizza l'eseguibile, non il nome «safekeep»),
   con il permesso «Interagisci con i volumi rimovibili» / *Removable Volumes*
   — separato da *Full Disk Access*.
+- **0.11.4** — lo shim multi-nome di `/usr/bin/python3` (§23): la causa vera
+  dell'`EPERM` intermittente sulle copie verso `/Volumes` non era un grant
+  mancante ma il **responsible path** che TCC registra — `/usr/bin/python3` è
+  lo shim xcrun, stesso inode di `/usr/bin/git` (78 hardlink), e TCC concede
+  il grant sul path *risolto*: un alias diverso → `EPERM` a intermittenza.
+  Rimedio: lanciare un interprete con **path unico** (`st_nlink == 1`, es.
+  Homebrew). `doctor` ha un nuovo check **non fatale** che legge il
+  `program =` del job launchd (`platform.daemon_program()`) e segnala gli
+  shim multi-nome (`platform.multi_name_shim()` → `st_nlink > 1`).
 - **1.0.0** — rimozione di `install.sh`/`uninstall.sh` (wrapper deprecati da 0.7.0).
   La dismissione della CI GitLab (`.gitlab-ci.yml`) è **già avvenuta** su `main`
   durante 0.9.x, a seguito dell'eliminazione del repo GitLab: il publish a PyPI
@@ -2148,3 +2168,48 @@ dire `[ok]` per una dest inutilizzabile.
 - `EPERM` in **lettura** (sorgente su un volume protetto) è trattato come
   "dest non usabile": su macOS è il caso raro ma con lo stesso sintomo, e il
   costo (retry con backoff invece di copiare) è preferibile a un log-loop.
+
+## 23. Lo shim multi-nome di `/usr/bin/python3` (0.11.4)
+
+**Problema.** Su macOS il daemon lanciato da launchd scrive su `/Volumes/…` e
+riceve `EPERM` (errno 1) in modo **intermittente**: la stessa esecuzione
+fallisce e poi riesce, e il disco è montato, scrivibile e con spazio. Il
+permesso TCC (Transparency, Consent and Control) non c'entra: il grant
+esiste.
+
+**Causa.** `/usr/bin/python3` è lo **shim xcrun** multi-nome: lo stesso inode
+di `/usr/bin/git` (e di altri 76 nomi in `/usr/bin`, `/bin`, `/usr/sbin`,
+`/sbin` — 78 hardlink). TCC registra il grant sul **responsible path**, cioè
+il path *risolto* del processo; con questi shim il path risolto può essere un
+alias diverso da quello per cui è stato concesso il grant:
+
+```
+tccd: responsible={TCCDProcess: identifier=com.apple.sh, responsible_path=/bin/sh},
+      accessing={TCCDProcess: identifier=com.apple.python3, binary_path=…/Python}
+```
+
+Il grant è *path-keyed*: `kTCCServiceSystemPolicyAllFiles|/usr/bin/python3`.
+Quando il kernel risolve `/usr/bin/git`, il grant non combacia → `Denied
+(Service Policy)` → `EPERM` su ogni scrittura. Misurato: processi con
+responsible path `/usr/bin/git` → 42/42 `EPERM`; con `/usr/bin/python3` →
+138/138 OK.
+
+**Rimedio.**
+
+1. Il plist dell'agent deve lanciare un interprete con **path unico**
+   (`st_nlink == 1`), non uno shim multi-nome: Homebrew
+   (`/opt/homebrew/bin/python3`) o una copia dedicata. Il binario Homebrew
+   non è *platform binary*, quindi TCC non lo nega automaticamente, e non
+   ha alias: scritture stabili (~100 prove da launchd, 0 `EPERM`).
+2. `doctor` segnala la situazione: `platform.daemon_program()` legge il
+   `program =` del job launchd (il responsible path che TCC registra) e
+   `platform.multi_name_shim()` verifica `st_nlink > 1` → warning non fatale
+   con il rimedio.
+
+**Limiti dichiarati.**
+
+- Il path Homebrew è *version-pinned* nella Cellar: un `brew upgrade` può
+  cambiare il path e invalidare il grant → da riverificare con `doctor`.
+- Il grant su un path nuovo (copia dedicata) richiede un'intervento manuale
+  in «Privacy e sicurezza»: TCC non può chiedere conferma in un job launchd.
+- Il problema è **macOS-only**: su Linux non esiste TCC.

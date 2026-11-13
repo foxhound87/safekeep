@@ -29,6 +29,7 @@ from safekeep.platform import (
     INOTIFY_MIN_WATCHES,
     LOG_PATH,
     daemon_exe,
+    daemon_program,
     fswatch_monitor,
     inotify_limit,
     install_hint,
@@ -37,6 +38,7 @@ from safekeep.platform import (
     is_network_fs,
     is_wsl,
     linger_enabled,
+    multi_name_shim,
     recent_copy_outcomes,
     recent_permission_errors,
     systemd_user_available,
@@ -718,6 +720,13 @@ def cmd_doctor(args):
             except PermissionError:
                 out(False, 'TCC: PermissionError su ~/Documents — serve FDA '
                            '(Full Disk Access) per i progetti in cartelle protette')
+            except OSError as e:
+                # TCC può negare con altri errno (InterruptedError/EINTR): senza
+                # questo catch `doctor` muore e `--json` non produce nulla
+                # (il trend agent non scrive più righe). Non fatale.
+                out(False, f'TCC: {type(e).__name__} su ~/Documents ({e}) — '
+                           'serve FDA (Full Disk Access) per i progetti in '
+                           'cartelle protette — warning non fatale')
             else:
                 out(True, 'TCC: ~/Documents leggibile')
 
@@ -795,6 +804,29 @@ def cmd_doctor(args):
                        'gira su un eseguibile cancellato (upgrade sotto un daemon '
                        'vivo, SPEC §8.4) → launchctl kickstart -k '
                        'gui/$(id -u)/com.safekeep.agent — warning non fatale')
+
+    # ProgramArguments[0] del daemon = **responsible path** che TCC registra:
+    # se è uno shim multi-nome (`/usr/bin/python3` = stesso inode di
+    # `/usr/bin/git`, 78 hardlink in /usr,/bin,/sbin) il path risolto può
+    # essere un alias diverso → il grant non combacia → EPERM intermittente
+    # sulle copie verso /Volumes (SPEC.md §23). Rimedio: un path unico
+    # (nlink == 1), es. Homebrew. Non fatale.
+    if is_darwin():
+        prog = daemon_program()
+        if prog is None:
+            out(True, 'programma del daemon: non determinabile — check saltato')
+        elif multi_name_shim(prog):
+            out(False, f'programma del daemon: {prog} è uno shim multi-nome '
+                       '(stesso inode di altri binari di sistema) — TCC '
+                       '(Transparency, Consent and Control) registra il grant '
+                       'sul path risolto, che può essere un alias diverso → '
+                       'EPERM intermittente sulle copie verso /Volumes → usa un '
+                       'interprete con path unico (nlink == 1), es. '
+                       '/opt/homebrew/bin/python3, nel plist '
+                       '~/Library/LaunchAgents/com.safekeep.agent.plist — '
+                       'warning non fatale')
+        else:
+            out(True, f'programma del daemon: {prog} (path unico, nlink == 1)')
 
     code = 1 if fatal else 0
     if args.json:

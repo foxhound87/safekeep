@@ -111,7 +111,11 @@ Checks at least: `fswatch` presence, version and the monitor for the platform
 (`fsevents_monitor` on macOS, `inotify_monitor` on Linux), config and `.sync`
 syntax, that no destination is a subdirectory of a source (copy loop), python
 version, TCC + launchd plist lint and the live daemon's executable still on
-disk (macOS, 0.5.1), inotify watch limit + systemd user
+disk (macOS, 0.5.1), whether the daemon's `ProgramArguments[0]` is a
+**multi-name** system shim (macOS, 0.11.4 — the cause of intermittent `EPERM`
+on `/Volumes`, see
+[Troubleshooting](/troubleshooting#intermittent-eperm-on-volumes--the-multi-name-shim-macos)),
+inotify watch limit + systemd user
 unit (Linux), and leftover `.safekeep.tmp.*` files. Since 0.11.2 it also
 counts successful vs failed copies in the log's last 24 hours and warns
 (non-fatal) when there were failures but **zero** successes — see
